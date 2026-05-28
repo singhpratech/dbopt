@@ -19,22 +19,10 @@ import * as backend from "./api/backend";
 import * as ailog from "./store/ailog";
 import * as runlog from "./store/runlog";
 
-const SAMPLE_SQL = `-- sqlopt :: paste your T-SQL here. The analyzer runs as you type.
--- This sample exercises ~10 different rules:
-CREATE PROCEDURE GetCustomers
-AS
-BEGIN
-    SELECT *
-    FROM Customers WITH (NOLOCK)
-    WHERE UPPER(LastName) = 'SMITH'
-      AND Email LIKE '%@example.com'
-      AND dbo.fnFullName(FirstName, LastName) = N'John Smith'
-      OR  Status IN (1,2,3,4);
-
-    SELECT TOP 10 OrderId FROM Orders;
-    UPDATE Customers SET LastSeen = GETDATE();
-END
-`;
+// Signature of the old canned demo SQL. We no longer seed it (the analyze
+// screen starts empty, on real input) and we purge it from storage on load so
+// returning users don't keep seeing placeholder content.
+const LEGACY_SAMPLE_PREFIX = "-- sqlopt :: paste your T-SQL here";
 
 type Workspace = P.UiPrefs["workspace"];
 
@@ -58,7 +46,10 @@ export function App() {
   const [ui, setUi] = useState<P.UiPrefs>(() => ({
     ...P.defaultUi,
     ...P.load<Partial<P.UiPrefs>>("ui", {}),
-    draft_sql: P.load<string>("draft_sql", SAMPLE_SQL),
+    draft_sql: (() => {
+      const s = P.load<string>("draft_sql", "");
+      return s.trimStart().startsWith(LEGACY_SAMPLE_PREFIX) ? "" : s;
+    })(),
     draft_plan: P.load<string>("draft_plan", ""),
   }));
   // Saved server profiles + which one is active. Seeded from the legacy
@@ -268,6 +259,19 @@ export function App() {
         </div>
 
         <div className="topbar-controls">
+          <button
+            className="theme-toggle"
+            title={ui.theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-label="Toggle color theme"
+            onClick={() => {
+              const next = ui.theme === "dark" ? "light" : "dark";
+              P.applyTheme(next);
+              setUi({ ...ui, theme: next });
+            }}
+          >
+            <span className="glyph">{ui.theme === "dark" ? "☀" : "☾"}</span>
+            <span className="lbl">{ui.theme === "dark" ? "LIGHT" : "DARK"}</span>
+          </button>
           <label className="ctl">
             <span style={{ color: "var(--text-dim)" }}>TARGET</span>
             <select value={ui.server_version} onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}>
@@ -332,6 +336,7 @@ export function App() {
                     onChange={(v) => setUi({ ...ui, draft_sql: v })}
                     handleRef={(h) => (editorHandle.current = h)}
                     language="sql"
+                    theme={ui.theme}
                   />
                 </div>
               </div>

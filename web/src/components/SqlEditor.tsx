@@ -10,11 +10,13 @@ export function SqlEditor({
   onChange,
   handleRef,
   language = "sql",
+  theme = "dark",
 }: {
   value: string;
   onChange: (v: string) => void;
   handleRef?: (h: SqlEditorHandle) => void;
   language?: "sql" | "xml" | "json";
+  theme?: "dark" | "light";
 }) {
   const editorRef = useRef<any>(null);
   const onMount: OnMount = (editor) => {
@@ -33,7 +35,7 @@ export function SqlEditor({
       language={language}
       onChange={(v) => onChange(v ?? "")}
       onMount={onMount}
-      theme="vs-dark"
+      theme={theme === "light" ? "vs" : "vs-dark"}
       options={{
         fontFamily: "'JetBrains Mono','SF Mono',monospace",
         fontSize: 13,

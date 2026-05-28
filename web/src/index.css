@@ -50,6 +50,59 @@
   --rail:     52px;
 }
 
+/* ============================================================
+   Light theme — "Observatory, daylight". Cool technical paper,
+   deeper chartreuse signal so it reads on white. Every text tier
+   below is >= AA contrast on its surface so NOTHING is invisible.
+   Activated by [data-theme="light"] on <html>; dark is the default
+   and is left completely untouched.
+   ============================================================ */
+:root[data-theme="light"] {
+  --bg-void:        #dde3ec;
+  --bg-base:        #eef1f6;
+  --bg-panel:       #ffffff;
+  --bg-elev:        #f4f6fa;
+  --bg-elev-2:      #e6ebf3;
+  --bg-overlay:     rgba(238, 241, 246, 0.80);
+
+  --line:           #d2d9e4;
+  --line-strong:    #aeb8c8;
+  --line-soft:      #e3e8f0;
+
+  --text:           #283242;   /* body            ~11:1 on white */
+  --text-strong:    #0c121b;   /* headings        ~17:1 */
+  --text-muted:     #4d586b;   /* secondary       ~6.4:1 */
+  --text-dim:       #69748a;   /* labels/tertiary ~4.4:1 — still clearly visible */
+
+  --signal:         #587600;   /* deep chartreuse ~4.7:1 as text on white */
+  --signal-glow:    rgba(88, 118, 0, 0.16);
+  --signal-dim:     rgba(88, 118, 0, 0.72);
+  --signal-faint:   rgba(88, 118, 0, 0.10);
+  --ok:             #0c8f60;
+  --info:           #1f5fc4;
+
+  --crit:           #cc1c2b;
+  --crit-glow:      rgba(204, 28, 43, 0.12);
+  --err:            #b8530a;
+  --warn:           #8a6300;
+  --info-sev:       #1f5fc4;
+}
+
+/* Light-mode shell texture: faint dark grain + soft brand washes,
+   tuned so the radial glows don't blow out a white background. */
+:root[data-theme="light"] body {
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(20, 28, 45, 0.018) 0px,
+      rgba(20, 28, 45, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(1400px 700px at 70% -20%, rgba(88, 118, 0, 0.05), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(31, 95, 196, 0.045), transparent 60%);
+}
+
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 
@@ -80,13 +133,20 @@ body {
    ============================================================ */
 .app {
   display: grid;
-  grid-template-rows: var(--topbar) 1fr var(--statusbar);
+  /* minmax(0, 1fr) (NOT bare 1fr) lets the middle row shrink below its
+     content's min-height. With a bare 1fr the grid grows past the viewport
+     when content is tall, and `body { overflow: hidden }` then CLIPS the
+     status bar off the bottom — the "everything blows out at 100% zoom" bug.
+     100dvh keeps the shell exactly one viewport tall on every browser. */
+  grid-template-rows: var(--topbar) minmax(0, 1fr) var(--statusbar);
   grid-template-columns: var(--rail) 1fr;
   grid-template-areas:
     "top top"
     "rail main"
     "status status";
-  height: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   width: 100%;
 }
 
@@ -205,6 +265,21 @@ body {
   background: transparent; color: var(--text); border: 0;
   font: 11px var(--f-tech); letter-spacing: 0.08em; cursor: pointer;
 }
+.topbar-controls .theme-toggle {
+  padding: 0 14px;
+  height: 100%;
+  display: flex; align-items: center; gap: 7px;
+  font: 11px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.topbar-controls .theme-toggle:hover { color: var(--signal); background: var(--signal-faint); }
+.topbar-controls .theme-toggle .glyph { font-size: 13px; line-height: 1; color: var(--signal); }
+.topbar-controls .theme-toggle .lbl { color: inherit; }
 
 /* ── Left rail ────────────────────────────────────── */
 .rail {
@@ -947,10 +1022,15 @@ body {
 /* ============================================================
    Tooltips, scrollbars, misc
    ============================================================ */
-::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--line-strong); }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+/* Firefox ignores ::-webkit-scrollbar entirely — without this the scroll
+   indicator is a hidden overlay and content looks "cut off". */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+/* Breathing room so the last row never sits flush against the status bar. */
+.pane-body { padding-bottom: 22px; }
 
 select { background-color: var(--bg-elev); color: var(--text); }
 input[type=file] { color: var(--text-muted); }
