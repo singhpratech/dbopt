@@ -257,8 +257,23 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
               {report.top_queries.map((q, i) => (
                 <tr key={i}>
                   <td style={{ ...mono, width: 64 }}>{q.query_id}</td>
-                  <td style={{ ...mono, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text)" }}>
-                    {q.query_sql_text ?? "—"}
+                  <td style={{ ...mono, color: "var(--text)" }}>
+                    {/* Clamp to 2 lines so one giant query can't balloon the table;
+                        whitespace is collapsed for a clean preview and the full
+                        text shows on hover (title). */}
+                    <div
+                      title={q.query_sql_text ?? undefined}
+                      style={{
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                        wordBreak: "break-word",
+                        cursor: q.query_sql_text ? "help" : "default",
+                      }}
+                    >
+                      {q.query_sql_text ? q.query_sql_text.replace(/\s+/g, " ").trim() : "—"}
+                    </div>
                   </td>
                   <td style={{ ...numCell, width: 90 }}>{fmtMs(q.total_duration_ms)}</td>
                   <td style={{ ...numCell, width: 90 }}>{q.executions.toLocaleString()}</td>
