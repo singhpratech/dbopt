@@ -190,7 +190,7 @@ export const defaultProviders: Record<ProviderKey, ProviderConfig> = {
 };
 
 export interface UiPrefs {
-  workspace: "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "settings";
+  workspace: "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
   server_version: 2014 | 2016 | 2017 | 2019 | 2022 | 2025;
   draft_sql: string;
   draft_plan: string;

@@ -965,3 +965,120 @@ kbd {
   background: var(--bg-elev);
   color: var(--text-muted);
 }
+
+/* ============================================================
+   Pills · status badges (severity + advisor priority)
+   Used by AnalysisHistory, ConnectionPanel and AdvisorPanel.
+   ============================================================ */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  margin-right: 4px;
+  border-radius: 999px;
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-strong);
+  color: var(--text-muted);
+  background: var(--bg-elev);
+  white-space: nowrap;
+}
+.pill.crit { color: var(--crit); border-color: rgba(255, 58, 74, 0.4);  background: var(--crit-glow); }
+.pill.err  { color: var(--err);  border-color: rgba(255, 140, 66, 0.4); background: rgba(255, 140, 66, 0.1); }
+.pill.warn { color: var(--warn); border-color: rgba(255, 209, 102, 0.4); background: rgba(255, 209, 102, 0.1); }
+.pill.info { color: var(--info-sev); border-color: rgba(127, 180, 255, 0.4); background: rgba(127, 180, 255, 0.1); }
+.pill.dim  { color: var(--text-muted); border-color: var(--line); background: var(--bg-elev); }
+
+/* ============================================================
+   Advisor workspace
+   ============================================================ */
+.advisor { max-width: 980px; }
+
+.advisor-spinner {
+  width: 13px; height: 13px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--signal);
+  border-radius: 50%;
+  display: inline-block;
+  align-self: center;
+  margin-left: 10px;
+  animation: advisor-spin 0.7s linear infinite;
+}
+@keyframes advisor-spin { to { transform: rotate(360deg); } }
+
+.advisor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.advisor-card {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-panel);
+  padding: 14px 16px;
+}
+.advisor-card:hover { border-left-color: var(--signal); }
+
+.advisor-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.advisor-kind {
+  font: 10px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+.advisor-title {
+  font: 13px var(--f-sans);
+  font-weight: 500;
+  color: var(--text-strong);
+}
+.advisor-score {
+  margin-left: auto;
+  font: 11px var(--f-mono);
+  color: var(--text-muted);
+}
+.advisor-object {
+  margin-top: 8px;
+  font: 12px var(--f-mono);
+}
+.advisor-object code { color: var(--text); }
+.advisor-rationale {
+  margin-top: 6px;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--text-muted);
+}
+
+.ddl-wrap { position: relative; margin-top: 12px; }
+.ddl {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-void);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 12px/1.55 var(--f-mono);
+  white-space: pre;
+  overflow-x: auto;
+  tab-size: 4;
+}
+.ddl-copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 1;
+  padding: 4px 12px;
+  font: 10px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--bg-elev);
+  border: 1px solid var(--line-strong);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ddl-copy:hover { border-color: var(--signal); color: var(--signal); }

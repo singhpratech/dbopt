@@ -13,6 +13,7 @@ import { LlmChat } from "./components/LlmChat";
 import { AiLogs } from "./components/AiLogs";
 import { SentinelView } from "./components/SentinelView";
 import { AnalysisHistory } from "./components/AnalysisHistory";
+import { AdvisorPanel } from "./components/AdvisorPanel";
 import * as P from "./store/persist";
 import * as backend from "./api/backend";
 import * as ailog from "./store/ailog";
@@ -48,6 +49,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string }[] = [
   { key: "logs",       glyph: "⎯", label: "LOGS" },
   { key: "sentinel",   glyph: "◉", label: "WATCH" },
   { key: "history",    glyph: "⌖", label: "RUNS" },
+  { key: "advisor",    glyph: "✦", label: "ADVISE" },
   { key: "settings",   glyph: "⚙", label: "PROV" },
 ];
 
@@ -419,6 +421,12 @@ export function App() {
         {ui.workspace === "history" && (
           <Workspace title="Analysis runs" subtitle="durable log of every analyzer invocation · survives restarts">
             <AnalysisHistory server={conn.server || null} database={conn.database || null} />
+          </Workspace>
+        )}
+
+        {ui.workspace === "advisor" && (
+          <Workspace title="Advisor" subtitle="ranked, prescriptive fixes with copy-paste T-SQL">
+            <AdvisorPanel conn={conn} />
           </Workspace>
         )}
 

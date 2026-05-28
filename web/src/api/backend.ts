@@ -75,6 +75,42 @@ export async function listDatabases(info: ConnectionInfo): Promise<string[]> {
   return body.databases ?? [];
 }
 
+export type RecommendationKind =
+  | "create_index"
+  | "drop_index"
+  | "merge_index"
+  | "columnstore_candidate";
+
+export type RecommendationPriority = "high" | "medium" | "low";
+
+export interface Recommendation {
+  kind: RecommendationKind;
+  priority: RecommendationPriority;
+  title: string;
+  object: string;        // schema.table[.index]
+  rationale: string;
+  ddl: string;           // exact T-SQL, multi-line
+  impact_score: number;
+}
+
+/**
+ * Server-level prescriptive advisor. Mirrors pullDmv/listDatabases payload +
+ * error handling. The backend ranks recommendations high→low before returning.
+ */
+export async function advise(info: ConnectionInfo): Promise<{ recommendations: Recommendation[] }> {
+  const r = await fetch(`${BASE}/advise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(info),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `advise failed (${r.status})`);
+  }
+  const body = (await r.json()) as { recommendations?: Recommendation[] };
+  return { recommendations: body.recommendations ?? [] };
+}
+
 export async function pullDmv(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/dmv`, {
     method: "POST",
