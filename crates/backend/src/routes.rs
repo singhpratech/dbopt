@@ -16,6 +16,7 @@ pub fn router() -> Router {
         .route("/health", get(health))
         .route("/connect", post(connect))
         .route("/databases", post(databases))
+        .route("/advise", post(advise))
         .route("/dmv", post(dmv))
         .route("/explain", post(explain))
         .route("/llm/models", get(llm_models))
@@ -66,6 +67,28 @@ async fn dmv(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 async fn databases(Json(req): Json<ConnectReq>) -> impl IntoResponse {
     match sqlserver::list_databases(&req).await {
         Ok(names) => (StatusCode::OK, Json(serde_json::json!({ "databases": names }))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// Connect, pull the live DMV bundle, and return ranked prescriptive
+/// recommendations (the advisor) plus the bundle's findings/charts in one call.
+async fn advise(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+    match sqlserver::pull_dmv_bundle(&req).await {
+        Ok(bundle) => {
+            let recommendations = analyzer_core::dmv::advise(&bundle);
+            let advice = analyzer_core::dmv::analyze(&bundle);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "recommendations": recommendations,
+                    "findings": advice.findings,
+                    "index_heatmap": advice.index_heatmap,
+                    "size_treemap": advice.size_treemap,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }

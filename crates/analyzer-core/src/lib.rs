@@ -68,6 +68,8 @@ pub fn analyze(input: &AnalyzeInput) -> AnalysisReport {
         report.charts.index_heatmap = advice.index_heatmap;
         report.charts.size_treemap = advice.size_treemap;
         report.findings.extend(advice.findings);
+        // Prescriptive, ranked remediation with copy-paste T-SQL.
+        report.recommendations = dmv::advise(bundle);
     }
 
     report.findings.sort_by_key(|f| (f.severity.rank(), f.location.as_ref().map(|l| l.start).unwrap_or(0)));

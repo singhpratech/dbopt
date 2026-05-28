@@ -140,3 +140,55 @@ fn recompile_defeats_psp_gated_off_on_2019() {
         "plan.recompile_defeats_psp must be version-gated off on 2019, got {fired:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RECOMMENDATION ENGINE (advisor)
+// ---------------------------------------------------------------------------
+
+/// The advisor turns DMV data into ranked, prescriptive recommendations with
+/// real T-SQL. This exercises all four kinds from one synthetic bundle.
+#[test]
+fn advisor_emits_ranked_recommendations_with_ddl() {
+    use crate::dmv::{
+        advise, DmvBundle, IndexMeta, IndexUsage, MissingIndex, PartitionStats, RecKind,
+    };
+
+    let bundle = DmvBundle {
+        index_usage: vec![
+            // write-only → DropIndex
+            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), user_seeks: 0, user_scans: 0, user_lookups: 0, user_updates: 250_000 },
+            // big scan-heavy low-churn → ColumnstoreCandidate (on Facts)
+            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Facts".into(), index_name: "IX_facts".into(), user_seeks: 10, user_scans: 50_000, user_lookups: 0, user_updates: 100 },
+        ],
+        indexes: vec![
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), is_unique: false, is_primary_key: false, key_columns: vec!["Status".into()], included_columns: vec![] },
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupA".into(), is_unique: false, is_primary_key: false, key_columns: vec!["CustomerId".into()], included_columns: vec![] },
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupB".into(), is_unique: false, is_primary_key: false, key_columns: vec!["CustomerId".into()], included_columns: vec![] },
+        ],
+        missing_indexes: vec![
+            MissingIndex { schema_name: "dbo".into(), table_name: "Orders".into(), equality_columns: vec!["CustomerId".into()], inequality_columns: vec!["OrderDate".into()], included_columns: vec!["Total".into()], avg_user_impact: 92.5, user_seeks: 4200, avg_total_user_cost: 18.3 },
+        ],
+        partition_stats: vec![
+            PartitionStats { schema_name: "dbo".into(), table_name: "Facts".into(), index_name: None, row_count: 50_000_000, reserved_kb: 2_200_000, used_kb: 2_000_000, data_kb: 1_900_000 },
+        ],
+    };
+
+    let recs = advise(&bundle);
+    let kinds: std::collections::HashSet<RecKind> = recs.iter().map(|r| r.kind).collect();
+    assert!(kinds.contains(&RecKind::CreateIndex), "expected a CreateIndex rec");
+    assert!(kinds.contains(&RecKind::DropIndex), "expected a DropIndex rec");
+    assert!(kinds.contains(&RecKind::MergeIndex), "expected a MergeIndex rec");
+    assert!(kinds.contains(&RecKind::ColumnstoreCandidate), "expected a ColumnstoreCandidate rec");
+
+    // The CreateIndex rec must carry runnable DDL.
+    let ci = recs.iter().find(|r| r.kind == RecKind::CreateIndex).unwrap();
+    assert!(ci.ddl.contains("CREATE NONCLUSTERED INDEX"), "DDL: {}", ci.ddl);
+    assert!(ci.ddl.contains("[CustomerId]") && ci.ddl.contains("[OrderDate]"), "DDL keys: {}", ci.ddl);
+    assert!(ci.ddl.contains("INCLUDE ([Total])"), "DDL include: {}", ci.ddl);
+
+    // Ranked: priority buckets are ordered high → low.
+    let rank = |p: &str| match p { "high" => 0, "medium" => 1, _ => 2 };
+    for w in recs.windows(2) {
+        assert!(rank(&w[0].priority) <= rank(&w[1].priority), "recs must be priority-ordered");
+    }
+}

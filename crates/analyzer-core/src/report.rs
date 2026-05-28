@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct AnalysisReport {
     pub findings: Vec<Finding>,
     pub charts: ChartData,
+    /// Ranked, prescriptive remediation with copy-paste T-SQL (from the DMV
+    /// recommendation engine). Empty unless a DMV bundle was provided.
+    #[serde(default)]
+    pub recommendations: Vec<crate::dmv::Recommendation>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

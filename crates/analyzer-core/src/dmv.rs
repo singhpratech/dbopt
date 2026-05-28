@@ -168,3 +168,199 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
 
 #[allow(dead_code)]
 pub fn empty_charts() -> ChartData { ChartData::default() }
+
+// ===========================================================================
+// Recommendation engine — turns the collected DMV data into ranked,
+// copy-paste-ready remediation with the exact T-SQL. This is the prescriptive
+// layer: not "here's a metric" but "run this."
+// ===========================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecKind {
+    CreateIndex,
+    DropIndex,
+    MergeIndex,
+    ColumnstoreCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Recommendation {
+    pub kind: RecKind,
+    /// "high" | "medium" | "low" — drives sort + UI emphasis.
+    pub priority: String,
+    pub title: String,
+    /// schema.table or schema.table.index
+    pub object: String,
+    pub rationale: String,
+    /// Exact T-SQL to run (already bracket-quoted).
+    pub ddl: String,
+    /// Numeric impact for ranking within a kind (not comparable across kinds).
+    pub impact_score: f64,
+}
+
+/// Strip brackets/whitespace from an identifier fragment.
+fn unbr(s: &str) -> String {
+    s.trim().trim_matches(|c| c == '[' || c == ']').to_string()
+}
+/// Bracket-quote an identifier.
+fn br(s: &str) -> String { format!("[{}]", unbr(s)) }
+/// Sanitize an identifier for use inside a generated index name.
+fn idfrag(s: &str) -> String {
+    unbr(s).chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+}
+fn priority_rank(p: &str) -> u8 { match p { "high" => 0, "medium" => 1, _ => 2 } }
+
+/// Generate ranked, prescriptive recommendations from a DMV bundle.
+pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
+    let mut recs: Vec<Recommendation> = Vec::new();
+
+    // ---- CreateIndex: from SQL Server's own missing-index DMV --------------
+    for m in &bundle.missing_indexes {
+        let keys: Vec<String> = m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect();
+        if keys.is_empty() { continue; }
+        // SQL Server's standard "improvement measure".
+        let score = m.avg_total_user_cost * (m.avg_user_impact / 100.0) * (m.user_seeks.max(1) as f64);
+        let key_list = keys.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
+        let inc_list = m.included_columns.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
+        let inc_clause = if m.included_columns.is_empty() { String::new() } else { format!("\n  INCLUDE ({})", inc_list) };
+        let mut name = format!("IX_{}_{}", idfrag(&m.table_name), keys.iter().map(|c| idfrag(c)).collect::<Vec<_>>().join("_"));
+        name.truncate(120);
+        let ddl = format!(
+            "CREATE NONCLUSTERED INDEX [{}]\n  ON {}.{} ({}){};",
+            name, br(&m.schema_name), br(&m.table_name), key_list, inc_clause
+        );
+        let priority = if score >= 10.0 { "high" } else if score >= 1.0 { "medium" } else { "low" };
+        recs.push(Recommendation {
+            kind: RecKind::CreateIndex,
+            priority: priority.into(),
+            title: format!("Create covering index on {}.{}", m.schema_name, m.table_name),
+            object: format!("{}.{}", m.schema_name, m.table_name),
+            rationale: format!(
+                "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%. Improvement measure {:.1}. Order key columns by selectivity and consolidate with existing indexes before applying.",
+                m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, score
+            ),
+            ddl,
+            impact_score: score,
+        });
+    }
+
+    // ---- DropIndex: write-only indexes (reads=0, many updates) -------------
+    use std::collections::BTreeMap;
+    let mut meta: BTreeMap<(String, String, String), &IndexMeta> = BTreeMap::new();
+    for ix in &bundle.indexes {
+        meta.insert(
+            (ix.schema_name.to_lowercase(), ix.table_name.to_lowercase(), ix.index_name.to_lowercase()),
+            ix,
+        );
+    }
+    for u in &bundle.index_usage {
+        let reads = u.user_seeks + u.user_scans + u.user_lookups;
+        if reads != 0 || u.user_updates <= 100 { continue; }
+        let key = (u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase());
+        // Never drop a PK or unique constraint index, or an obvious PK by name.
+        if let Some(ix) = meta.get(&key) {
+            if ix.is_primary_key || ix.is_unique { continue; }
+        }
+        if u.index_name.to_lowercase().starts_with("pk_") || u.index_name.eq_ignore_ascii_case("PK") { continue; }
+        let priority = if u.user_updates >= 100_000 { "high" } else if u.user_updates >= 10_000 { "medium" } else { "low" };
+        recs.push(Recommendation {
+            kind: RecKind::DropIndex,
+            priority: priority.into(),
+            title: format!("Drop unused index {} on {}.{}", u.index_name, u.schema_name, u.table_name),
+            object: format!("{}.{}.{}", u.schema_name, u.table_name, u.index_name),
+            rationale: format!(
+                "{} updates and 0 reads since the last stats reset — the index is pure write tax (every INSERT/UPDATE/DELETE maintains it for no read benefit). Confirm across a representative window first (DMV counters reset on restart).",
+                u.user_updates
+            ),
+            ddl: format!("DROP INDEX {} ON {}.{};", br(&u.index_name), br(&u.schema_name), br(&u.table_name)),
+            impact_score: u.user_updates as f64,
+        });
+    }
+
+    // ---- MergeIndex: exact-duplicate key columns on the same table ---------
+    let mut by_table: BTreeMap<(String, String), Vec<&IndexMeta>> = BTreeMap::new();
+    for ix in &bundle.indexes {
+        by_table.entry((ix.schema_name.clone(), ix.table_name.clone())).or_default().push(ix);
+    }
+    for ((schema, table), list) in &by_table {
+        for i in 0..list.len() {
+            for j in (i + 1)..list.len() {
+                let (a, b) = (list[i], list[j]);
+                let same = !a.key_columns.is_empty()
+                    && a.key_columns.len() == b.key_columns.len()
+                    && a.key_columns.iter().zip(&b.key_columns).all(|(x, y)| x.eq_ignore_ascii_case(y));
+                if !same { continue; }
+                // Keep the unique/PK one; drop the other.
+                let (keep, drop) = if a.is_primary_key || a.is_unique { (a, b) }
+                    else if b.is_primary_key || b.is_unique { (b, a) }
+                    else { (a, b) };
+                if drop.is_primary_key || drop.is_unique { continue; }
+                recs.push(Recommendation {
+                    kind: RecKind::MergeIndex,
+                    priority: "medium".into(),
+                    title: format!("Merge duplicate indexes on {}.{}", schema, table),
+                    object: format!("{}.{}.{}", schema, table, drop.index_name),
+                    rationale: format!(
+                        "Indexes {} and {} have identical key columns ({}). One is redundant — every write maintains both. Fold any unique INCLUDE columns into {} and drop {}.",
+                        keep.index_name, drop.index_name, drop.key_columns.join(", "), keep.index_name, drop.index_name
+                    ),
+                    ddl: format!(
+                        "-- Merge needed INCLUDE columns into {} first, then:\nDROP INDEX {} ON {}.{};",
+                        br(&keep.index_name), br(&drop.index_name), br(schema), br(table)
+                    ),
+                    impact_score: 5_000.0,
+                });
+            }
+        }
+    }
+
+    // ---- ColumnstoreCandidate: big, scan-heavy, low-churn rowstore ---------
+    // Aggregate row_count (max across partitions) + reserved_kb per table.
+    let mut size_by_table: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    for p in &bundle.partition_stats {
+        let e = size_by_table.entry((p.schema_name.clone(), p.table_name.clone())).or_insert((0, 0));
+        e.0 = e.0.max(p.row_count);
+        e.1 += p.reserved_kb;
+    }
+    let mut usage_by_table: BTreeMap<(String, String), (u64, u64, u64)> = BTreeMap::new(); // (seeks, scans, updates)
+    for u in &bundle.index_usage {
+        let e = usage_by_table.entry((u.schema_name.clone(), u.table_name.clone())).or_insert((0, 0, 0));
+        e.0 += u.user_seeks;
+        e.1 += u.user_scans;
+        e.2 += u.user_updates;
+    }
+    for ((schema, table), (rows, reserved_kb)) in &size_by_table {
+        let (seeks, scans, updates) = usage_by_table.get(&(schema.clone(), table.clone())).copied().unwrap_or((0, 0, 0));
+        let reads = seeks + scans;
+        // Large, scan-dominated, low write churn → analytic table that wants a CCI.
+        let big = *rows >= 1_000_000 || *reserved_kb >= 1_048_576; // ≥1M rows or ≥1GB
+        let scan_heavy = scans > seeks && scans > 0;
+        let low_churn = reads == 0 || (updates as f64) < (reads as f64) * 0.2;
+        if big && scan_heavy && low_churn {
+            let priority = if *reserved_kb >= 1_048_576 { "high" } else { "medium" };
+            recs.push(Recommendation {
+                kind: RecKind::ColumnstoreCandidate,
+                priority: priority.into(),
+                title: format!("Columnstore candidate: {}.{}", schema, table),
+                object: format!("{}.{}", schema, table),
+                rationale: format!(
+                    "{} rows, {:.0} MB, scan-dominated ({} scans vs {} seeks) with low write churn ({} updates). Analytic/scan workloads on tables this size typically get 5–10× compression and large scan speedups from a clustered columnstore index.",
+                    rows, (*reserved_kb as f64) / 1024.0, scans, seeks, updates
+                ),
+                ddl: format!(
+                    "-- Validate workload is analytic/scan-heavy (not OLTP point lookups) first.\n-- Converting replaces the clustered rowstore; test in a non-prod copy.\nCREATE CLUSTERED COLUMNSTORE INDEX [CCI_{}] ON {}.{}\n  WITH (DROP_EXISTING = OFF, MAXDOP = 1);",
+                    idfrag(table), br(schema), br(table)
+                ),
+                impact_score: *reserved_kb as f64,
+            });
+        }
+    }
+
+    // Rank: priority bucket first, then impact within the bucket.
+    recs.sort_by(|a, b| {
+        priority_rank(&a.priority).cmp(&priority_rank(&b.priority))
+            .then(b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    recs
+}
