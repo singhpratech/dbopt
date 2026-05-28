@@ -31,6 +31,9 @@ pub async fn open(info: &ConnectionInfo) -> anyhow::Result<SqlClient> {
     if info.trust_cert.unwrap_or(false) {
         config.trust_cert();
     }
+    // Tag every sentinel connection so its own polling queries can be filtered
+    // out of the activity feed (see poll::live / poll::query_store).
+    config.application_name("sqlopt-sentinel");
     let tcp = TcpStream::connect(config.get_addr()).await?;
     tcp.set_nodelay(true)?;
     let client = Client::connect(config, tcp.compat_write()).await?;

@@ -993,7 +993,8 @@ kbd {
 /* ============================================================
    Advisor workspace
    ============================================================ */
-.advisor { max-width: 980px; }
+/* Full-width: the advisor is data-dense, never cap it to a narrow column. */
+.advisor { max-width: none; width: 100%; }
 
 .advisor-spinner {
   width: 13px; height: 13px;
@@ -1008,8 +1009,8 @@ kbd {
 @keyframes advisor-spin { to { transform: rotate(360deg); } }
 
 .advisor-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
   gap: 12px;
   margin-top: 18px;
 }

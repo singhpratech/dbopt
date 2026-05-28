@@ -5,3 +5,6 @@ web/src/wasm/
 *.log
 .env
 .DS_Store
+
+# Local Claude Code session data
+.claude/

@@ -20,6 +20,12 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
     let mut client = conn::open(conn_info).await?;
     let instance_id: i64 = storage.ensure_instance(&conn_info.server, conn_info)?;
 
+    // We join query_store_query_text so each row carries the actual T-SQL, not
+    // just an opaque id. NOTE: MAX() rejects nvarchar(max), so we LEFT-truncate
+    // and CAST to a bounded NVARCHAR *before* aggregating (also what tiberius
+    // needs to read it as a string — reading a MAX type silently yields NULL).
+    // The NOT LIKE filters drop the sentinel's own polling queries so the feed
+    // shows the user's workload, not our DMV scans.
     const SQL: &str = r#"
         SELECT TOP (50)
             q.query_id,
@@ -27,12 +33,23 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
             CAST(SUM(rs.avg_duration * rs.count_executions) / 1000 AS BIGINT) AS total_duration_ms,
             CAST(SUM(rs.avg_cpu_time   * rs.count_executions) / 1000 AS BIGINT) AS cpu_ms,
             CAST(SUM(rs.avg_logical_io_reads * rs.count_executions) AS BIGINT) AS logical_reads,
-            CAST(SUM(rs.count_executions) AS BIGINT) AS executions
+            CAST(SUM(rs.count_executions) AS BIGINT) AS executions,
+            MAX(CAST(LEFT(qt.query_sql_text, 1000) AS NVARCHAR(1000))) AS query_sql_text,
+            DATEDIFF_BIG(MILLISECOND, '1970-01-01', CAST(MAX(rs.last_execution_time) AS DATETIME2)) AS last_execution_ms
         FROM sys.query_store_query AS q
+        JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
         JOIN sys.query_store_plan  AS p  ON p.query_id = q.query_id
         JOIN sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
         JOIN sys.query_store_runtime_stats_interval AS i ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
         WHERE i.end_time >= DATEADD(hour, -1, SYSUTCDATETIME())
+          AND qt.query_sql_text NOT LIKE '%dm_exec_requests%'
+          AND qt.query_sql_text NOT LIKE '%query_store_runtime_stats%'
+          AND qt.query_sql_text NOT LIKE '%dm_os_wait_stats%'
+          AND qt.query_sql_text NOT LIKE '%dm_db_index_usage_stats%'
+          AND qt.query_sql_text NOT LIKE '%dm_db_partition_stats%'
+          AND qt.query_sql_text NOT LIKE '%xml_deadlock_report%'
+          AND qt.query_sql_text NOT LIKE '%dm_xe_session_targets%'
+          AND qt.query_sql_text NOT LIKE '%dm_xe_sessions%'
         GROUP BY q.query_id, p.plan_id
         ORDER BY total_duration_ms DESC;
     "#;
@@ -80,6 +97,8 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
             cpu_ms:            r.get::<i64, _>(3).unwrap_or(0),
             logical_reads:     r.get::<i64, _>(4).unwrap_or(0),
             executions:        r.get::<i64, _>(5).unwrap_or(0),
+            query_sql_text:    r.get::<&str, _>(6).map(|s| s.to_string()),
+            last_execution_ms: r.get::<i64, _>(7),
         };
         if let Err(e) = storage.insert_query_store_row(instance_id, &row) {
             tracing::warn!(

@@ -1,9 +1,10 @@
 //! Live-request poller.
 //!
-//! Snapshots `sys.dm_exec_requests` filtered to user sessions whose request has
-//! been running longer than one second. The point isn't a full activity feed —
-//! it's a low-frequency record of "interesting" work, suitable for blocking
-//! detection and post-hoc forensics.
+//! Snapshots `sys.dm_exec_requests` for every in-flight *user* request at poll
+//! time (excluding this poller and our own background pollers). It's a sampled
+//! activity feed — useful for blocking detection, "what's running now", and
+//! post-hoc forensics. Completed-query history comes from the Query Store
+//! poller; this one only sees work that is executing when the tick fires.
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -22,6 +23,11 @@ pub async fn poll_live_requests(
     let mut client = conn::open(conn_info).await?;
     let instance_id: i64 = storage.ensure_instance(&conn_info.server, conn_info)?;
 
+    // sql_preview MUST be CAST to a bounded NVARCHAR: dm_exec_sql_text.text is
+    // nvarchar(max), and tiberius silently returns NULL when reading a MAX type
+    // as &str — which is why every preview used to come back empty. We capture
+    // every in-flight user request (is_user_process = 1), excluding this poller
+    // and our own background pollers (tagged program_name = 'sqlopt-sentinel').
     const SQL: &str = r#"
         SELECT
             r.session_id,
@@ -29,12 +35,13 @@ pub async fn poll_live_requests(
             DATEDIFF(MILLISECOND, r.start_time, SYSUTCDATETIME()) AS duration_ms,
             r.blocking_session_id,
             r.wait_type,
-            LEFT(REPLACE(REPLACE(t.text, CHAR(13), ' '), CHAR(10), ' '), 500) AS sql_preview
+            CAST(LEFT(REPLACE(REPLACE(t.text, CHAR(13), ' '), CHAR(10), ' '), 500) AS NVARCHAR(500)) AS sql_preview
         FROM sys.dm_exec_requests AS r
+        JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
         OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
         WHERE r.session_id <> @@SPID
-          AND r.session_id > 50
-          AND DATEDIFF(MILLISECOND, r.start_time, SYSUTCDATETIME()) > 1000;
+          AND s.is_user_process = 1
+          AND ISNULL(s.program_name, '') <> 'sqlopt-sentinel';
     "#;
 
     let stream = client.simple_query(SQL).await?;

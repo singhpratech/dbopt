@@ -22,6 +22,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init",          include_str!("../migrations/0001_init.sql")),
     ("0002_poller_state",  include_str!("../migrations/0002_poller_state.sql")),
     ("0003_logs",          include_str!("../migrations/0003_logs.sql")),
+    ("0004_query_text",    include_str!("../migrations/0004_query_text.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -55,6 +56,7 @@ pub struct TopQueryRow {
     pub plan_id: i64,
     pub total_duration_ms: i64,
     pub executions: i64,
+    pub query_sql_text: Option<String>,
 }
 
 /// One row of "regression detected" — query got slower across the window.
@@ -177,8 +179,9 @@ impl Storage {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
         lock.execute(
             "INSERT INTO query_store_snapshot(instance_id, captured_at, query_id, plan_id,
-                 total_duration_ms, cpu_ms, logical_reads, executions)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 total_duration_ms, cpu_ms, logical_reads, executions,
+                 query_sql_text, last_execution_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 instance_id,
                 row.captured_at.timestamp_millis(),
@@ -188,6 +191,8 @@ impl Storage {
                 row.cpu_ms,
                 row.logical_reads,
                 row.executions,
+                row.query_sql_text,
+                row.last_execution_ms,
             ],
         )?;
         Ok(())
@@ -372,7 +377,8 @@ impl Storage {
         let mut stmt = lock.prepare(
             "SELECT query_id, plan_id,
                     SUM(total_duration_ms) AS total_duration_ms,
-                    SUM(executions)        AS executions
+                    SUM(executions)        AS executions,
+                    MAX(query_sql_text)    AS query_sql_text
              FROM query_store_snapshot
              WHERE captured_at >= ?1 AND captured_at < ?2
              GROUP BY query_id, plan_id
@@ -386,6 +392,7 @@ impl Storage {
                     plan_id: r.get(1)?,
                     total_duration_ms: r.get(2)?,
                     executions: r.get(3)?,
+                    query_sql_text: r.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -754,6 +761,10 @@ pub struct QueryStoreRow {
     pub cpu_ms: i64,
     pub logical_reads: i64,
     pub executions: i64,
+    /// The actual T-SQL text (truncated), so the dashboard shows *what* ran.
+    pub query_sql_text: Option<String>,
+    /// Epoch ms of the most recent execution in the captured interval.
+    pub last_execution_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -837,12 +848,15 @@ mod tests {
                 cpu_ms: 80,
                 logical_reads: 9999,
                 executions: 5,
+                query_sql_text: Some("SELECT 1".into()),
+                last_execution_ms: Some(Utc::now().timestamp_millis()),
             },
         )
         .expect("insert");
         let top = s.top_n_by_duration(TimeRange::last_hours(1), 10).expect("top");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].query_id, 1);
+        assert_eq!(top[0].query_sql_text.as_deref(), Some("SELECT 1"));
 
         let mut snap = HashMap::new();
         snap.insert("LCK_M_X".to_string(), (10i64, 100i64, 5i64));

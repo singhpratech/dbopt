@@ -45,6 +45,10 @@ pub struct TopQueryDto {
     pub total_duration_ms: i64,
     pub executions: i64,
     pub avg_duration_ms: i64,
+    /// The captured T-SQL text (truncated), or null for rows captured by builds
+    /// before query-text capture existed.
+    #[serde(default)]
+    pub query_sql_text: Option<String>,
 }
 
 impl From<TopQueryRow> for TopQueryDto {
@@ -56,6 +60,7 @@ impl From<TopQueryRow> for TopQueryDto {
             total_duration_ms: r.total_duration_ms,
             executions: r.executions,
             avg_duration_ms: avg,
+            query_sql_text: r.query_sql_text,
         }
     }
 }
@@ -175,13 +180,22 @@ pub fn render_markdown(r: &WeeklyReport) -> String {
     if r.top_queries.is_empty() {
         let _ = writeln!(s, "_No Query Store rows in window. Enable Query Store on the target database._");
     } else {
-        let _ = writeln!(s, "| Query | Plan | Total | Executions | Avg |");
+        let _ = writeln!(s, "| Query | SQL | Total | Executions | Avg |");
         let _ = writeln!(s, "|---|---|---:|---:|---:|");
         for q in &r.top_queries {
+            let sql = q
+                .query_sql_text
+                .as_deref()
+                .map(|t| {
+                    let one_line = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let clipped: String = one_line.chars().take(80).collect();
+                    format!("`{}`", clipped.replace('|', "\\|"))
+                })
+                .unwrap_or_else(|| "—".to_string());
             let _ = writeln!(
                 s,
-                "| `{}` | `{}` | {} | {} | {} |",
-                q.query_id, q.plan_id, fmt_ms(q.total_duration_ms), q.executions, fmt_ms(q.avg_duration_ms),
+                "| `{}` | {} | {} | {} | {} |",
+                q.query_id, sql, fmt_ms(q.total_duration_ms), q.executions, fmt_ms(q.avg_duration_ms),
             );
         }
     }

@@ -16,6 +16,7 @@ interface TopQueryDto {
   total_duration_ms: number;
   executions: number;
   avg_duration_ms: number;
+  query_sql_text?: string | null;
 }
 
 interface RegressionDto {
@@ -248,18 +249,20 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
       {/* ── Top queries ────────────────────────────────── */}
       <Section title={`TOP ${report?.top_queries.length ?? 0} QUERIES BY TOTAL DURATION`}>
         {report && report.top_queries.length > 0 ? (
-          <table className="findings" style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table className="findings" style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
-              <Th cols={["Query", "Plan", "Total", "Executions", "Avg"]} aligns={["l", "l", "r", "r", "r"]} />
+              <Th cols={["Query", "SQL text", "Total", "Executions", "Avg"]} aligns={["l", "l", "r", "r", "r"]} />
             </thead>
             <tbody>
               {report.top_queries.map((q, i) => (
                 <tr key={i}>
-                  <td style={mono}>{q.query_id}</td>
-                  <td style={mono}>{q.plan_id}</td>
-                  <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
-                  <td style={numCell}>{q.executions.toLocaleString()}</td>
-                  <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
+                  <td style={{ ...mono, width: 64 }}>{q.query_id}</td>
+                  <td style={{ ...mono, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text)" }}>
+                    {q.query_sql_text ?? "—"}
+                  </td>
+                  <td style={{ ...numCell, width: 90 }}>{fmtMs(q.total_duration_ms)}</td>
+                  <td style={{ ...numCell, width: 90 }}>{q.executions.toLocaleString()}</td>
+                  <td style={{ ...numCell, width: 90 }}>{fmtMs(q.avg_duration_ms)}</td>
                 </tr>
               ))}
             </tbody>
