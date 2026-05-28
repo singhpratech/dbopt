@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.top_without_order_by"],
+  "server_version": 2025,
+  "category": "hygiene"
+}

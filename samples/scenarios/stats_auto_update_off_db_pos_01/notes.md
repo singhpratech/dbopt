@@ -1,0 +1,1 @@
+`AUTO_UPDATE_STATISTICS OFF` freezes histograms in place, so estimates drift further from reality with each batch insert and the optimizer eventually picks regressed plans. The rule must flag this database-scoped setting and recommend re-enabling (and considering `AUTO_UPDATE_STATISTICS_ASYNC` to avoid foreground stalls).

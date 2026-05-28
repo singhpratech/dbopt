@@ -1,0 +1,1 @@
+UPDATE dbo.Customers SET LastSeen = GETDATE();

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["modern.greatest_least_replaces_case_when"],
+  "must_not_fire": [],
+  "server_version": 2022,
+  "category": "modern"
+}

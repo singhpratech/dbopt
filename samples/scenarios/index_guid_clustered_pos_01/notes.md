@@ -1,0 +1,1 @@
+Clustered key on a `uniqueidentifier` defaulted to `NEWID()` — every insert lands at a random B-tree leaf, fragmenting the table, exploding page splits, and bloating every nonclustered index (since the clustering key is appended to each). The rule must flag the combination and recommend a sequential surrogate (`bigint` identity, sequence, or `NEWSEQUENTIALID`).

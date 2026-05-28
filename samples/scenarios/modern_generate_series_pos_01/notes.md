@@ -1,0 +1,1 @@
+Recursive numbers CTE building 1..1000 with `OPTION (MAXRECURSION 0)`. Each row is produced one-at-a-time via nested loops, and MAXRECURSION 0 disables the safety limit. SQL Server 2022's `GENERATE_SERIES(1, 1000)` is a native set-returning function with proper cardinality estimates. The rule should detect the recursive-numbers pattern and recommend `GENERATE_SERIES`.

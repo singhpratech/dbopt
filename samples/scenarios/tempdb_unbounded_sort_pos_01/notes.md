@@ -1,0 +1,1 @@
+No predicate, no `TOP`, no `OFFSET` — the entire table has to be sorted by `OrderDate`. On production-sized data this materializes a giant Sort that almost always spills to tempdb. The rule must flag unbounded ORDER BY without a supporting index / row-limiting clause.

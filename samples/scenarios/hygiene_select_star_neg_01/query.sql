@@ -1,0 +1,1 @@
+SELECT OrderId, OrderDate, TotalCents FROM dbo.Orders;

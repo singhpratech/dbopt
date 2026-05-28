@@ -1,0 +1,55 @@
+# Optional sidecar SQL Server 2025 Developer for evaluation.
+#
+# Your existing SQL Server 2025 Developer container is left untouched.
+# This compose file runs a separate instance on port 14333 -> 1433 so
+# the two cannot collide. Use it when you want a clean DB to seed the
+# case-study schema into.
+#
+# Bring it up:
+#   SA_PASSWORD='<choose-a-strong-password>' docker compose -f docker/sqlserver.yml up -d
+#
+# Connect from the host:
+#   sqlcmd -S localhost,14333 -U sa -P "$SA_PASSWORD" -C -d master
+#
+# Or, point sqlopt's Connection workspace at:
+#   server   = localhost,14333
+#   user     = sa
+#   password = $SA_PASSWORD
+#   trust    = on
+#
+# Tear it down (volume preserved):
+#   docker compose -f docker/sqlserver.yml down
+#
+# Wipe it (volume removed):
+#   docker compose -f docker/sqlserver.yml down -v
+
+services:
+  sqlopt-sql2025:
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: sqlopt-sql2025
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "${SA_PASSWORD:?set SA_PASSWORD before bringing the container up}"
+      MSSQL_AGENT_ENABLED: "true"
+      MSSQL_TCP_PORT: "1433"
+    ports:
+      - "14333:1433"
+    volumes:
+      - sqlopt_sql2025_data:/var/opt/mssql
+      - ./bootstrap:/bootstrap:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          /opt/mssql-tools18/bin/sqlcmd -S localhost,1433
+          -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  sqlopt_sql2025_data:
+    name: sqlopt_sql2025_data

@@ -1,0 +1,1 @@
+Table variable used as a working set for a join against a large fact table. Pre-2019 the cardinality is hard-coded to 1, producing nested-loops plans that explode at runtime; even on 2019+ the missing column statistics still hurt selectivity estimates. The rule should flag `DECLARE @t TABLE` patterns that get populated and then joined.

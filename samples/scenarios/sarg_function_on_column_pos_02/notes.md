@@ -1,0 +1,1 @@
+`CAST(OrderDate AS date) = …` strips off the column's type, so the optimizer can't seek the underlying datetime index. The correct rewrite is the half-open range `OrderDate >= '2026-01-15' AND OrderDate < '2026-01-16'`.

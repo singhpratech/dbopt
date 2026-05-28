@@ -1,0 +1,1 @@
+CREATE TABLE dbo.AuditLog (Id int IDENTITY PRIMARY KEY, Payload nvarchar(max));

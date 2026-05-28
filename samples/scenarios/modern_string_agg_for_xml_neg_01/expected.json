@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["modern.string_agg_replaces_for_xml"],
+  "server_version": 2025,
+  "category": "modern"
+}

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["plan.merge_join_hint_pinned"],
+  "server_version": 2022,
+  "category": "plan"
+}

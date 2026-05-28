@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.global_temp_table"],
+  "server_version": 2025,
+  "category": "hygiene"
+}

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["sarg.not_in_nullable"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "sargability"
+}

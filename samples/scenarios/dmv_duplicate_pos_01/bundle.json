@@ -1,0 +1,14 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_a",
+        "is_unique": false, "is_primary_key": false,
+        "key_columns": ["CustomerId"], "included_columns": [] },
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_b",
+        "is_unique": false, "is_primary_key": false,
+        "key_columns": ["CustomerId", "Status"], "included_columns": [] }
+    ],
+    "missing_indexes": [], "partition_stats": []
+  }
+}

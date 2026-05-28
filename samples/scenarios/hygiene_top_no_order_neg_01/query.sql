@@ -1,0 +1,1 @@
+SELECT TOP 10 OrderId FROM dbo.Orders ORDER BY OrderDate DESC;

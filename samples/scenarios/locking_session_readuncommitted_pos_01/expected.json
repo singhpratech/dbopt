@@ -1,0 +1,6 @@
+{
+  "must_fire": ["locking.set_transaction_isolation_read_uncommitted"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "locking"
+}

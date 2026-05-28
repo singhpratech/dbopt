@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["modern.sp_executesql_optimized_2025"],
+  "server_version": 2025,
+  "category": "modern"
+}

@@ -1,0 +1,3 @@
+DECLARE @c CURSOR;
+SET @c = CURSOR FOR SELECT OrderId FROM dbo.Orders;
+OPEN @c;

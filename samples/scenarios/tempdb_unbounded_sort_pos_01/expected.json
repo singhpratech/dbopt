@@ -1,0 +1,6 @@
+{
+  "must_fire": ["tempdb.spill_risk_large_sort"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "tempdb"
+}

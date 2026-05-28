@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["stats.update_statistics_fullscan_on_huge_table"],
+  "server_version": 2025,
+  "category": "stats"
+}

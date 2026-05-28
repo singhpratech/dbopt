@@ -1,0 +1,6 @@
+{
+  "must_fire": ["dmv.duplicate_or_overlapping_index"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "dmv"
+}

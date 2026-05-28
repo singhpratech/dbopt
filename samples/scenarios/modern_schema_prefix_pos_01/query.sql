@@ -1,0 +1,1 @@
+SELECT OrderId FROM Orders WHERE Status = 1;

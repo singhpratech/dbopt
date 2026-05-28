@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["plan.scalar_udf_block_inlining"],
+  "server_version": 2016,
+  "category": "plan"
+}

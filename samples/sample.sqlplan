@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence>
+    <Batch>
+      <Statements>
+        <StmtSimple>
+          <QueryPlan>
+            <RelOp PhysicalOp="Nested Loops" LogicalOp="Inner Join" NodeId="0" EstimateRows="2500" EstimatedTotalSubtreeCost="12.5" EstimateCPU="0.10" EstimateIO="0.00">
+              <RelOp PhysicalOp="Index Seek" LogicalOp="Index Seek" NodeId="1" EstimateRows="500" EstimatedTotalSubtreeCost="0.4" EstimateCPU="0.05" EstimateIO="0.30"/>
+              <RelOp PhysicalOp="Key Lookup" LogicalOp="Clustered Index Seek" NodeId="2" EstimateRows="500" EstimatedTotalSubtreeCost="6.0" EstimateCPU="0.20" EstimateIO="5.50"/>
+              <RelOp PhysicalOp="Table Scan" LogicalOp="Table Scan" NodeId="3" EstimateRows="120000" EstimatedTotalSubtreeCost="5.6" EstimateCPU="0.40" EstimateIO="5.10"/>
+            </RelOp>
+          </QueryPlan>
+        </StmtSimple>
+      </Statements>
+    </Batch>
+  </BatchSequence>
+</ShowPlanXML>

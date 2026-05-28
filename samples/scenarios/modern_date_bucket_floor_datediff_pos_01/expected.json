@@ -1,0 +1,6 @@
+{
+  "must_fire": ["modern.date_bucket_replaces_floor_datediff"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "modern"
+}

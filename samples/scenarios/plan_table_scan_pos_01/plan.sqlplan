@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence><Batch><Statements><StmtSimple><QueryPlan>
+    <RelOp PhysicalOp="Table Scan" LogicalOp="Table Scan" NodeId="0"
+           EstimateRows="2000000" EstimatedTotalSubtreeCost="42.5"
+           EstimateCPU="2.5" EstimateIO="40.0"/>
+  </QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
+</ShowPlanXML>

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["plan.optimize_for_unknown"],
+  "server_version": 2022,
+  "category": "plan"
+}

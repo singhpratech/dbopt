@@ -1,0 +1,1 @@
+SQL Server 2025 Optimized Locking depends on Accelerated Database Recovery for its persistent-lock-versioning. Setting `OPTIMIZED_LOCKING = ON` without a paired `ACCELERATED_DATABASE_RECOVERY = ON` silently falls back to legacy locking — the feature is enabled in name only. The rule should detect this pairing gap and instruct the operator to enable ADR first.

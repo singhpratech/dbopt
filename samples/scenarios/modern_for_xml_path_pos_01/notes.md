@@ -1,0 +1,1 @@
+The `STUFF(... FOR XML PATH(''))` idiom was the pre-2017 way to build a comma-separated list. It pays an XML serialization round-trip per outer row and is hard to read. The rule should detect the `FOR XML PATH('')` + `STUFF` pattern and recommend `STRING_AGG(... , ',')` instead.

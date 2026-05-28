@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.table_scan"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "plan"
+}

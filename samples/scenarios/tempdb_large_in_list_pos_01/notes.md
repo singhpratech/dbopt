@@ -1,0 +1,1 @@
+Long literal IN-lists (65 constants here) wreck plan reuse — every length variant compiles a new plan — and on bigger tables the constant scan + hash join can spill to tempdb. The rule should fire on IN-lists exceeding ~50 constants and recommend a TVP, `STRING_SPLIT`, or temp table.

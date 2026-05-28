@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.read_committed_lock_hint_redundant_with_optimized_locking"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "plan"
+}

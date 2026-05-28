@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["locking.update_without_index", "hygiene.unbounded_dml"],
+  "server_version": 2025,
+  "category": "locking"
+}

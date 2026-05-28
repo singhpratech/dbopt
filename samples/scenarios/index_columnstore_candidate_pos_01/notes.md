@@ -1,0 +1,1 @@
+Single-table scan with `GROUP BY` on a low-cardinality column and pure aggregate measures — textbook columnstore territory. A clustered columnstore would push the aggregation into batch mode and cut CPU + IO by an order of magnitude. The rule should detect the scan-and-aggregate shape and recommend columnstore (or a nonclustered columnstore on the measure columns).

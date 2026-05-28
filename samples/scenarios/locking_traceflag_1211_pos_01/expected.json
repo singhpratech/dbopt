@@ -1,0 +1,6 @@
+{
+  "must_fire": ["locking.lock_escalation_disabled_globally"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "locking"
+}

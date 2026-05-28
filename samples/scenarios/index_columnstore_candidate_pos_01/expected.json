@@ -1,0 +1,6 @@
+{
+  "must_fire": ["index.missing_columnstore_opportunity"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "indexing"
+}

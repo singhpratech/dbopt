@@ -1,0 +1,29 @@
+{
+  "sql": null,
+  "plan_xml": null,
+  "dmv_bundle": {
+    "index_usage": [
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Orders", "index_name": "PK_Orders", "user_seeks": 9842, "user_scans": 12, "user_lookups": 4, "user_updates": 5210 },
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_Orders_CustomerId", "user_seeks": 4421, "user_scans": 0, "user_lookups": 0, "user_updates": 5210 },
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_Orders_Status", "user_seeks": 0, "user_scans": 0, "user_lookups": 0, "user_updates": 5210 },
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Customers", "index_name": "PK_Customers", "user_seeks": 7321, "user_scans": 88, "user_lookups": 0, "user_updates": 130 },
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Customers", "index_name": "IX_Customers_Email", "user_seeks": 3104, "user_scans": 0, "user_lookups": 0, "user_updates": 130 }
+    ],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "PK_Orders",            "is_unique": true,  "is_primary_key": true,  "key_columns": ["OrderId"], "included_columns": [] },
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_Orders_CustomerId", "is_unique": false, "is_primary_key": false, "key_columns": ["CustomerId"], "included_columns": ["OrderDate"] },
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_Orders_CustomerId_Status", "is_unique": false, "is_primary_key": false, "key_columns": ["CustomerId", "Status"], "included_columns": [] },
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "IX_Orders_Status", "is_unique": false, "is_primary_key": false, "key_columns": ["Status"], "included_columns": [] }
+    ],
+    "missing_indexes": [
+      { "schema_name": "dbo", "table_name": "Orders", "equality_columns": ["CustomerId", "Status"], "inequality_columns": [], "included_columns": ["TotalCents"], "avg_user_impact": 84.5, "user_seeks": 1200, "avg_total_user_cost": 3.4 }
+    ],
+    "partition_stats": [
+      { "schema_name": "dbo", "table_name": "Orders",    "index_name": "PK_Orders",            "row_count": 8420000, "reserved_kb": 1480000, "used_kb": 1462000, "data_kb": 1450000 },
+      { "schema_name": "dbo", "table_name": "Orders",    "index_name": "IX_Orders_CustomerId", "row_count": 8420000, "reserved_kb":  410000, "used_kb":  402000, "data_kb":  399000 },
+      { "schema_name": "dbo", "table_name": "Orders",    "index_name": "IX_Orders_Status",     "row_count": 8420000, "reserved_kb":  220000, "used_kb":  214000, "data_kb":  210000 },
+      { "schema_name": "dbo", "table_name": "Customers", "index_name": "PK_Customers",         "row_count":   54000,  "reserved_kb":   12000, "used_kb":   11800, "data_kb":   11500 },
+      { "schema_name": "dbo", "table_name": "Customers", "index_name": "IX_Customers_Email",   "row_count":   54000,  "reserved_kb":    5400, "used_kb":    5280, "data_kb":    5100 }
+    ]
+  }
+}

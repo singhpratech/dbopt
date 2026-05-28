@@ -1,0 +1,1 @@
+SELECT a.OrderId, b.CustomerId FROM dbo.Orders a, dbo.Customers b WHERE a.CustomerId *= b.CustomerId;

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["tempdb.large_in_clause_constant_list"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "tempdb"
+}

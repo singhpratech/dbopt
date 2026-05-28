@@ -1,0 +1,1 @@
+EXEC sp_dboption 'pubs', 'read only', 'true';

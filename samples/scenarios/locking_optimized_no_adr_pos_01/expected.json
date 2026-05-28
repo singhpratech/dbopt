@@ -1,0 +1,6 @@
+{
+  "must_fire": ["maintenance.adr_required_for_optimized_locking"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "locking"
+}

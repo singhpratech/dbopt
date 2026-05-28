@@ -1,0 +1,1 @@
+Disabling `AUTO_CREATE_STATISTICS` database-wide starves the optimizer of single-column histograms on un-indexed columns, leading to bad cardinality estimates and poor plans. The rule should detect the `ALTER DATABASE ... SET AUTO_CREATE_STATISTICS OFF` and surface a high-severity warning.

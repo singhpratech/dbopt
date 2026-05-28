@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.option_recompile_overuse"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "plan"
+}

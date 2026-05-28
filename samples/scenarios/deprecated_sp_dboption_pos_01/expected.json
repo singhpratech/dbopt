@@ -1,0 +1,6 @@
+{
+  "must_fire": ["deprecated.sp_dboption"],
+  "must_not_fire": [],
+  "server_version": 2014,
+  "category": "deprecated"
+}

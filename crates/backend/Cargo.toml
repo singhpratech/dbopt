@@ -1,0 +1,44 @@
+[package]
+name = "backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sqlopt-backend"
+path = "src/main.rs"
+
+[dependencies]
+analyzer-core = { path = "../analyzer-core" }
+sentinel = { path = "../sentinel" }
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+async-stream = "0.3"
+rust-embed = { version = "8", features = ["debug-embed"] }
+mime_guess = "2"
+open = "5"
+portpicker = "0.1"
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
+# When `integrated-auth` is enabled at build time, add winauth/GSSAPI Kerberos support.
+# We expose this through our own feature flag below.
+tokio-util = { version = "0.7", features = ["compat"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Optional Bedrock support (heavy AWS SDK deps; off by default)
+aws-config = { version = "1", optional = true }
+aws-credential-types = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+
+[features]
+default = []
+bedrock = ["aws-config", "aws-credential-types", "aws-sdk-bedrockruntime"]
+integrated-auth = ["tiberius/integrated-auth-gssapi"]

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["deprecated.outer_join_star_equal"],
+  "must_not_fire": [],
+  "server_version": 2014,
+  "category": "deprecated"
+}

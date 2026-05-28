@@ -1,0 +1,6 @@
+{
+  "must_fire": ["dmv.unused_index"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "dmv"
+}

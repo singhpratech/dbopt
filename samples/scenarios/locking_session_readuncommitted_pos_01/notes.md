@@ -1,0 +1,1 @@
+`SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED` is a session-wide `NOLOCK`: allocation-order scans, dirty reads, missed rows, duplicated rows. The rule must flag it and recommend snapshot/RCSI for non-locking reads.

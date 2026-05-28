@@ -1,0 +1,15 @@
+{
+  "dmv_bundle": {
+    "index_usage": [
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Orders",
+        "index_name": "PK_Orders", "user_seeks": 9000, "user_scans": 0,
+        "user_lookups": 0, "user_updates": 50 }
+    ],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Orders", "index_name": "PK_Orders",
+        "is_unique": true, "is_primary_key": true,
+        "key_columns": ["OrderId"], "included_columns": [] }
+    ],
+    "missing_indexes": [], "partition_stats": []
+  }
+}

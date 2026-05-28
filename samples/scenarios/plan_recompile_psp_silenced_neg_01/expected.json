@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["plan.recompile_defeats_psp"],
+  "server_version": 2019,
+  "category": "plan"
+}

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["hygiene.exec_string_no_sp_executesql"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "hygiene"
+}

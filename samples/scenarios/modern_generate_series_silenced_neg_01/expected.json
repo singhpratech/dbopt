@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["modern.generate_series_replaces_numbers_cte"],
+  "server_version": 2017,
+  "category": "modern"
+}

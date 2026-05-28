@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>sqlopt · build the UI</title>
+<style>
+  body{margin:0;background:#0a0d12;color:#d6dbe5;font:14px/1.6 ui-monospace,Menlo,monospace;
+       display:grid;place-items:center;min-height:100vh;text-align:center;padding:20px;}
+  .card{max-width:520px}
+  h1{color:#d4ff4e;font-weight:500;letter-spacing:0.04em;margin:0 0 14px}
+  code{background:#131822;padding:2px 6px;color:#d4ff4e}
+  a{color:#7fb4ff}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>sqlopt backend is running</h1>
+    <p>The web UI hasn't been built into this binary yet.</p>
+    <p>From the project root, run:</p>
+    <p><code>cd web &amp;&amp; npm install &amp;&amp; npm run build</code></p>
+    <p>then rebuild the backend, or use <code>npm run dev</code> for hot-reload at <a href="http://127.0.0.1:5173">localhost:5173</a> (it proxies <code>/api</code> here).</p>
+    <p style="opacity:0.6;margin-top:30px">api: <a href="/api/health">/api/health</a></p>
+  </div>
+</body>
+</html>

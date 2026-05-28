@@ -1,0 +1,1 @@
+Three statements in the same procedure each carry `OPTION (RECOMPILE)`, crossing the overuse threshold. While individual recompiles can be defensible, sprinkling them across an entire proc burns CPU on compilation and removes the queries from Query Store / plan cache observability. The rule should fire once for the procedure when three or more occurrences are detected.

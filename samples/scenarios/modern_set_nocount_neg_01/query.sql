@@ -1,0 +1,5 @@
+CREATE PROCEDURE dbo.GetOrders AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT OrderId FROM dbo.Orders WHERE Status = 1;
+END

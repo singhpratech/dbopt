@@ -1,0 +1,1 @@
+SELECT OrderId FROM dbo.Orders;

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["index.wide_clustered_key"],
+  "server_version": 2025,
+  "category": "index"
+}

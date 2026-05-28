@@ -1,0 +1,1 @@
+`CASE WHEN a > b THEN a ELSE b END` is the legacy way to express max-of-two. SQL Server 2022 introduced native `GREATEST` and `LEAST`, which are clearer, optimizer-friendly, and handle NULL semantics consistently. The rule should detect the pattern and propose the modern function.

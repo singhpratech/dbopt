@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.merge_join_hint_pinned"],
+  "must_not_fire": [],
+  "server_version": 2022,
+  "category": "iqp"
+}

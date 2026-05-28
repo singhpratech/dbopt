@@ -1,0 +1,1 @@
+`DBCC TRACEON (1211, -1)` disables lock escalation server-wide and is a classic "left it on after the incident" footgun. Without escalation the lock manager memory grows unbounded under DML. The rule must surface a high-severity warning, and ideally suggest TF 1224 (memory-pressure escalation) or per-table `ALTER TABLE ... SET (LOCK_ESCALATION = DISABLE)` as a targeted fix.

@@ -1,0 +1,1 @@
+SELECT * FROM dbo.Customers WHERE Status NOT IN (1, 2, 3);

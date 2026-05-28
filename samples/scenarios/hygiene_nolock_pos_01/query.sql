@@ -1,0 +1,1 @@
+SELECT OrderId FROM dbo.Orders WITH (NOLOCK) WHERE Status = 1;

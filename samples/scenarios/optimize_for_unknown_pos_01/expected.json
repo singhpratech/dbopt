@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.optimize_for_unknown"],
+  "must_not_fire": ["plan.option_recompile_overuse"],
+  "server_version": 2022,
+  "category": "plan"
+}

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["deprecated.set_rowcount_dml"],
+  "server_version": 2025,
+  "category": "deprecated"
+}

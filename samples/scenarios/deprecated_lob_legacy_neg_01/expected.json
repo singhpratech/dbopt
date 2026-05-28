@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["deprecated.lob_legacy_types"],
+  "server_version": 2025,
+  "category": "deprecated"
+}

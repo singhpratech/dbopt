@@ -1,0 +1,1 @@
+EXEC sp_executesql N'SELECT * FROM dbo.Orders WHERE Id = @id', N'@id int', @id = @id;

@@ -1,0 +1,1 @@
+`UPDATE STATISTICS ... WITH FULLSCAN` on a very large fact table is rarely worth the I/O cost; the optimizer benefits much more from incremental/persisted-sample statistics. The rule should detect bare `WITH FULLSCAN` against tables matching common "large table" naming (`Orders`, `Audit`, `Events`, ...) and suggest sample-based or incremental alternatives.

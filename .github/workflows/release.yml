@@ -1,0 +1,165 @@
+name: release
+
+# Builds a single self-contained binary per OS and attaches the artifacts
+# to a GitHub Release. The backend embeds the web/dist/ bundle via
+# rust-embed, so each artifact is a true single-file deliverable.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'release tag (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  web:
+    name: build web bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - name: install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: build wasm analyzer
+        run: wasm-pack build crates/analyzer-wasm --target web --out-dir ../../web/src/wasm --release
+      - name: install web deps
+        working-directory: web
+        run: npm ci
+      - name: build web
+        working-directory: web
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 1
+
+  binary:
+    name: ${{ matrix.label }}
+    needs: web
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x86_64, os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  archive: tar.gz,  binsuffix: ''     }
+          - { label: macos-x86_64, os: macos-13,       target: x86_64-apple-darwin,       archive: tar.gz,  binsuffix: ''     }
+          - { label: macos-arm64,  os: macos-latest,   target: aarch64-apple-darwin,      archive: tar.gz,  binsuffix: ''     }
+          - { label: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc,  archive: zip,     binsuffix: '.exe' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: ${{ matrix.target }} }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: ${{ matrix.target }} }
+      - name: fetch web bundle
+        uses: actions/download-artifact@v4
+        with: { name: web-dist, path: web/dist }
+      - name: build backend
+        run: cargo build --release --target ${{ matrix.target }} -p backend
+      - name: stage artifact
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/sqlopt-backend${{ matrix.binsuffix }} staging/sqlopt${{ matrix.binsuffix }}
+          cp README.md staging/ 2>/dev/null || true
+          cp samples/bad.sql staging/sample.sql 2>/dev/null || true
+      - name: archive
+        shell: bash
+        run: |
+          cd staging
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a ../sqlopt-${{ matrix.label }}.zip ./*
+          else
+            tar czf ../sqlopt-${{ matrix.label }}.tar.gz ./*
+          fi
+      - name: macos dmg
+        if: startsWith(matrix.label, 'macos-')
+        run: |
+          mkdir -p sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS
+          cp staging/sqlopt sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
+          chmod +x sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
+          cat > sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/Info.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>sqlopt</string>
+            <key>CFBundleIdentifier</key><string>dev.sqlopt.observatory</string>
+            <key>CFBundleName</key><string>sqlopt</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          hdiutil create -volname sqlopt -srcfolder sqlopt-${{ matrix.label }}-app -ov -format UDZO sqlopt-${{ matrix.label }}.dmg
+      - name: windows installer (NSIS-free zip)
+        if: matrix.label == 'windows-x86_64'
+        shell: bash
+        run: |
+          # The .exe IS the installer: double-click runs the server + opens the browser.
+          # No actual installation step needed because there are no extra files.
+          echo "windows artifact is the zipped portable .exe"
+      - name: linux AppImage (best-effort)
+        if: matrix.label == 'linux-x86_64'
+        run: |
+          mkdir -p sqlopt.AppDir/usr/bin
+          cp staging/sqlopt sqlopt.AppDir/usr/bin/sqlopt
+          chmod +x sqlopt.AppDir/usr/bin/sqlopt
+          cat > sqlopt.AppDir/sqlopt.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=sqlopt
+          Exec=sqlopt
+          Icon=sqlopt
+          Categories=Development;Database;
+          Terminal=true
+          EOF
+          touch sqlopt.AppDir/sqlopt.png
+          cat > sqlopt.AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/sqlopt" "$@"
+          EOF
+          chmod +x sqlopt.AppDir/AppRun
+          curl -L -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage || true
+          chmod +x appimagetool || true
+          ARCH=x86_64 ./appimagetool sqlopt.AppDir sqlopt-linux-x86_64.AppImage || \
+            echo "AppImage build skipped (appimagetool unavailable)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlopt-${{ matrix.label }}
+          path: |
+            sqlopt-${{ matrix.label }}.tar.gz
+            sqlopt-${{ matrix.label }}.zip
+            sqlopt-${{ matrix.label }}.dmg
+            sqlopt-linux-x86_64.AppImage
+          if-no-files-found: ignore
+
+  release:
+    name: publish release
+    needs: binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: stage flat
+        run: |
+          mkdir -p out
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.AppImage' \) -exec cp {} out/ \;
+          (cd out && sha256sum * > SHA256SUMS)
+          ls -la out
+      - name: gh release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: out/*
+          generate_release_notes: true

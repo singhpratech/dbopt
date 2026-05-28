@@ -1,0 +1,6 @@
+{
+  "must_fire": ["locking.update_without_index"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "locking"
+}

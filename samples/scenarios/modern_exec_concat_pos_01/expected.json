@@ -1,0 +1,6 @@
+{
+  "must_fire": ["modern.exec_string_concat"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "modern"
+}

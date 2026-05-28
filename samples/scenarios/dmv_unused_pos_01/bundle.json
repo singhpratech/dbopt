@@ -1,0 +1,10 @@
+{
+  "dmv_bundle": {
+    "index_usage": [
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Orders",
+        "index_name": "IX_Orders_Status", "user_seeks": 0, "user_scans": 0,
+        "user_lookups": 0, "user_updates": 5200 }
+    ],
+    "indexes": [], "missing_indexes": [], "partition_stats": []
+  }
+}

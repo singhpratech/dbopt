@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+      - name: clippy (non-blocking)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true
+      - name: build
+        run: cargo build --workspace --release
+      - name: eval (target F1 ≥ 0.95)
+        run: ./target/release/sqlopt-eval --target 0.95
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - name: install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - run: wasm-pack build crates/analyzer-wasm --target web --out-dir ../../web/src/wasm --release
+      - working-directory: web
+        run: npm ci
+      - working-directory: web
+        run: npm run build

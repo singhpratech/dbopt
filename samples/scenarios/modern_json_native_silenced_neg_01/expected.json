@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["modern.json_native_type_opportunity"],
+  "server_version": 2022,
+  "category": "modern"
+}

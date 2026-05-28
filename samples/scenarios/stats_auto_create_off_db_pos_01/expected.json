@@ -1,0 +1,6 @@
+{
+  "must_fire": ["stats.auto_create_stats_off"],
+  "must_not_fire": ["stats.auto_update_stats_off"],
+  "server_version": 2025,
+  "category": "stats"
+}

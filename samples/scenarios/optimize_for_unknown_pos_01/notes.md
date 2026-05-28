@@ -1,0 +1,1 @@
+`OPTIMIZE FOR ... UNKNOWN` opts out of histogram-based estimation in favor of the average density vector, which is rarely the right plan and is strictly worse than Parameter-Sensitive Plan optimization on 2022+. The rule must flag the hint and suggest removing it (or relying on PSP / explicit value).

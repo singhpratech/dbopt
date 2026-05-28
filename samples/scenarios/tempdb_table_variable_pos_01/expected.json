@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.table_variable_large"],
+  "must_not_fire": [],
+  "server_version": 2017,
+  "category": "tempdb"
+}

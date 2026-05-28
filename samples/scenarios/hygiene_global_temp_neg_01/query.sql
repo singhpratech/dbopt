@@ -1,0 +1,1 @@
+SELECT OrderId INTO #StagingOrders FROM dbo.Orders;

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["index.filtered_index_opportunity_soft_delete"],
+  "must_not_fire": [],
+  "server_version": 2025,
+  "category": "indexing"
+}

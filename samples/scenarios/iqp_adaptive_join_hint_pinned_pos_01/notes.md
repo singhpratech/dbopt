@@ -1,0 +1,1 @@
+A pinned `INNER LOOP JOIN` freezes the join type and blocks Intelligent Query Processing's adaptive-join feature (2017+ batch mode, 2019+ rowstore). The rule should flag explicit `LOOP`/`MERGE`/`HASH` join hints and recommend removing them in favor of letting the optimizer (plus IQP feedback loops) pick.

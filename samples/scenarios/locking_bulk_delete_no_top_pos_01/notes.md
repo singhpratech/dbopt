@@ -1,0 +1,1 @@
+A single unbounded `DELETE` against an audit table with a range predicate but no `TOP` and no supporting index. Takes wide X-locks, blocks writers, and is a textbook lock-escalation trigger. The rule should flag bulk DML without batching and recommend `DELETE TOP (N) ... WHILE @@ROWCOUNT > 0`.
