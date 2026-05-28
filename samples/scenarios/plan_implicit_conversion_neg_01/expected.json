@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["plan.implicit_conversion"],
+  "server_version": 2025,
+  "category": "plan"
+}

@@ -225,3 +225,37 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
     }
     out
 }
+
+/// Arithmetic on a column inside a predicate, e.g. `WHERE col + 1 = @x` or
+/// `WHERE price * 2 > 100`. Wrapping the column in arithmetic makes the
+/// predicate non-SARGable — the engine must compute the expression per row and
+/// can't seek the index. Shape: `<col> <arith> <number|@param> <comparison>`.
+pub fn arithmetic_on_column(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        // arithmetic operator
+        if t.kind != TokKind::Punct || !matches!(t.text, "+" | "-" | "*" | "/" | "%") { continue; }
+        // left operand: a column identifier (Word), not a number/paren/operator
+        let Some(left) = (if i > 0 { tokens.get(i - 1) } else { None }) else { continue };
+        if left.kind != TokKind::Word { continue; }
+        // a bare keyword on the left (e.g. part of an expression) — still a Word; acceptable.
+        // right operand: a numeric literal or a parameter
+        let Some(right) = tokens.get(i + 1) else { continue };
+        let right_is_operand = right.kind == TokKind::Number
+            || (right.kind == TokKind::Word && right.text.starts_with('@'));
+        if !right_is_operand { continue; }
+        // must be part of a comparison: next token is a comparison operator
+        let Some(after) = tokens.get(i + 2) else { continue };
+        let is_cmp = after.kind == TokKind::Punct && matches!(after.text, "=" | "<" | ">" | "<>" | "!");
+        if !is_cmp { continue; }
+        out.push(finding(
+            "sarg.arithmetic_on_column",
+            Severity::Warning,
+            format!("Arithmetic on column `{}` inside a predicate is non-SARGable — the engine computes the expression for every row and cannot seek the index.", left.text),
+            Some(make_loc(left)),
+            Some("Move the math to the constant side: `col + 1 = @x` → `col = @x - 1`; `price * 2 > 100` → `price > 50`. Keep the indexed column bare on its side of the comparison.".into()),
+        ));
+    }
+    out
+}

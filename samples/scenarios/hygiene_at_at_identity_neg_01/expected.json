@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.at_at_identity"],
+  "server_version": 2025,
+  "category": "hygiene"
+}

@@ -64,10 +64,12 @@ pub const REGISTRY: &[Rule] = &[
     ss(sargability::not_in_subquery),
     ss(sargability::or_chain_predicate),
     ss(sargability::scalar_udf_in_where),
+    ss(sargability::arithmetic_on_column),
     ss(deprecated::old_join_syntax),
     ss(deprecated::sp_dboption),
     ss(deprecated::text_image_ntext),
     ss(deprecated::hash_temp_unsuffixed),
+    ss(deprecated::raiserror_legacy),
     ss(modern::missing_schema_prefix),
     ss(modern::missing_set_nocount),
     ss(modern::exec_string_concat),
@@ -75,6 +77,9 @@ pub const REGISTRY: &[Rule] = &[
     // hygiene additions
     ss(hygiene::merge_statement_upsert),
     ss(hygiene::exec_dynamic_without_sp_executesql),
+    ss(hygiene::scalar_udf_in_select),
+    ss(hygiene::order_by_ordinal),
+    ss(hygiene::at_at_identity),
     // modern additions
     ss(modern::string_agg_replaces_for_xml),
     ss(modern::row_number_pagination),
@@ -112,6 +117,8 @@ pub const REGISTRY: &[Rule] = &[
     ss(index_design::filtered_index_opportunity),
     ss(index_design::clustered_index_guid_no_fillfactor),
     ss(index_design::nullable_columns_should_be_explicit),
+    ss(index_design::heap_table),
+    ss(index_design::varchar_max_overuse),
 ];
 
 pub(crate) fn make_loc(t: &Token) -> Location {

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["sarg.arithmetic_on_column"],
+  "server_version": 2025,
+  "category": "sargability"
+}

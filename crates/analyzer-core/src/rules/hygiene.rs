@@ -230,3 +230,88 @@ pub fn exec_dynamic_without_sp_executesql(ctx: &RuleCtx) -> Vec<Finding> {
     }
     out
 }
+
+/// Scalar UDF in the SELECT projection, e.g. `SELECT dbo.fnTax(o.Total) FROM …`.
+/// A schema-qualified function call in the select list is almost always a scalar
+/// UDF, which executes row-by-row (RBAR) and (pre-2019) forces a serial plan.
+/// Heuristic: a `Word . Word (` call appearing between SELECT and the matching FROM.
+pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    let mut in_proj = false;
+    let mut seen = std::collections::HashSet::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if is_word(t, "SELECT") { in_proj = true; continue; }
+        if is_word(t, "FROM") { in_proj = false; continue; }
+        if !in_proj || t.kind != TokKind::Word { continue; }
+        // pattern: <schema> . <fn> (
+        let dot = tokens.get(i + 1);
+        let fname = tokens.get(i + 2);
+        let lparen = tokens.get(i + 3);
+        if dot.map(|d| d.text == ".").unwrap_or(false)
+            && fname.map(|f| f.kind == TokKind::Word).unwrap_or(false)
+            && lparen.map(|p| p.text == "(").unwrap_or(false)
+        {
+            let schema = t.text.to_ascii_lowercase();
+            if matches!(schema.as_str(), "sys" | "information_schema") { continue; }
+            if !seen.insert((t.start, t.text)) { continue; }
+            out.push(finding(
+                "hygiene.scalar_udf_in_select",
+                Severity::Warning,
+                format!("Scalar function `{}.{}( … )` in the SELECT list runs once per output row (RBAR). On SQL Server < 2019 it also forces the whole statement serial.", t.text, fname.unwrap().text),
+                Some(make_loc(t)),
+                Some("Inline the expression, join to an inline TVF (CROSS APPLY), or precompute. On 2019+ confirm the plan actually inlined the UDF (no per-row Compute Scalar calling it).".into()),
+            ));
+        }
+    }
+    out
+}
+
+/// `ORDER BY <ordinal>` (e.g. `ORDER BY 1, 2`). Ordering by column position is
+/// fragile: editing the SELECT list silently reorders the result.
+pub fn order_by_ordinal(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        if !is_word(t, "ORDER") { continue; }
+        let by = tokens.get(i + 1);
+        if !by.map(|b| is_word(b, "BY")).unwrap_or(false) { continue; }
+        let first = tokens.get(i + 2);
+        if first.map(|f| f.kind == TokKind::Number).unwrap_or(false) {
+            out.push(finding(
+                "hygiene.order_by_ordinal",
+                Severity::Warning,
+                "ORDER BY uses a column ordinal (position number). Editing the SELECT list silently changes the sort.",
+                Some(make_loc(t)),
+                Some("Order by explicit column names or aliases, not positions: `ORDER BY OrderDate DESC` instead of `ORDER BY 1`.".into()),
+            ));
+        }
+    }
+    out
+}
+
+/// `@@IDENTITY` usage. It returns the last identity inserted in the session
+/// across ALL scopes — including triggers — so it silently returns the wrong
+/// value when a trigger inserts into another identity table.
+pub fn at_at_identity(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind != TokKind::Word { continue; }
+        // The tokenizer may keep `@@IDENTITY` whole, or split it into `@` + `@IDENTITY`.
+        let whole = t.text.eq_ignore_ascii_case("@@IDENTITY");
+        let split = t.text.eq_ignore_ascii_case("@IDENTITY")
+            && i > 0
+            && tokens[i - 1].text == "@";
+        if whole || split {
+            out.push(finding(
+                "hygiene.at_at_identity",
+                Severity::Warning,
+                "@@IDENTITY returns the last identity value across ALL scopes in the session, including identities inserted by triggers — a classic source of wrong values.",
+                Some(make_loc(t)),
+                Some("Use SCOPE_IDENTITY() to get the identity from the current scope, or OUTPUT/OUTPUT INTO for multi-row inserts. Reserve @@IDENTITY only when you truly want cross-scope behavior.".into()),
+            ));
+        }
+    }
+    out
+}

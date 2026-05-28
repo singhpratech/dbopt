@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["deprecated.raiserror_legacy"],
+  "server_version": 2025,
+  "category": "deprecated"
+}

@@ -74,3 +74,28 @@ pub fn hash_temp_unsuffixed(ctx: &RuleCtx) -> Vec<Finding> {
     }
     out
 }
+
+/// Legacy `RAISERROR <number> <string>` syntax (no parentheses) — removed in
+/// SQL Server 2012+. The parenthesized `RAISERROR(...)` form still compiles but
+/// THROW is preferred; the no-paren form does not parse at all on modern engines.
+pub fn raiserror_legacy(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        if !(t.kind == TokKind::Word && t.text.eq_ignore_ascii_case("RAISERROR")) { continue; }
+        // Next non-comment token: legacy form is NOT followed by '('.
+        let mut j = i + 1;
+        while j < tokens.len() && tokens[j].kind == TokKind::Comment { j += 1; }
+        let next_is_paren = tokens.get(j).map(|n| n.text == "(").unwrap_or(false);
+        if !next_is_paren {
+            out.push(finding(
+                "deprecated.raiserror_legacy",
+                Severity::Error,
+                "Legacy RAISERROR syntax without parentheses (e.g. `RAISERROR 50001 'msg'`) was removed in SQL Server 2012 and does not parse on modern engines.",
+                Some(make_loc(t)),
+                Some("Use THROW (2012+): `THROW 50001, 'message', 1;`. If you need the formatting/severity flexibility of RAISERROR, use the parenthesized form: `RAISERROR('message', 16, 1);`.".into()),
+            ));
+        }
+    }
+    out
+}

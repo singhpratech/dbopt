@@ -24,7 +24,11 @@ and `run_all` skips rules that don't apply to the requested target. Today every 
 is tagged `SqlServer`; analyzing with `engine: "postgres"` correctly yields zero
 findings until Postgres rules exist. This is the seam the rest of v1.0 builds on.
 
-## Toward v1.0 — multi-engine
+## Future (futuristic) — multi-engine
+
+> Deliberately *later*. SQL Server is the product and stays the priority; the
+> items below do not begin until the SQL Server analyzer is where we want it.
+> The engine seam already isolates this work so it never destabilizes the core.
 
 ### 1. `Engine` connection trait (the big one)
 Abstract the live-server work that is currently SQL-Server-specific (tiberius +

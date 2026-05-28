@@ -735,3 +735,76 @@ pub fn nullable_columns_should_be_explicit(ctx: &RuleCtx) -> Vec<Finding> {
     }
     out
 }
+
+/// CREATE TABLE with no clustered index / PRIMARY KEY → a heap. Heaps fragment,
+/// can't range-seek, and forward-pointer chase on update. Sometimes intentional
+/// for staging/bulk-load, hence Info.
+pub fn heap_table(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (open, close) in create_table_bodies(tokens) {
+        // Scan the body for any signal of a clustered structure.
+        let mut has_clustered_structure = false;
+        let mut k = open;
+        while k <= close {
+            // PRIMARY KEY defaults to CLUSTERED; explicit CLUSTERED keyword also counts.
+            if is_word(&tokens[k], "CLUSTERED") { has_clustered_structure = true; break; }
+            if is_word(&tokens[k], "PRIMARY") {
+                let n = skip_comments(tokens, k + 1);
+                if n <= close && is_word(&tokens[n], "KEY") {
+                    // PK is clustered unless explicitly NONCLUSTERED right after.
+                    let m = skip_comments(tokens, n + 1);
+                    let nonclustered = m <= close && is_word(&tokens[m], "NONCLUSTERED");
+                    if !nonclustered { has_clustered_structure = true; break; }
+                }
+            }
+            k += 1;
+        }
+        if !has_clustered_structure {
+            // Anchor at the CREATE token preceding this body.
+            let mut c = open;
+            while c > 0 && !is_word(&tokens[c], "TABLE") { c -= 1; }
+            out.push(finding(
+                "hygiene.heap_table",
+                Severity::Warning,
+                "CREATE TABLE with no clustered index or PRIMARY KEY — this is a heap. Heaps fragment, can't be range-seeked, and accumulate forward pointers on updates.",
+                Some(make_loc(&tokens[c])),
+                Some("Add a clustered index (often the PRIMARY KEY). If a heap is intentional (short-lived staging / bulk load target), document it. For analytic, scan-heavy tables consider a clustered columnstore index instead.".into()),
+            ));
+        }
+    }
+    out
+}
+
+/// VARCHAR(MAX) / NVARCHAR(MAX) column declarations. MAX types are stored
+/// off-row, can't be index keys, and amplify reads when the data is actually
+/// small. Advisory — sometimes genuinely needed for large text/blobs.
+pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    let mut count = 0;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind != TokKind::Word { continue; }
+        let ty = t.text.to_ascii_uppercase();
+        if ty != "VARCHAR" && ty != "NVARCHAR" { continue; }
+        // pattern: <type> ( MAX )
+        let lp = tokens.get(i + 1);
+        let maxw = tokens.get(i + 2);
+        let rp = tokens.get(i + 3);
+        if lp.map(|p| p.text == "(").unwrap_or(false)
+            && maxw.map(|m| m.kind == TokKind::Word && m.text.eq_ignore_ascii_case("MAX")).unwrap_or(false)
+            && rp.map(|p| p.text == ")").unwrap_or(false)
+        {
+            count += 1;
+            if count > 3 { break; }
+            out.push(finding(
+                "ddl.varchar_max_overuse",
+                Severity::Info,
+                format!("{}(MAX) column: MAX types store off-row, can't be index keys, and amplify reads when the values are actually small.", ty),
+                Some(make_loc(t)),
+                Some("If the real data fits, use a bounded length (e.g. NVARCHAR(400)) so the column can be indexed and stays in-row. Reserve (MAX) for genuinely large text/blob content.".into()),
+            ));
+        }
+    }
+    out
+}

@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.scalar_udf_in_select"],
+  "server_version": 2025,
+  "category": "hygiene"
+}

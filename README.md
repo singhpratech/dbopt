@@ -7,7 +7,9 @@ execution plans, and your live server metrics, then tells you exactly what's
 going to hurt — and how to fix it, with the reasoning cited. Nothing leaves your
 machine unless you choose to send it.
 
-> SQL Server today. PostgreSQL and MySQL next. One tool for your whole data estate.
+> **SQL Server is the product today** — comprehensive and fully tested.
+> PostgreSQL and MySQL are on the roadmap (future, not yet implemented). The
+> engine seam is in place so they slot in without disturbing the SQL Server core.
 
 ---
 
@@ -127,11 +129,14 @@ Run `cargo run -p eval -- --html` and open the report to see the live board.
 
 ## Status & roadmap
 
-**v0.1 — SQL Server (2014 → 2025).** Complete and tested: static analysis,
+**SQL Server (2014 → 2025) — the product. Complete and tested.** Static analysis,
 estimated-plan analysis, live DMVs, continuous sentinel, AI assistant, web UI.
+This is where the focus is and where it stays sharp.
 
-**Toward v1.0 — multi-engine.** The headline next milestone is an `Engine`
-abstraction so PostgreSQL and MySQL plug in alongside SQL Server:
+**Future (roadmap, not yet started) — multi-engine.** PostgreSQL and MySQL are a
+deliberate *later*. The `Engine` seam already exists (the analyzer accepts a
+target engine and filters rules), so adding them never destabilizes the SQL
+Server core. The abstraction that unlocks them:
 
 - an `Engine` trait for connection, catalog/metric queries, plan capture, and
   version model (SQL Server's `sys.dm_*` / `SHOWPLAN_XML` → Postgres

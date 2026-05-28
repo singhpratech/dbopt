@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.heap_table"],
+  "server_version": 2025,
+  "category": "indexing"
+}

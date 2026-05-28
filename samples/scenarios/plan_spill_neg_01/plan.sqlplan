@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+<BatchSequence><Batch><Statements><StmtSimple><QueryPlan>
+<RelOp NodeId="0" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimatedTotalSubtreeCost="0.5" EstimateRows="1"/>
+</QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
+</ShowPlanXML>
