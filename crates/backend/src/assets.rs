@@ -21,20 +21,41 @@ struct WebDist;
 pub async fn serve(uri: Uri) -> Response {
     let raw = uri.path().trim_start_matches('/');
     let candidate = if raw.is_empty() { "index.html" } else { raw };
-    if let Some(file) = WebDist::get(candidate).or_else(|| WebDist::get("index.html")) {
-        let mime = mime_guess::from_path(candidate).first_or_octet_stream();
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, mime.as_ref())
-            .header(header::CACHE_CONTROL, "public, max-age=300")
-            .body(Body::from(file.data.into_owned()))
-            .unwrap();
-    }
-    // No bundle baked in. Hand back a friendly message instead of a blank 404.
+    // Serve the exact file, else fall back to index.html for client-side routing.
+    let (data, served) = match WebDist::get(candidate) {
+        Some(f) => (f.data.into_owned(), candidate),
+        None => match WebDist::get("index.html") {
+            Some(f) => (f.data.into_owned(), "index.html"),
+            None => return placeholder(),
+        },
+    };
+    let mime = mime_guess::from_path(served).first_or_octet_stream();
+    // index.html is the pointer to content-hashed bundles, so it must NEVER be
+    // cached — a stale copy keeps loading an old bundle (the "nothing changed"
+    // trap). The hashed files under /assets/ are immutable (name changes every
+    // build), so they cache for a year. Everything else gets a short TTL.
+    let cache = if served == "index.html" {
+        "no-store, must-revalidate"
+    } else if served.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=300"
+    };
+    return Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CACHE_CONTROL, cache)
+        .body(Body::from(data))
+        .unwrap();
+}
+
+/// No bundle baked in (dev mode). Hand back a friendly message, not a blank 404.
+fn placeholder() -> Response {
     let html = include_str!("./placeholder.html");
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(html))
         .unwrap()
 }
