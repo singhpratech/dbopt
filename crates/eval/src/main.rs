@@ -166,6 +166,7 @@ fn grade(sc: &Scenario) -> Result<Outcome> {
         plan_xml: sc.plan.clone(),
         dmv_bundle: sc.bundle.clone(),
         server_version: Some(sc.expected.server_version),
+        engine: None, // SQL Server (v0.x default)
     };
     let report = analyze(&input);
     let fired: Vec<String> = report.findings.iter().map(|f| f.rule.0.clone()).collect();

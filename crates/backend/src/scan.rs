@@ -77,6 +77,7 @@ pub async fn scan_database(Json(req): Json<ScanReq>) -> impl IntoResponse {
             plan_xml: None,
             dmv_bundle: None,
             server_version: Some(req.server_version),
+            engine: None, // SQL Server (v0.x default)
         };
         let report = analyzer_core::analyze(&input);
         let mut c = 0usize;

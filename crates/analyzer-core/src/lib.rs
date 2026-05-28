@@ -13,20 +13,37 @@ pub use report::{AnalysisReport, ChartData};
 
 use serde::{Deserialize, Serialize};
 
+/// Target database engine. SQL Server is the only implemented engine in v0.x;
+/// Postgres/MySQL are placeholders for the v1.0 multi-engine work. Rules declare
+/// which engines they apply to (see `rules::Rule`), and the analyzer skips rules
+/// that don't apply to the requested engine. Defaults to SQL Server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    #[default]
+    SqlServer,
+    Postgres,
+    MySql,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnalyzeInput {
     pub sql: Option<String>,
     pub plan_xml: Option<String>,
     pub dmv_bundle: Option<dmv::DmvBundle>,
     pub server_version: Option<u16>,
+    /// Target engine; `None` is treated as SQL Server (the v0.x default).
+    #[serde(default)]
+    pub engine: Option<Engine>,
 }
 
 pub fn analyze(input: &AnalyzeInput) -> AnalysisReport {
     let mut report = AnalysisReport::default();
+    let engine = input.engine.unwrap_or_default();
 
     if let Some(sql) = input.sql.as_deref() {
         let tokens = tokens::tokenize(sql);
-        report.findings.extend(rules::run_all(sql, &tokens, input.server_version));
+        report.findings.extend(rules::run_all(sql, &tokens, input.server_version, engine));
         report.charts.severity_timeline = report::severity_timeline(sql, &report.findings);
     }
 

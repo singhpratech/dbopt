@@ -152,6 +152,7 @@ async fn analyze(Json(req): Json<AnalyzeReq>) -> impl IntoResponse {
         plan_xml: req.plan_xml,
         dmv_bundle: req.dmv_bundle.and_then(|v| serde_json::from_value(v).ok()),
         server_version: req.server_version,
+        engine: None, // SQL Server (v0.x default)
     };
     let report = analyzer_core::analyze(&input);
     (StatusCode::OK, Json(report))
