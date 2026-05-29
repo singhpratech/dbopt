@@ -85,6 +85,10 @@ export function App() {
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  // Live DB connection status — pinged for real (SELECT @@VERSION), so the
+  // topbar tells the truth about whether we can reach the configured server.
+  type DbStatus = "unconfigured" | "checking" | "connected" | "offline";
+  const [dbStatus, setDbStatus] = useState<DbStatus>("unconfigured");
   const editorHandle = useRef<SqlEditorHandle | null>(null);
 
   // ── Persistence effects ─────────────────────────────
@@ -146,6 +150,42 @@ export function App() {
     void ailog.hydrate();
     void runlog.hydrate();
   }, []);
+
+  // ── Live DB connection probe ────────────────────────
+  // Honestly reflect whether the configured server is reachable. Runs on
+  // connection change (debounced) and on a 20s heartbeat so a dropped DB shows
+  // OFFLINE rather than the UI implying everything is fine.
+  useEffect(() => {
+    let cancelled = false;
+    const configured = !!conn.server && (conn.auth_mode !== "sql" || (!!conn.user && !!conn.password));
+    if (!configured) {
+      setDbStatus("unconfigured");
+      return;
+    }
+    async function probe() {
+      if (cancelled) return;
+      setDbStatus((s) => (s === "connected" ? s : "checking"));
+      try {
+        const r = await backend.connect({
+          server: conn.server,
+          database: conn.database || undefined,
+          user: conn.auth_mode === "sql" ? conn.user : undefined,
+          password: conn.auth_mode === "sql" ? conn.password : undefined,
+          trust_cert: conn.trust_cert,
+        } as any);
+        if (!cancelled) setDbStatus(r.ok ? "connected" : "offline");
+      } catch {
+        if (!cancelled) setDbStatus("offline");
+      }
+    }
+    const debounce = setTimeout(probe, 400);
+    const beat = setInterval(probe, 20000);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounce);
+      clearInterval(beat);
+    };
+  }, [conn.server, conn.database, conn.user, conn.password, conn.auth_mode, conn.trust_cert]);
 
   // ── Run analyzer on every change ────────────────────
   useEffect(() => {
@@ -248,6 +288,35 @@ export function App() {
             <span className={`dot ${backendOk ? "ok" : backendOk === false ? "err" : "busy"}`} />
             <span className="k">backend</span>
             <span className="v">{backendOk == null ? "…" : backendOk ? "UP" : "DOWN"}</span>
+          </div>
+          <div
+            className="group"
+            title={
+              dbStatus === "unconfigured"
+                ? "No SQL Server connection configured (open CONN)"
+                : `${conn.server}${conn.database ? " / " + conn.database : ""}`
+            }
+          >
+            <span
+              className={`dot ${
+                dbStatus === "connected" ? "ok" : dbStatus === "offline" ? "err" : dbStatus === "checking" ? "busy" : ""
+              }`}
+            />
+            <span className="k">db</span>
+            <span className={`v ${dbStatus === "connected" ? "ok" : dbStatus === "offline" ? "crit" : ""}`}>
+              {dbStatus === "connected"
+                ? "CONNECTED"
+                : dbStatus === "offline"
+                ? "OFFLINE"
+                : dbStatus === "checking"
+                ? "…"
+                : "NOT SET"}
+            </span>
+            {dbStatus === "connected" && conn.server && (
+              <span className="v" style={{ color: "var(--text-dim)" }}>
+                {conn.server}
+              </span>
+            )}
           </div>
           {dmv ? (
             <div className="group">

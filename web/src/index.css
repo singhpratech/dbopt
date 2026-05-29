@@ -654,6 +654,11 @@ body {
 .conn-form, .form {
   padding: 20px 22px;
   max-width: 720px;
+  /* Workspace roots inside .ws-body (overflow:hidden) MUST scroll themselves,
+     or content below the fold is clipped and unreachable. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .form-section {
   border: 1px solid var(--line);
@@ -778,6 +783,9 @@ body {
 .providers {
   padding: 20px 22px;
   max-width: 980px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .providers > h3 {
   font: 10px var(--f-tech);
@@ -1112,8 +1120,16 @@ kbd {
 /* ============================================================
    Advisor workspace
    ============================================================ */
-/* Full-width: the advisor is data-dense, never cap it to a narrow column. */
-.advisor { max-width: none; width: 100%; }
+/* Full-width: the advisor is data-dense, never cap it to a narrow column.
+   It's a flex child of .ws-body (overflow:hidden), so it MUST scroll itself —
+   otherwise recommendation cards below the fold are clipped and unreachable. */
+.advisor {
+  max-width: none;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 .advisor-spinner {
   width: 13px; height: 13px;
