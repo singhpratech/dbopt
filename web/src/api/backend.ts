@@ -275,28 +275,37 @@ export interface KeyTestResult {
 /** Providers that support backend key-test + model discovery. */
 export const DISCOVERY_PROVIDERS = ["openai", "openrouter", "anthropic"] as const;
 
-/** List a cloud provider's models (proxied through the backend). */
-export async function listCloudModels(providerKey: string, config: unknown): Promise<CloudModel[]> {
-  const r = await fetch(`${BASE}/llm/cloud/${providerKey}/models`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ config }),
-  });
+/** POST JSON with an abort-on-timeout guard so a hung call can't spin forever. */
+async function postJson(path: string, body: unknown, timeoutMs = 25_000): Promise<any> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let r: Response;
+  try {
+    r = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+  } catch (e: any) {
+    throw new Error(e?.name === "AbortError" ? "timed out — is the backend reachable?" : (e?.message ?? "network error"));
+  } finally {
+    clearTimeout(timer);
+  }
   const j = await r.json().catch(() => ({}));
   if (!r.ok || (j as any).error) throw new Error((j as any).error || `HTTP ${r.status}`);
-  return (j as any).models as CloudModel[];
+  return j;
+}
+
+/** List a cloud provider's models (proxied through the backend). */
+export async function listCloudModels(providerKey: string, config: unknown): Promise<CloudModel[]> {
+  const j = await postJson(`/llm/cloud/${providerKey}/models`, { config });
+  return j.models as CloudModel[];
 }
 
 /** Validate a cloud provider API key (and report credits for OpenRouter). */
 export async function testCloudKey(providerKey: string, config: unknown): Promise<KeyTestResult> {
-  const r = await fetch(`${BASE}/llm/cloud/${providerKey}/test`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ config }),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || (j as any).error) throw new Error((j as any).error || `HTTP ${r.status}`);
-  return j as KeyTestResult;
+  return (await postJson(`/llm/cloud/${providerKey}/test`, { config })) as KeyTestResult;
 }
 
 async function consumeSse(r: Response, onToken: (s: string) => void) {

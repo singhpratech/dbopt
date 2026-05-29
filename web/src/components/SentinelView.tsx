@@ -267,7 +267,9 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
             <tbody>
               {report.top_queries.map((q, i) => (
                 <tr key={i}>
-                  <td style={{ ...mono, width: 64 }}>{q.query_id}</td>
+                  {/* Column widths come from the <colgroup> (table-layout:fixed); per-cell
+                      widths here would be ignored, so they're omitted to avoid confusion. */}
+                  <td style={mono}>{q.query_id}</td>
                   <td style={{ ...mono, color: "var(--text)" }}>
                     {/* Clamp to 2 lines so one giant query can't balloon the table;
                         whitespace is collapsed for a clean preview and the full
@@ -286,9 +288,9 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
                       {q.query_sql_text ? q.query_sql_text.replace(/\s+/g, " ").trim() : "—"}
                     </div>
                   </td>
-                  <td style={{ ...numCell, width: 90 }}>{fmtMs(q.total_duration_ms)}</td>
-                  <td style={{ ...numCell, width: 90 }}>{q.executions.toLocaleString()}</td>
-                  <td style={{ ...numCell, width: 90 }}>{fmtMs(q.avg_duration_ms)}</td>
+                  <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
+                  <td style={numCell}>{q.executions.toLocaleString()}</td>
+                  <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
                 </tr>
               ))}
             </tbody>

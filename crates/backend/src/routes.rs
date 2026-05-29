@@ -190,19 +190,30 @@ pub struct DiscoverReq {
     pub config: serde_json::Value,
 }
 
+/// Client mistakes -> 400, upstream/network failures -> 502. Messages are
+/// already sanitized by the discover layer (never an upstream body).
+fn discover_err(e: providers::discover::DiscoverError) -> axum::response::Response {
+    use providers::discover::DiscoverError::*;
+    let (code, msg) = match e {
+        BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+        Upstream(m) => (StatusCode::BAD_GATEWAY, m),
+    };
+    (code, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
 /// List a cloud provider's available models (proxied to dodge browser CORS).
-async fn llm_cloud_models(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> impl IntoResponse {
+async fn llm_cloud_models(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> axum::response::Response {
     match providers::discover::list_models(&provider, &req.config).await {
         Ok(models) => (StatusCode::OK, Json(serde_json::json!({ "models": models }))).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => discover_err(e),
     }
 }
 
 /// Validate a cloud provider API key (and, for OpenRouter, report credits).
-async fn llm_cloud_test(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> impl IntoResponse {
+async fn llm_cloud_test(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> axum::response::Response {
     match providers::discover::test_key(&provider, &req.config).await {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => discover_err(e),
     }
 }
 

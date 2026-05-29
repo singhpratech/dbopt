@@ -5,7 +5,7 @@ use std::convert::Infallible;
 
 use crate::ollama::Message;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     // The frontend's provider config object identifies the provider via `key`,
     // not `provider`, and the route handler overwrites this from the URL path
@@ -17,6 +17,21 @@ pub struct Config {
     pub base_url: Option<String>,
     pub deployment: Option<String>,
     pub api_version: Option<String>,
+}
+
+// Manual Debug that redacts the API key — never let a credential reach a log
+// line or panic backtrace via {:?}.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("deployment", &self.deployment)
+            .field("api_version", &self.api_version)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -75,9 +90,10 @@ pub fn stream_chat(
             Err(e) => { yield Ok(Event::default().event("error").data(e.to_string())); return; }
         };
         if !resp.status().is_success() {
+            // Do NOT forward the upstream body to the browser — it can echo request
+            // metadata. The status code is enough for the user to act on.
             let s = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            yield Ok(Event::default().event("error").data(format!("{}: {}", s, txt)));
+            yield Ok(Event::default().event("error").data(format!("provider returned HTTP {}", s.as_u16())));
             return;
         }
 

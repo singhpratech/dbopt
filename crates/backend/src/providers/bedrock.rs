@@ -5,13 +5,27 @@ use std::convert::Infallible;
 
 use crate::ollama::Message;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     pub model: String,
     pub region: String,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
+}
+
+// Manual Debug that redacts the AWS credentials.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<String>| if o.is_some() { "<redacted>" } else { "None" };
+        f.debug_struct("Config")
+            .field("model", &self.model)
+            .field("region", &self.region)
+            .field("access_key_id", &redact(&self.access_key_id))
+            .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("session_token", &redact(&self.session_token))
+            .finish()
+    }
 }
 
 #[cfg(not(feature = "bedrock"))]

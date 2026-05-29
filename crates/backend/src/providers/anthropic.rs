@@ -5,12 +5,24 @@ use std::convert::Infallible;
 
 use crate::ollama::Message;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     pub model: String,
     pub api_key: String,
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
+}
+
+// Manual Debug that redacts the API key.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("model", &self.model)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -57,12 +69,16 @@ pub fn stream_chat(
             .await
         {
             Ok(r) => r,
-            Err(e) => { yield Ok(Event::default().event("error").data(e.to_string())); return; }
+            Err(e) => {
+                let msg = if e.is_timeout() { "request timed out" } else if e.is_connect() { "connection failed" } else { "network error" };
+                yield Ok(Event::default().event("error").data(format!("anthropic unreachable: {msg}")));
+                return;
+            }
         };
         if !resp.status().is_success() {
+            // Don't forward the upstream body — status code only.
             let s = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            yield Ok(Event::default().event("error").data(format!("{}: {}", s, txt)));
+            yield Ok(Event::default().event("error").data(format!("provider returned HTTP {}", s.as_u16())));
             return;
         }
 

@@ -292,24 +292,8 @@ body {
   flex-shrink: 0;          /* controls keep their space; status clips instead */
 }
 .brand { flex-shrink: 0; }
-.topbar-controls .ctl {
-  padding: 0 14px;
-  height: 100%;
-  display: flex; align-items: center; gap: 8px;
-  font: 11px var(--f-tech);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  background: transparent;
-  border: 0;
-  border-left: 1px solid var(--line);
-  cursor: pointer;
-}
-.topbar-controls .ctl:hover { color: var(--signal); background: var(--signal-faint); }
-.topbar-controls .ctl select {
-  background: transparent; color: var(--text); border: 0;
-  font: 11px var(--f-tech); letter-spacing: 0.08em; cursor: pointer;
-}
+/* (.topbar-controls .ctl removed — the version selector moved to the status bar
+   footer as .statusbar-ver; those rules were dead.) */
 .topbar-controls .theme-toggle {
   padding: 0 14px;
   height: 100%;
@@ -604,7 +588,7 @@ body {
 /* ============================================================
    Editor wrap
    ============================================================ */
-.editor-host { flex: 1; min-height: 0; background: #0a0d12; }
+.editor-host { flex: 1; min-height: 0; background: var(--bg-base); }
 .editor-host .monaco-editor, .editor-host .monaco-editor-background {
   background-color: var(--bg-base) !important;
 }

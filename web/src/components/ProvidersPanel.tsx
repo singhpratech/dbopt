@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProviderConfig, ProviderKey } from "../store/persist";
 import { evaluate, PROVIDER_LABEL, type ProviderRuntimeStatus } from "../llm/router";
 import { clearAll } from "../store/persist";
@@ -44,8 +44,31 @@ export function ProvidersPanel({
   const [testMsg, setTestMsg] = useState<Partial<Record<ProviderKey, { ok: boolean; text: string }>>>({});
   const [comboOpen, setComboOpen] = useState<ProviderKey | null>(null);
   const [showKey, setShowKey] = useState<Partial<Record<ProviderKey, boolean>>>({});
+  // Model-load errors are kept separate from key-test results so one doesn't clobber the other.
+  const [modelMsg, setModelMsg] = useState<Partial<Record<ProviderKey, string>>>({});
+  // Pending combobox-close timer, cancelled on refocus so a quick blur→focus can't close the open list.
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const supportsDiscovery = (k: ProviderKey) => (DISCOVERY_PROVIDERS as readonly string[]).includes(k);
+
+  // If the browser can't mask a text input via CSS, fall back to a real password
+  // field so an API key is never rendered in plaintext (Firefox < 118, etc.).
+  const maskSupported = useMemo(
+    () =>
+      typeof CSS !== "undefined" &&
+      !!CSS.supports &&
+      (CSS.supports("-webkit-text-security", "disc") || CSS.supports("text-security", "disc")),
+    [],
+  );
+
+  function openCombo(k: ProviderKey) {
+    if (blurTimer.current) { clearTimeout(blurTimer.current); blurTimer.current = null; }
+    if (supportsDiscovery(k) && models[k]) setComboOpen(k);
+  }
+  function closeComboSoon(k: ProviderKey) {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    blurTimer.current = setTimeout(() => setComboOpen((o) => (o === k ? null : o)), 150);
+  }
 
   async function runTest(k: ProviderKey) {
     setBusy((b) => ({ ...b, [k]: "test" }));
@@ -62,6 +85,7 @@ export function ProvidersPanel({
 
   async function loadModels(k: ProviderKey) {
     setBusy((b) => ({ ...b, [k]: "models" }));
+    setModelMsg((m) => ({ ...m, [k]: undefined }));
     try {
       const list = await listCloudModels(k, providers[k]);
       // Sort by vendor group (the "vendor/" prefix), then by id within a vendor,
@@ -69,7 +93,7 @@ export function ProvidersPanel({
       list.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
       setModels((m) => ({ ...m, [k]: list }));
     } catch (e: any) {
-      setTestMsg((m) => ({ ...m, [k]: { ok: false, text: e.message } }));
+      setModelMsg((m) => ({ ...m, [k]: e?.message ?? "failed to load models" }));
     } finally {
       setBusy((b) => ({ ...b, [k]: undefined }));
     }
@@ -151,48 +175,49 @@ export function ProvidersPanel({
                     <label>Model</label>
                     <input
                       value={p.model}
-                      onChange={(e) => {
-                        patch(k, { model: e.target.value });
-                        if (supportsDiscovery(k) && models[k]) setComboOpen(k);
-                      }}
-                      onFocus={() => { if (supportsDiscovery(k) && models[k]) setComboOpen(k); }}
-                      onBlur={() => setTimeout(() => setComboOpen((o) => (o === k ? null : o)), 150)}
+                      onChange={(e) => { patch(k, { model: e.target.value }); openCombo(k); }}
+                      onFocus={() => openCombo(k)}
+                      onBlur={() => closeComboSoon(k)}
                       spellCheck={false}
                       autoComplete="off"
                       autoCorrect="off"
                       autoCapitalize="off"
                       name={`dbopt-model-${k}`}
-                      placeholder={supportsDiscovery(k) && models[k] ? "type to search models, or click to browse" : undefined}
+                      role="combobox"
+                      aria-expanded={comboOpen === k}
+                      aria-autocomplete="list"
+                      placeholder={supportsDiscovery(k) && models[k] ? "type to search models — clear to browse all" : undefined}
                     />
                     {supportsDiscovery(k) && models[k] && comboOpen === k && (() => {
                       const all = models[k]!;
                       const q = (p.model ?? "").toLowerCase().trim();
-                      const exact = all.some((m) => m.id === p.model);
+                      // Pure substring filter on the typed text. Empty field => the full
+                      // list (browse). No "exact match shows everything" shortcut, which
+                      // made the list jump to all 357 the moment you typed a full id.
                       const matches = all.filter(
-                        (m) => !q || exact || m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q),
+                        (m) => !q || m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q),
                       );
-                      const CAP = 200;
                       return (
                         <ul className="pd-combo" role="listbox">
-                          {matches.length === 0 && (
-                            <li className="pd-combo-empty">no models match “{p.model}”</li>
-                          )}
-                          {matches.slice(0, CAP).map((m) => (
-                            <li
-                              key={m.id}
-                              className={`pd-combo-opt ${m.id === p.model ? "on" : ""}`}
-                              role="option"
-                              aria-selected={m.id === p.model}
-                              // onMouseDown (not onClick) fires before the input's blur,
-                              // and preventDefault keeps focus so the pick registers.
-                              onMouseDown={(e) => { e.preventDefault(); patch(k, { model: m.id }); setComboOpen(null); }}
-                            >
-                              <span className="pd-combo-id">{m.id}</span>
-                              <span className="pd-combo-meta">{fmtModel(m)}</span>
-                            </li>
-                          ))}
-                          {matches.length > CAP && (
-                            <li className="pd-combo-empty">+{matches.length - CAP} more — keep typing to narrow</li>
+                          {matches.length === 0 ? (
+                            // Not an option — keep it out of the listbox semantics.
+                            <li className="pd-combo-empty" role="presentation">no models match “{p.model}”</li>
+                          ) : (
+                            // No cap — the list scrolls (.pd-combo is height-bounded + overflow-y:auto).
+                            matches.map((m) => (
+                              <li
+                                key={m.id}
+                                className={`pd-combo-opt ${m.id === p.model ? "on" : ""}`}
+                                role="option"
+                                aria-selected={m.id === p.model}
+                                // onMouseDown (not onClick) fires before the input's blur,
+                                // and preventDefault keeps focus so the pick registers.
+                                onMouseDown={(e) => { e.preventDefault(); patch(k, { model: m.id }); setComboOpen(null); }}
+                              >
+                                <span className="pd-combo-id">{m.id}</span>
+                                <span className="pd-combo-meta">{fmtModel(m)}</span>
+                              </li>
+                            ))
                           )}
                         </ul>
                       );
@@ -202,12 +227,14 @@ export function ProvidersPanel({
                     <div className="form-row full">
                       <label>API key</label>
                       <div className="key-field">
-                        {/* Masked via CSS (-webkit-text-security), NOT type=password —
-                            a real password field makes the browser treat this as a login
-                            form and pop "Manage Passwords" over the model combobox. */}
+                        {/* Prefer masking via CSS on a type=text input — a real
+                            type=password makes the browser treat the card as a login
+                            form and pop "Manage Passwords" over the model combobox.
+                            But if the browser can't mask via CSS, fall back to a real
+                            password field so the key is NEVER shown in plaintext. */}
                         <input
-                          type="text"
-                          className={showKey[k] ? "" : "key-masked"}
+                          type={maskSupported || showKey[k] ? "text" : "password"}
+                          className={maskSupported && !showKey[k] ? "key-masked" : ""}
                           value={p.api_key ?? ""}
                           onChange={(e) => patch(k, { api_key: e.target.value })}
                           placeholder={`${PROVIDER_LABEL[k]} key`}
@@ -221,6 +248,8 @@ export function ProvidersPanel({
                           type="button"
                           className="key-toggle"
                           onClick={() => setShowKey((s) => ({ ...s, [k]: !s[k] }))}
+                          aria-pressed={!!showKey[k]}
+                          aria-label={showKey[k] ? "Hide API key" : "Show API key"}
                           title={showKey[k] ? "Hide key" : "Show key"}
                         >
                           {showKey[k] ? "hide" : "show"}
@@ -333,9 +362,12 @@ export function ProvidersPanel({
                         {busy[k] === "models" ? "Loading…" : models[k] ? "Reload models" : "Load models"}
                       </button>
                       {testMsg[k] && (
-                        <span className={`pd-result ${testMsg[k]!.ok ? "ok" : "bad"}`}>
+                        <span className={`pd-result ${testMsg[k]!.ok ? "ok" : "bad"}`} role="status">
                           {testMsg[k]!.ok ? "✓" : "✗"} {testMsg[k]!.text}
                         </span>
+                      )}
+                      {modelMsg[k] && (
+                        <span className="pd-result bad" role="status">✗ {modelMsg[k]}</span>
                       )}
                     </div>
 
