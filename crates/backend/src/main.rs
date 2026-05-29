@@ -6,6 +6,7 @@ mod routes;
 mod sentinel_api;
 mod logs;
 mod scan;
+mod health;
 
 use axum::{routing::get, Router};
 use std::net::SocketAddr;

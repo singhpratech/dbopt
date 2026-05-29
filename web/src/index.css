@@ -1218,3 +1218,136 @@ kbd {
   cursor: pointer;
 }
 .ddl-copy:hover { border-color: var(--signal); color: var(--signal); }
+
+/* ============================================================
+   Health front-door
+   Grade header + signal strip + ranked issue list. Reuses
+   .advisor (scroll host), .advisor-card, .pill, .ddl/.ddl-copy,
+   .empty/.form-status. Only the layout chrome + grade chips are
+   defined here; all colors alias existing tokens.
+   ============================================================ */
+.health-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-panel);
+}
+.health-header.scanning .health-grade { animation: pulse 1.2s infinite; }
+
+.health-grade {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.health-score {
+  font: 30px var(--f-tech);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+  letter-spacing: 0.02em;
+  min-width: 1.6ch;
+  text-align: right;
+}
+/* Grade chips: piggy-back on .pill geometry, recolor by band. */
+.pill.grade-a, .health-grade.grade-a .health-score {
+  color: var(--ok); border-color: rgba(58, 210, 159, 0.4); background: rgba(58, 210, 159, 0.1);
+}
+.pill.grade-b {
+  color: var(--signal); border-color: var(--signal-dim); background: var(--signal-faint);
+}
+.health-grade.grade-b .health-score { color: var(--signal); }
+.pill.grade-c, .health-grade.grade-c .health-score {
+  color: var(--warn); border-color: rgba(255, 209, 102, 0.4); background: rgba(255, 209, 102, 0.1);
+}
+.pill.grade-d, .health-grade.grade-d .health-score {
+  color: var(--err); border-color: rgba(255, 140, 66, 0.4); background: rgba(255, 140, 66, 0.1);
+}
+.pill.grade-f, .health-grade.grade-f .health-score {
+  color: var(--crit); border-color: rgba(255, 58, 74, 0.4); background: var(--crit-glow);
+}
+.pill.grade-unknown, .health-grade.grade-unknown .health-score {
+  color: var(--text-dim); border-color: var(--line); background: var(--bg-elev);
+}
+
+.health-head-meta { display: flex; flex-direction: column; gap: 4px; }
+.health-status {
+  font: 12px var(--f-tech);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+.health-window {
+  font: 11px var(--f-mono);
+  color: var(--text-muted);
+}
+.health-actions { margin-left: auto; margin-top: 0; align-items: center; }
+
+.health-learning {
+  margin-top: 12px;
+  padding: 10px 14px;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.08);
+  border: 1px solid rgba(255, 209, 102, 0.4);
+  border-left: 2px solid var(--warn);
+}
+
+/* ── Signal strip — topbar-counter style ──────────── */
+.health-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+.health-signal {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 16px;
+  border-right: 1px solid var(--line);
+}
+.health-signal:last-child { border-right: 0; }
+.health-signal-k {
+  font: 10px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.health-signal-v {
+  font: 14px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+.health-signal-v.crit { color: var(--crit); }
+.health-signal-v.warn { color: var(--warn); }
+
+/* ── Ranked issue list — RecCard grid ─────────────── */
+.health-issue-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.health-toggle {
+  margin-top: 8px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: 11px var(--f-tech);
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.health-toggle:hover { color: var(--signal); }
+.health-issue-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.health-issue-foot .ddl-copy { position: static; }
+.health-err-card .form-status { margin-top: 14px; text-align: left; }

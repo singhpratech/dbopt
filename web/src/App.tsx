@@ -14,6 +14,7 @@ import { AiLogs } from "./components/AiLogs";
 import { SentinelView } from "./components/SentinelView";
 import { AnalysisHistory } from "./components/AnalysisHistory";
 import { AdvisorPanel } from "./components/AdvisorPanel";
+import { HealthOverview } from "./components/HealthOverview";
 import * as P from "./store/persist";
 import * as backend from "./api/backend";
 import * as ailog from "./store/ailog";
@@ -27,6 +28,7 @@ const LEGACY_SAMPLE_PREFIX = "-- sqlopt :: paste your T-SQL here";
 type Workspace = P.UiPrefs["workspace"];
 
 const WORKSPACES: { key: Workspace; glyph: string; label: string }[] = [
+  { key: "health",     glyph: "❤", label: "HEALTH" },
   { key: "analyze",    glyph: "▤", label: "ANALYZE" },
   { key: "plan",       glyph: "◫", label: "PLAN" },
   { key: "indexes",    glyph: "◰", label: "INDEX" },
@@ -371,6 +373,12 @@ export function App() {
       </nav>
 
       <main className="main">
+        {ui.workspace === "health" && (
+          <Workspace title="Health" subtitle="aggregated database health · one-screen front-door">
+            <HealthOverview conn={conn} ui={ui} setUi={setUi} />
+          </Workspace>
+        )}
+
         {ui.workspace === "analyze" && (
           <Workspace title="Analyze" subtitle="static + plan + dmv → findings">
             <div className="split-60">

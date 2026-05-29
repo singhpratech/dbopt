@@ -8,3 +8,4 @@ web/src/wasm/
 
 # Local Claude Code session data
 .claude/
+web/tsconfig.tsbuildinfo

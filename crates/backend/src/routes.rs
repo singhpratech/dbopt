@@ -9,7 +9,7 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 
-use crate::{logs, ollama, providers, scan, sentinel_api, sqlserver};
+use crate::{health, logs, ollama, providers, scan, sentinel_api, sqlserver};
 
 pub fn router() -> Router {
     Router::new()
@@ -17,6 +17,7 @@ pub fn router() -> Router {
         .route("/connect", post(connect))
         .route("/databases", post(databases))
         .route("/advise", post(advise))
+        .route("/health/db", post(health_db))
         .route("/dmv", post(dmv))
         .route("/explain", post(explain))
         .route("/llm/models", get(llm_models))
@@ -90,6 +91,26 @@ async fn advise(Json(req): Json<ConnectReq>) -> impl IntoResponse {
                 .into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// POST /api/health/db body: the same connection payload as `/advise`, plus an
+/// optional `engine` selector (defaults to `"sqlserver"`).
+#[derive(Debug, Deserialize)]
+pub struct HealthReq {
+    #[serde(flatten)]
+    pub conn: ConnectReq,
+    pub engine: Option<String>,
+}
+
+/// Aggregated, engine-neutral database health front-door. Dispatches to the
+/// per-engine `HealthProvider`; unknown engines → 400, unimplemented → 501,
+/// provider failures (e.g. connection) → 502.
+async fn health_db(Json(req): Json<HealthReq>) -> impl IntoResponse {
+    let engine = req.engine.as_deref().unwrap_or("sqlserver");
+    match health::run(engine, &req.conn).await {
+        Ok(report) => (StatusCode::OK, Json(serde_json::to_value(&report).unwrap())).into_response(),
+        Err((code, msg)) => (code, Json(serde_json::json!({ "error": msg }))).into_response(),
     }
 }
 

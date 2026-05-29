@@ -196,7 +196,7 @@ export const defaultProviders: Record<ProviderKey, ProviderConfig> = {
 export type Theme = "dark" | "light";
 
 export interface UiPrefs {
-  workspace: "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
+  workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
   server_version: 2014 | 2016 | 2017 | 2019 | 2022 | 2025;
   theme: Theme;
   draft_sql: string;
@@ -204,7 +204,7 @@ export interface UiPrefs {
 }
 
 export const defaultUi: UiPrefs = {
-  workspace: "analyze",
+  workspace: "health",
   server_version: 2025,
   theme: "dark",
   draft_sql: "",

@@ -1,5 +1,16 @@
-import type { ConnectionInfo } from "../types";
+import type { ConnectionInfo, HealthReport } from "../types";
 import type { ProviderConfig } from "../store/persist";
+
+// Re-export the Health front-door wire types so components can import them
+// alongside the fetch helper (mirrors how Recommendation lives here).
+export type {
+  HealthReport,
+  Issue,
+  IssueSeverity,
+  FixAction,
+  SeverityCounts,
+  SignalSummary,
+} from "../types";
 
 const BASE = "/api";
 
@@ -109,6 +120,27 @@ export async function advise(info: ConnectionInfo): Promise<{ recommendations: R
   }
   const body = (await r.json()) as { recommendations?: Recommendation[] };
   return { recommendations: body.recommendations ?? [] };
+}
+
+/**
+ * Health front-door. Server-side aggregated, engine-neutral report fusing
+ * advisor recs + static findings + sentinel pain into one ranked HealthReport.
+ *
+ * POSTs to /health/db (NOT GET /health — that is the liveness probe used by
+ * backendHealthy()). Same payload + ok/error unwrap as advise(); the engine
+ * param lets future Postgres/MySQL providers plug in behind the same endpoint.
+ */
+export async function getDbHealth(info: ConnectionInfo, engine = "sqlserver"): Promise<HealthReport> {
+  const r = await fetch(`${BASE}/health/db`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...info, engine }),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `health scan failed (${r.status})`);
+  }
+  return r.json() as Promise<HealthReport>;
 }
 
 export async function pullDmv(info: ConnectionInfo) {

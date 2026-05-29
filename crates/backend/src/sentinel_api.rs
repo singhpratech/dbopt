@@ -249,7 +249,7 @@ pub async fn status() -> impl IntoResponse {
 /// Build a `WeeklyReport` for the configured window, or an empty stub if the
 /// DB hasn't been created yet (e.g. user hit the report tab before ever
 /// starting the daemon).
-fn build_report(window: TimeRange) -> WeeklyReport {
+pub fn build_report(window: TimeRange) -> WeeklyReport {
     let path = SentinelConfig::default_db_path();
     match Storage::open(&path) {
         Ok(storage) => render_weekly(&storage, window),
