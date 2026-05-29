@@ -3,13 +3,22 @@ import type { SizeNode } from "../types";
 import { EmptyChart } from "./EmptyChart";
 import { chartPalette } from "../chartTheme";
 
-export function SizeTreemap({ data, theme }: { data: SizeNode[]; theme?: string }) {
+export function SizeTreemap({
+  data,
+  theme,
+  action,
+}: {
+  data: SizeNode[];
+  theme?: string;
+  action?: { label: string; onClick: () => void };
+}) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
         glyph="◧"
         title="No storage telemetry"
         hint="Run 'Pull DMVs & analyze' against a live server to read sys.partitions + allocation_units and break down storage by schema → table → index."
+        action={action}
       />
     );
   }

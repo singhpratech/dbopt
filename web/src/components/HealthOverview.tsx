@@ -3,6 +3,7 @@ import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type { HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
+import { Term } from "./Term";
 
 /**
  * The HEALTH workspace — the one-screen front-door (default landing).
@@ -19,10 +20,13 @@ export function HealthOverview({
   conn,
   ui,
   setUi,
+  onOpenHelp,
 }: {
   conn: SqlConnectionConfig;
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
+  /** Open the Help & glossary slide-over (optionally scrolled to a term). */
+  onOpenHelp?: (focusTerm?: string) => void;
 }) {
   const [report, setReport] = useState<HealthReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -90,12 +94,14 @@ export function HealthOverview({
         <div className="health-grades">
           <GradeBlock
             label="Reliability"
+            term="reliability_grade"
             sublabel="Are users hitting errors?"
             grade={reliabilityGrade}
             score={live ? report!.reliability_score : null}
           />
           <GradeBlock
             label="Efficiency"
+            term="efficiency_grade"
             sublabel="Speed & cost to reclaim"
             grade={efficiencyGrade}
             score={live ? report!.efficiency_score : null}
@@ -127,6 +133,22 @@ export function HealthOverview({
         </div>
       </div>
 
+      {/* Plain-language read of the two grades, so the letters never stand alone. */}
+      <p className="health-grade-explain">
+        Two grades, two questions. <strong>Reliability</strong> asks{" "}
+        <em>“are users hitting errors right now?”</em> (deadlocks, blocking, harmful waits).{" "}
+        <strong>Efficiency</strong> asks <em>“how much speed and cost could you reclaim?”</em> —
+        a lower efficiency grade means more easy wins are available, not that anything is broken.
+        {onOpenHelp && (
+          <>
+            {" "}
+            <button className="link-inline" onClick={() => onOpenHelp("reliability_grade")}>
+              How grades work →
+            </button>
+          </>
+        )}
+      </p>
+
       {report?.is_learning && !err && (
         <div className="health-learning">
           Learning mode — DMV signal counters look freshly reset (post-restart). Absence of
@@ -139,13 +161,25 @@ export function HealthOverview({
         <div className="empty">
           <div className="empty-card">
             <div className="empty-glyph">❤</div>
-            <div className="empty-title">No connection</div>
-            <div className="empty-hint">Configure a SQL Server connection first.</div>
-            <div className="form-actions" style={{ justifyContent: "center" }}>
+            <div className="empty-title">No SQL Server connected</div>
+            <div className="empty-hint">
+              Point sqlopt at a SQL Server instance and it will read the built-in
+              performance views, then grade your database in plain English. Nothing
+              leaves your machine.
+            </div>
+            <div className="empty-action">
               <button className="btn primary" onClick={() => setUi({ ...ui, workspace: "connection" })}>
-                Open CONN
+                Connect a SQL Server
               </button>
             </div>
+            {onOpenHelp && (
+              <div className="empty-sub-action">
+                New here?{" "}
+                <button className="link-inline" onClick={() => onOpenHelp()}>
+                  Open the guide
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ) : busy && !report ? (
@@ -169,21 +203,22 @@ export function HealthOverview({
         <>
           {/* ── 2) SIGNAL STRIP ─────────────────────────── */}
           <div className="health-signals">
-            <Signal label="missing idx" value={report.signals.missing_indexes} />
-            <Signal label="unused idx" value={report.signals.unused_indexes} />
-            <Signal label="duplicate idx" value={report.signals.duplicate_indexes} />
-            <Signal label="columnstore" value={report.signals.columnstore_candidates} />
-            <Signal label="deadlocks" value={report.signals.deadlock_count} tone="crit" />
-            <Signal label="blocking" value={report.signals.blocking_incidents} tone="warn" />
+            <Signal label="missing idx" term="missing_index" value={report.signals.missing_indexes} />
+            <Signal label="unused idx" term="unused_index" value={report.signals.unused_indexes} />
+            <Signal label="duplicate idx" term="duplicate_index" value={report.signals.duplicate_indexes} />
+            <Signal label="columnstore" term="columnstore" value={report.signals.columnstore_candidates} />
+            <Signal label="deadlocks" term="deadlock" value={report.signals.deadlock_count} tone="crit" />
+            <Signal label="blocking" term="blocking" value={report.signals.blocking_incidents} tone="warn" />
             <Signal
               label="top wait"
+              term="wait_type"
               value={
                 report.signals.top_wait_type
                   ? `${report.signals.top_wait_type} · ${fmtMs(report.signals.top_wait_time_ms)}`
                   : "—"
               }
             />
-            <Signal label="regressions" value={report.signals.regressed_queries} tone="warn" />
+            <Signal label="regressions" term="regression" value={report.signals.regressed_queries} tone="warn" />
           </div>
 
           {/* ── 3) LANED ISSUE SECTIONS ─────────────────── */}
@@ -227,11 +262,14 @@ export function HealthOverview({
 /** One headline grade cell: big grade chip + score, with a plain-English sublabel. */
 function GradeBlock({
   label,
+  term,
   sublabel,
   grade,
   score,
 }: {
   label: string;
+  /** Glossary slug — wraps the label so hovering explains the grade. */
+  term: string;
   sublabel: string;
   grade: string;
   score: number | null;
@@ -244,7 +282,9 @@ function GradeBlock({
         <span className="health-score">{score != null ? score : "—"}</span>
       </div>
       <div className="health-grade-meta">
-        <div className="health-grade-label">{label}</div>
+        <div className="health-grade-label">
+          <Term k={term}>{label}</Term>
+        </div>
         <div className="health-grade-sub">{sublabel}</div>
       </div>
     </div>
@@ -293,17 +333,22 @@ function IssueSection({
 
 function Signal({
   label,
+  term,
   value,
   tone,
 }: {
   label: string;
+  /** Glossary slug — wraps the counter label so hovering explains it. */
+  term?: string;
   value: number | string;
   tone?: "crit" | "warn";
 }) {
   const hot = typeof value === "number" && value > 0 && tone;
   return (
     <div className="health-signal">
-      <span className="health-signal-k">{label}</span>
+      <span className="health-signal-k">
+        {term ? <Term k={term}>{label}</Term> : label}
+      </span>
       <span className={`health-signal-v${hot ? ` ${tone}` : ""}`}>
         {typeof value === "number" ? value.toLocaleString() : value}
       </span>

@@ -15,6 +15,8 @@ import { SentinelView } from "./components/SentinelView";
 import { AnalysisHistory } from "./components/AnalysisHistory";
 import { AdvisorPanel } from "./components/AdvisorPanel";
 import { HealthOverview } from "./components/HealthOverview";
+import { HelpPanel } from "./components/HelpPanel";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import * as P from "./store/persist";
 import * as backend from "./api/backend";
 import * as ailog from "./store/ailog";
@@ -24,6 +26,20 @@ import * as runlog from "./store/runlog";
 // screen starts empty, on real input) and we purge it from storage on load so
 // returning users don't keep seeing placeholder content.
 const LEGACY_SAMPLE_PREFIX = "-- sqlopt :: paste your T-SQL here";
+
+// A realistic, anti-pattern-laden T-SQL sample loaded ONLY on the explicit
+// [Load sample] action in the ANALYZE editor (never auto-seeded). It packs a
+// few demonstrable smells: a non-SARGable predicate (function on a column), a
+// NOLOCK hint, SELECT *, and a leading-wildcard LIKE — so the analyzer lights
+// up immediately and a first-time user can see what findings look like.
+const SAMPLE_SQL = `-- Sample query with a few common anti-patterns.
+-- Load this to see what sqlopt flags; replace it with your own T-SQL.
+SELECT *
+FROM dbo.Orders o WITH (NOLOCK)
+JOIN dbo.Customers c ON c.CustomerId = o.CustomerId
+WHERE YEAR(o.OrderDate) = 2025          -- non-SARGable: function wraps the column
+  AND c.Email LIKE '%@example.com'       -- leading wildcard defeats any index
+ORDER BY o.OrderDate DESC;`;
 
 type Workspace = P.UiPrefs["workspace"];
 
@@ -92,6 +108,21 @@ export function App() {
   type DbStatus = "unconfigured" | "checking" | "connected" | "offline";
   const [dbStatus, setDbStatus] = useState<DbStatus>("unconfigured");
   const editorHandle = useRef<SqlEditorHandle | null>(null);
+
+  // ── Onboarding + help ───────────────────────────────
+  // First-run gate: show the welcome → connect wizard until the user has
+  // onboarded (connected or skipped). `conn.server` is always pre-filled from
+  // defaultConn and loadServers() always seeds a profile, so the ONLY reliable
+  // "brand-new user" signal is the persisted onboarded flag.
+  const [showWizard, setShowWizard] = useState(() => !P.isOnboarded());
+  // Help & glossary slide-over. `helpFocus` (a glossary slug) opens it scrolled
+  // to a specific term — used by the HEALTH grade explanation link.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpFocus, setHelpFocus] = useState<string | undefined>(undefined);
+  const openHelp = (focusTerm?: string) => {
+    setHelpFocus(focusTerm);
+    setHelpOpen(true);
+  };
 
   // ── Persistence effects ─────────────────────────────
   useEffect(() => {
@@ -343,6 +374,15 @@ export function App() {
             <span className="glyph">{ui.theme === "dark" ? "☀" : "☾"}</span>
             <span className="lbl">{ui.theme === "dark" ? "LIGHT" : "DARK"}</span>
           </button>
+          <button
+            className="help-toggle"
+            title="Help & glossary"
+            aria-label="Open help and glossary"
+            onClick={() => openHelp()}
+          >
+            <span className="glyph">?</span>
+            <span className="lbl">HELP</span>
+          </button>
           <label className="ctl">
             <span style={{ color: "var(--text-dim)" }}>TARGET</span>
             <select value={ui.server_version} onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}>
@@ -375,7 +415,7 @@ export function App() {
       <main className="main">
         {ui.workspace === "health" && (
           <Workspace title="Health" subtitle="aggregated database health · one-screen front-door">
-            <HealthOverview conn={conn} ui={ui} setUi={setUi} />
+            <HealthOverview conn={conn} ui={ui} setUi={setUi} onOpenHelp={openHelp} />
           </Workspace>
         )}
 
@@ -407,6 +447,18 @@ export function App() {
                     {explainErr}
                   </div>
                 )}
+                {!ui.draft_sql.trim() && (
+                  <div className="editor-hint-bar">
+                    <span className="editor-hint-text">Paste your T-SQL to analyze it live — or load a sample to see what sqlopt flags.</span>
+                    <button
+                      className="editor-hint-load"
+                      onClick={() => setUi({ ...ui, draft_sql: SAMPLE_SQL })}
+                      title="Load a realistic example with a few anti-patterns"
+                    >
+                      Load sample
+                    </button>
+                  </div>
+                )}
                 <div className="editor-host">
                   <SqlEditor
                     value={ui.draft_sql}
@@ -436,7 +488,11 @@ export function App() {
         {ui.workspace === "plan" && (
           <Workspace title="Plan cost" subtitle="execution plan operator breakdown">
             <ChartContainer>
-              <PlanTreemap data={report?.charts.plan_treemap ?? []} theme={ui.theme} />
+              <PlanTreemap
+                data={report?.charts.plan_treemap ?? []}
+                theme={ui.theme}
+                action={{ label: "Generate from SQL", onClick: () => setUi({ ...ui, workspace: "analyze" }) }}
+              />
             </ChartContainer>
           </Workspace>
         )}
@@ -444,7 +500,11 @@ export function App() {
         {ui.workspace === "indexes" && (
           <Workspace title="Index usage" subtitle="per-index reads vs writes since last stats reset">
             <ChartContainer>
-              <IndexHeatmap data={report?.charts.index_heatmap ?? []} theme={ui.theme} />
+              <IndexHeatmap
+                data={report?.charts.index_heatmap ?? []}
+                theme={ui.theme}
+                action={{ label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }}
+              />
             </ChartContainer>
           </Workspace>
         )}
@@ -452,7 +512,11 @@ export function App() {
         {ui.workspace === "sizes" && (
           <Workspace title="Storage" subtitle="reserved KB per schema → table → index">
             <ChartContainer>
-              <SizeTreemap data={report?.charts.size_treemap ?? []} theme={ui.theme} />
+              <SizeTreemap
+                data={report?.charts.size_treemap ?? []}
+                theme={ui.theme}
+                action={{ label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }}
+              />
             </ChartContainer>
           </Workspace>
         )}
@@ -460,7 +524,11 @@ export function App() {
         {ui.workspace === "severity" && (
           <Workspace title="Severity timeline" subtitle="findings distributed by source line">
             <ChartContainer>
-              <SeverityBar data={report?.charts.severity_timeline ?? []} theme={ui.theme} />
+              <SeverityBar
+                data={report?.charts.severity_timeline ?? []}
+                theme={ui.theme}
+                action={{ label: "Paste T-SQL to analyze", onClick: () => setUi({ ...ui, workspace: "analyze" }) }}
+              />
             </ChartContainer>
           </Workspace>
         )}
@@ -529,8 +597,38 @@ export function App() {
         <span className="sec right">Target <strong>SQL {ui.server_version}</strong></span>
         <span className="sec"><kbd>⌘K</kbd> · sqlopt</span>
       </footer>
+
+      {/* Help & glossary slide-over — always mounted; `open` toggles it. */}
+      <HelpPanel open={helpOpen} onClose={() => setHelpOpen(false)} focusTerm={helpFocus} />
+
+      {/* First-run welcome → connect wizard. Rendered over the app on the gate;
+          on connect we lift the connection and land on HEALTH (it auto-scans). */}
+      {showWizard && (
+        <OnboardingWizard
+          conn={conn}
+          onConnect={(c) => {
+            setConn(c);
+            // Reflect the wizard's connection into a saved profile so it shows
+            // up in the CONN workspace's server list (and survives reload).
+            const name = c.server || "localhost,1433";
+            const next: P.ServerProfile[] = [...servers, { ...c, id: cryptoId(), name }];
+            saveServerList(next, next[next.length - 1].id);
+            setUi({ ...ui, workspace: "health" });
+          }}
+          onClose={() => setShowWizard(false)}
+        />
+      )}
     </div>
   );
+}
+
+/** Stable-ish id for a wizard-created server profile (mirrors persist.newId). */
+function cryptoId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `srv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 }
 
 function Workspace({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {

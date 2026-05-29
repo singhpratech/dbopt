@@ -3,13 +3,22 @@ import type { TreemapNode } from "../types";
 import { EmptyChart } from "./EmptyChart";
 import { chartPalette } from "../chartTheme";
 
-export function PlanTreemap({ data, theme }: { data: TreemapNode[]; theme?: string }) {
+export function PlanTreemap({
+  data,
+  theme,
+  action,
+}: {
+  data: TreemapNode[];
+  theme?: string;
+  action?: { label: string; onClick: () => void };
+}) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
         glyph="◫"
         title="No execution plan"
         hint="Drop a SQL Server .sqlplan XML file (from SSMS → 'Save Execution Plan As') to visualize per-operator estimated cost."
+        action={action}
       />
     );
   }

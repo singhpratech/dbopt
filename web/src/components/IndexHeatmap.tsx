@@ -3,13 +3,22 @@ import type { HeatmapCell } from "../types";
 import { EmptyChart } from "./EmptyChart";
 import { chartPalette } from "../chartTheme";
 
-export function IndexHeatmap({ data, theme }: { data: HeatmapCell[]; theme?: string }) {
+export function IndexHeatmap({
+  data,
+  theme,
+  action,
+}: {
+  data: HeatmapCell[];
+  theme?: string;
+  action?: { label: string; onClick: () => void };
+}) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
         glyph="◰"
         title="No index telemetry"
         hint="Connect to a SQL Server instance from the Connection workspace and run 'Pull DMVs & analyze' to populate sys.dm_db_index_usage_stats."
+        action={action}
       />
     );
   }
@@ -26,6 +35,7 @@ export function IndexHeatmap({ data, theme }: { data: HeatmapCell[]; theme?: str
         glyph="◰"
         title="No index usage yet"
         hint="All usage counters are zero. sys.dm_db_index_usage_stats resets on SQL Server restart or index rebuild — let the workload run, then re-pull DMVs."
+        action={action}
       />
     );
   }

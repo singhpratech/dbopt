@@ -3,9 +3,17 @@ import type { SeverityBucket } from "../types";
 import { EmptyChart } from "./EmptyChart";
 import { chartPalette } from "../chartTheme";
 
-export function SeverityBar({ data, theme }: { data: SeverityBucket[]; theme?: string }) {
+export function SeverityBar({
+  data,
+  theme,
+  action,
+}: {
+  data: SeverityBucket[];
+  theme?: string;
+  action?: { label: string; onClick: () => void };
+}) {
   if (!data || data.length === 0) {
-    return <EmptyChart glyph="≡" title="No SQL to evaluate" hint="Paste T-SQL into the editor to see per-line severity distribution." />;
+    return <EmptyChart glyph="≡" title="No SQL to evaluate" hint="Paste T-SQL into the editor to see per-line severity distribution." action={action} />;
   }
   const c = chartPalette(theme);
   const lines = data.map((d) => `${d.line}`);

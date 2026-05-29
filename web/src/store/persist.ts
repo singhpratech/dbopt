@@ -32,6 +32,19 @@ export function clearAll(): void {
   toDel.forEach((k) => localStorage.removeItem(k));
 }
 
+/**
+ * First-run onboarding flag. Gates the welcome → connect wizard so it only
+ * appears until the user has either connected or explicitly skipped. Stored
+ * under `sqlopt.onboarded`.
+ */
+export function isOnboarded(): boolean {
+  return load<boolean>("onboarded", false) === true;
+}
+
+export function setOnboarded(value: boolean): void {
+  save<boolean>("onboarded", value);
+}
+
 export type AuthMode = "integrated" | "sql";
 
 export interface SqlConnectionConfig {

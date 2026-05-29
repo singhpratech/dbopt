@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
 import * as backend from "../api/backend";
 import type { Recommendation, RecommendationKind, RecommendationPriority } from "../api/backend";
+import { Term, TermText } from "./Term";
 
 /**
  * The ADVISOR workspace. Connection is configured at SERVER scope (CONN
@@ -102,7 +103,9 @@ function RecCard({ rec }: { rec: Recommendation }) {
     <div className="advisor-card">
       <div className="advisor-card-head">
         <span className={`pill ${priorityClass(rec.priority)}`}>{rec.priority}</span>
-        <span className="advisor-kind">{kindLabel(rec.kind)}</span>
+        <span className="advisor-kind">
+          <Term k={kindTerm(rec.kind)}>{kindLabel(rec.kind)}</Term>
+        </span>
         <span className="advisor-title">{rec.title}</span>
         <span className="advisor-score" title="impact score">
           {Math.round(rec.impact_score).toLocaleString()}
@@ -111,7 +114,7 @@ function RecCard({ rec }: { rec: Recommendation }) {
       <div className="advisor-object">
         <code>{rec.object}</code>
       </div>
-      <div className="advisor-rationale">{rec.rationale}</div>
+      <div className="advisor-rationale"><TermText>{rec.rationale}</TermText></div>
       <div className="ddl-wrap">
         <button className="ddl-copy" onClick={copy} title="Copy T-SQL to clipboard">
           {copied ? "Copied ✓" : "Copy"}
@@ -137,5 +140,16 @@ function kindLabel(k: RecommendationKind): string {
     case "merge_index":          return "MERGE INDEX";
     case "columnstore_candidate": return "COLUMNSTORE";
     default:                     return k;
+  }
+}
+
+/** Map a rec kind onto a glossary slug for the hover definition on its chip. */
+function kindTerm(k: RecommendationKind): string {
+  switch (k) {
+    case "create_index":          return "missing_index";
+    case "drop_index":            return "unused_index";
+    case "merge_index":           return "duplicate_index";
+    case "columnstore_candidate": return "columnstore";
+    default:                      return "__none__";
   }
 }
