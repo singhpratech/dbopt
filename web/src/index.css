@@ -375,6 +375,34 @@ body {
   user-select: none;
 }
 
+/* ── Collapsible rail: icon-only by default, expands to icon + label ──
+   Collapsed hides the per-item label and the group captions (dividers stay),
+   keeping the rail to its 52px icon column. Expanding widens the grid column
+   and shows labels to the right of each icon (left-aligned). */
+.rail-btn > span:not(.glyph) { display: none; }
+.rail .rail-group-cap { display: none; }
+.rail-btn .glyph { font-size: 15px; }
+
+.app.rail-expanded { --rail: 188px; }
+.app.rail-expanded .rail { align-items: stretch; }
+.app.rail-expanded .rail-btn {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 11px;
+  height: 34px;
+  padding: 0 16px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.app.rail-expanded .rail-btn .glyph { font-size: 14px; width: 16px; text-align: center; }
+.app.rail-expanded .rail-btn > span:not(.glyph) { display: inline; white-space: nowrap; }
+.app.rail-expanded .rail-group-head { justify-content: flex-start; padding-left: 16px; }
+.app.rail-expanded .rail .rail-group-cap { display: block; text-align: left; }
+
+/* Expand/collapse toggle pinned at the rail bottom. */
+.rail-toggle { color: var(--text-dim); border-top: 1px solid var(--line); margin-top: 4px; flex-shrink: 0; }
+.rail-toggle:hover { color: var(--signal); }
+
 /* ── Main area ────────────────────────────────────── */
 .main {
   grid-area: main;
@@ -1322,8 +1350,13 @@ kbd {
   border: 1px solid var(--line);
   border-left: 2px solid var(--line-strong);
   background: var(--bg-panel);
+  /* Wrap the status/window/actions below the grades when the row is too narrow,
+     so nothing overlaps. */
+  flex-wrap: wrap;
 }
-.health-header > .health-grades { flex: 1; min-width: 0; }
+.health-header > .health-grades { flex: 1 1 420px; min-width: 0; }
+.health-header > .health-head-meta { flex-shrink: 0; min-width: 0; }
+.health-header > .health-actions { flex-shrink: 0; margin-left: auto; }
 .health-header.scanning .health-grades { animation: pulse 1.2s infinite; }
 
 /* ── Dual-grade header: two side-by-side grade cells ──────── */
@@ -1339,6 +1372,13 @@ kbd {
   padding: 10px 14px;
   border: 1px solid var(--line);
   background: var(--bg-elev);
+  min-width: 0;            /* let the grid cell shrink so text never overflows */
+}
+.health-grade-meta { min-width: 0; }
+.health-grade-label, .health-grade-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* The chip+score column carries the band color via the grade-* class. */
 .health-grade-chip {

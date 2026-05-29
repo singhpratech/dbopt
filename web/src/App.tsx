@@ -149,6 +149,10 @@ export function App() {
     setHelpFocus(focusTerm);
     setHelpOpen(true);
   };
+  // Collapsible nav rail: icon-only by default; expands to show labels beside
+  // each icon. Persisted so the choice sticks.
+  const [railExpanded, setRailExpanded] = useState<boolean>(() => P.load<boolean>("rail_expanded", false));
+  useEffect(() => { P.save("rail_expanded", railExpanded); }, [railExpanded]);
 
   // ── Persistence effects ─────────────────────────────
   useEffect(() => {
@@ -376,7 +380,7 @@ export function App() {
 
   // ── Render ──────────────────────────────────────────
   return (
-    <div className="app">
+    <div className={`app${railExpanded ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="brand">
           <span className="mark">▣</span>
@@ -505,6 +509,15 @@ export function App() {
           </div>
         ))}
         <div className="rail-spacer" />
+        <button
+          className="rail-btn rail-toggle"
+          onClick={() => setRailExpanded((e) => !e)}
+          title={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
+          aria-label={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
+        >
+          <span className="glyph">{railExpanded ? "«" : "»"}</span>
+          <span>{railExpanded ? "Collapse" : "Expand"}</span>
+        </button>
       </nav>
 
       <main className="main">
