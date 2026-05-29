@@ -468,15 +468,14 @@ export function App() {
             <span className="glyph">?</span>
             <span className="lbl">HELP</span>
           </button>
-          <label className="ctl">
-            <span style={{ color: "var(--text-dim)" }}>TARGET</span>
+          <label className="ctl" title="Target SQL Server version — tailors the rules and version-specific advice">
             <select value={ui.server_version} onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}>
-              <option value={2014}>SQL 2014</option>
-              <option value={2016}>SQL 2016</option>
-              <option value={2017}>SQL 2017</option>
-              <option value={2019}>SQL 2019</option>
-              <option value={2022}>SQL 2022</option>
-              <option value={2025}>SQL 2025</option>
+              <option value={2014}>SQL Server 2014</option>
+              <option value={2016}>SQL Server 2016</option>
+              <option value={2017}>SQL Server 2017</option>
+              <option value={2019}>SQL Server 2019</option>
+              <option value={2022}>SQL Server 2022</option>
+              <option value={2025}>SQL Server 2025</option>
             </select>
           </label>
         </div>
@@ -713,7 +712,7 @@ export function App() {
         <span className="sec">SQL <strong>{ui.draft_sql.length.toLocaleString()}</strong> chars</span>
         <span className="sec">Plan <strong>{ui.draft_plan ? `${(ui.draft_plan.length / 1024).toFixed(1)} KB` : "—"}</strong></span>
         <span className="sec">DMV <strong>{dmv ? "loaded" : "—"}</strong></span>
-        <span className="sec right">Target <strong>SQL {ui.server_version}</strong></span>
+        <span className="sec right"><strong>SQL Server {ui.server_version}</strong></span>
         <span className="sec"><kbd>⌘K</kbd> · sqlopt</span>
       </footer>
 
