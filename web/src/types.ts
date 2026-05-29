@@ -83,11 +83,17 @@ export type IssueSeverity = "critical" | "error" | "warning" | "info";
 
 export type FixAction = "execute" | "review" | "investigate";
 
+export type IssueLane = "reliability" | "opportunity";
+
 export interface Issue {
   id: string;
   source: "advisor" | "sentinel" | "static";
   kind: string;
   severity: IssueSeverity;
+  /** Which grade this issue counts against: active harm vs. a faster/cheaper win. */
+  lane: IssueLane;
+  /** One plain-English sentence of user impact, shown prominently on the card. */
+  consequence: string;
   impact_rank: number;
   title: string;
   affected_object: string;
@@ -121,9 +127,16 @@ export interface HealthReport {
   window_from: string;
   window_to: string;
   connected: { server: string; database?: string };
+  /** Back-compat headline = the RELIABILITY values ("are users hurting"). */
   score: number;
   grade: string;
   status: "excellent" | "good" | "fair" | "poor" | "critical" | "learning";
+  /** "Are users hitting errors?" — active harm / risk to users. */
+  reliability_score: number;
+  reliability_grade: string;
+  /** "Speed & cost to reclaim" — 100 = fully optimized, lower = more wins available. */
+  efficiency_score: number;
+  efficiency_grade: string;
   is_learning: boolean;
   counts: SeverityCounts;
   issues: Issue[];

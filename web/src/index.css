@@ -1235,12 +1235,28 @@ kbd {
   border-left: 2px solid var(--line-strong);
   background: var(--bg-panel);
 }
-.health-header.scanning .health-grade { animation: pulse 1.2s infinite; }
+.health-header > .health-grades { flex: 1; min-width: 0; }
+.health-header.scanning .health-grades { animation: pulse 1.2s infinite; }
 
+/* ── Dual-grade header: two side-by-side grade cells ──────── */
+.health-grades {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
 .health-grade {
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+/* The chip+score column carries the band color via the grade-* class. */
+.health-grade-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .health-score {
   font: 30px var(--f-tech);
@@ -1250,24 +1266,35 @@ kbd {
   min-width: 1.6ch;
   text-align: right;
 }
+.health-grade-meta { display: flex; flex-direction: column; gap: 3px; }
+.health-grade-label {
+  font: 12px var(--f-tech);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+.health-grade-sub {
+  font: 11px var(--f-sans);
+  color: var(--text-muted);
+}
 /* Grade chips: piggy-back on .pill geometry, recolor by band. */
-.pill.grade-a, .health-grade.grade-a .health-score {
+.pill.grade-a, .health-grade-chip.grade-a .health-score {
   color: var(--ok); border-color: rgba(58, 210, 159, 0.4); background: rgba(58, 210, 159, 0.1);
 }
 .pill.grade-b {
   color: var(--signal); border-color: var(--signal-dim); background: var(--signal-faint);
 }
-.health-grade.grade-b .health-score { color: var(--signal); }
-.pill.grade-c, .health-grade.grade-c .health-score {
+.health-grade-chip.grade-b .health-score { color: var(--signal); }
+.pill.grade-c, .health-grade-chip.grade-c .health-score {
   color: var(--warn); border-color: rgba(255, 209, 102, 0.4); background: rgba(255, 209, 102, 0.1);
 }
-.pill.grade-d, .health-grade.grade-d .health-score {
+.pill.grade-d, .health-grade-chip.grade-d .health-score {
   color: var(--err); border-color: rgba(255, 140, 66, 0.4); background: rgba(255, 140, 66, 0.1);
 }
-.pill.grade-f, .health-grade.grade-f .health-score {
+.pill.grade-f, .health-grade-chip.grade-f .health-score {
   color: var(--crit); border-color: rgba(255, 58, 74, 0.4); background: var(--crit-glow);
 }
-.pill.grade-unknown, .health-grade.grade-unknown .health-score {
+.pill.grade-unknown, .health-grade-chip.grade-unknown .health-score {
   color: var(--text-dim); border-color: var(--line); background: var(--bg-elev);
 }
 
@@ -1324,6 +1351,47 @@ kbd {
 }
 .health-signal-v.crit { color: var(--crit); }
 .health-signal-v.warn { color: var(--warn); }
+
+/* ── Laned issue sections — reliability first, then opportunities ── */
+.health-section { margin-top: 18px; }
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.section-dot { font-size: 9px; line-height: 1; color: var(--text-dim); }
+.health-section-reliability .section-dot { color: var(--crit); }
+.health-section-opportunity .section-dot { color: var(--signal); }
+.section-title {
+  font: 12px var(--f-tech);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+.section-count {
+  margin-left: auto;
+  font: 12px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elev);
+}
+.section-empty {
+  margin-top: 12px;
+  font: 12px var(--f-sans);
+  color: var(--text-muted);
+}
+
+/* Consequence — the plain-English user impact, prominent under the title. */
+.health-consequence {
+  margin: 8px 0 0;
+  font: 13px/1.5 var(--f-sans);
+  color: var(--text);
+}
 
 /* ── Ranked issue list — RecCard grid ─────────────── */
 .health-issue-list {

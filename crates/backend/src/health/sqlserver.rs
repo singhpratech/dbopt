@@ -51,12 +51,21 @@ impl HealthProvider for SqlServerHealthProvider {
         // --- static findings -> Issue -------------------------------------
         for f in &advice.findings {
             let severity = severity_str(f.severity);
+            // Lane by consequence: critical/error findings are correctness /
+            // user-facing risks (reliability); warning/info are opportunities.
+            let lane = match f.severity {
+                Severity::Critical | Severity::Error => "reliability",
+                Severity::Warning | Severity::Info => "opportunity",
+            };
             let affected_object = format!("rule:{}", f.rule.0);
             issues.push(Issue {
                 id: format!("static:finding:{affected_object}"),
                 source: "static".to_string(),
                 kind: "finding".to_string(),
                 severity: severity.to_string(),
+                lane: lane.to_string(),
+                // A finding's own message IS the plain-English consequence.
+                consequence: f.message.clone(),
                 impact_rank: static_impact(f.severity),
                 title: f.message.clone(),
                 affected_object,
@@ -83,6 +92,8 @@ impl HealthProvider for SqlServerHealthProvider {
                 source: "sentinel".to_string(),
                 kind: "deadlock".to_string(),
                 severity: severity.to_string(),
+                lane: "reliability".to_string(),
+                consequence: "Transactions are being killed as deadlock victims — users see errors and lose writes.".to_string(),
                 impact_rank: ((pain.deadlock_count * 1000).clamp(0, 10000)) as u32,
                 title: format!("{} deadlock(s) in the last 7 days", pain.deadlock_count),
                 affected_object: "server".to_string(),
@@ -106,6 +117,8 @@ impl HealthProvider for SqlServerHealthProvider {
                 source: "sentinel".to_string(),
                 kind: "blocking".to_string(),
                 severity: severity.to_string(),
+                lane: "reliability".to_string(),
+                consequence: "Sessions are stuck waiting on locks held by others — queries hang or time out.".to_string(),
                 impact_rank: (pain.blocking_incidents.clamp(0, 10000)) as u32,
                 title: format!(
                     "{} blocking incident(s) in the last 7 days",
@@ -131,6 +144,10 @@ impl HealthProvider for SqlServerHealthProvider {
                 source: "sentinel".to_string(),
                 kind: "wait".to_string(),
                 severity: "warning".to_string(),
+                lane: "reliability".to_string(),
+                consequence: format!(
+                    "The server spends most of its time waiting on {wait_label} — everything runs slower."
+                ),
                 impact_rank: ((pain.top_wait_time_ms / 1000).clamp(0, 10000)) as u32,
                 title: format!("High {wait_label} waits"),
                 affected_object: "server".to_string(),
@@ -158,6 +175,11 @@ impl HealthProvider for SqlServerHealthProvider {
                 source: "sentinel".to_string(),
                 kind: "regression".to_string(),
                 severity: severity.to_string(),
+                lane: "reliability".to_string(),
+                consequence: format!(
+                    "This query is {:.0}% slower than its recent baseline.",
+                    r.delta_pct
+                ),
                 impact_rank: ((r.delta_pct * 10.0).round() as i64).clamp(0, 9999) as u32,
                 title: format!("Query {} regressed {:.0}%", r.query_id, r.delta_pct),
                 affected_object,
@@ -198,8 +220,8 @@ impl HealthProvider for SqlServerHealthProvider {
             }
         }
 
-        // h. Score.
-        let (score, grade, status, is_learning) = score_report(&issues, &signals);
+        // h. Score (per-lane). Back-compat headline mirrors the reliability lane.
+        let scores = score_report(&issues, &signals);
         let counts = count_severities(&issues);
 
         Ok(HealthReport {
@@ -211,10 +233,14 @@ impl HealthProvider for SqlServerHealthProvider {
                 server: req.server.clone(),
                 database: req.database.clone(),
             },
-            score,
-            grade,
-            status,
-            is_learning,
+            score: scores.reliability_score,
+            grade: scores.reliability_grade,
+            status: scores.status,
+            reliability_score: scores.reliability_score,
+            reliability_grade: scores.reliability_grade,
+            efficiency_score: scores.efficiency_score,
+            efficiency_grade: scores.efficiency_grade,
+            is_learning: scores.is_learning,
             counts,
             issues,
             signals,
@@ -223,6 +249,10 @@ impl HealthProvider for SqlServerHealthProvider {
 }
 
 /// Map an advisor [`Recommendation`] into a neutral [`Issue`].
+///
+/// Advisor recs are always *opportunity* lane (faster/cheaper, nothing broken),
+/// so severity is CAPPED at "warning": advisor priority high/medium → warning,
+/// low → info. A columnstore candidate is an opportunity, never an error.
 fn rec_to_issue(rec: &Recommendation) -> Issue {
     let kind = match rec.kind {
         RecKind::CreateIndex => "missing_index",
@@ -231,8 +261,7 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         RecKind::ColumnstoreCandidate => "columnstore_candidate",
     };
     let severity = match rec.priority.as_str() {
-        "high" => "error",
-        "medium" => "warning",
+        "high" | "medium" => "warning",
         _ => "info",
     };
     let fix_action = if rec.priority == "high" {
@@ -240,11 +269,27 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
     } else {
         "review"
     };
+    let consequence = match rec.kind {
+        RecKind::CreateIndex => {
+            "Queries scan the whole table instead of seeking — slow reads and high CPU."
+        }
+        RecKind::DropIndex => {
+            "Written on every change but never read — wasted write cost and storage."
+        }
+        RecKind::MergeIndex => {
+            "Redundant with another index — double the write cost for no read benefit."
+        }
+        RecKind::ColumnstoreCandidate => {
+            "Large scan-heavy rowstore table — a columnstore index can be 5–10x faster and much smaller."
+        }
+    };
     Issue {
         id: format!("advisor:{kind}:{}", rec.object),
         source: "advisor".to_string(),
         kind: kind.to_string(),
         severity: severity.to_string(),
+        lane: "opportunity".to_string(),
+        consequence: consequence.to_string(),
         impact_rank: impact_rank_for(rec),
         title: rec.title.clone(),
         affected_object: rec.object.clone(),

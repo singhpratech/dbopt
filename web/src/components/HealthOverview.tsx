@@ -62,17 +62,28 @@ export function HealthOverview({
     }
   }, [conn.server, conn.database, scan]);
 
-  // The displayed grade collapses to "?" when we have nothing real to show.
-  const grade = err ? "?" : !connected ? "?" : report?.grade ?? "?";
-  const gradeClass = gradeChipClass(grade);
+  // Each grade collapses to "?" when we have nothing real to show.
+  const live = connected && !!report && !err;
+  const reliabilityGrade = live ? report!.reliability_grade ?? "?" : "?";
+  const efficiencyGrade = live ? report!.efficiency_grade ?? "?" : "?";
 
   return (
     <div className="advisor form">
-      {/* ── 1) GRADE HEADER ───────────────────────────── */}
+      {/* ── 1) DUAL-GRADE HEADER ──────────────────────── */}
       <div className={`health-header${busy ? " scanning" : ""}`}>
-        <div className={`health-grade ${gradeClass}`} title="overall health grade">
-          <span className="health-score">{connected && report && !err ? report.score : "—"}</span>
-          <span className={`pill ${gradeClass}`}>{grade}</span>
+        <div className="health-grades">
+          <GradeBlock
+            label="Reliability"
+            sublabel="Are users hitting errors?"
+            grade={reliabilityGrade}
+            score={live ? report!.reliability_score : null}
+          />
+          <GradeBlock
+            label="Efficiency"
+            sublabel="Speed & cost to reclaim"
+            grade={efficiencyGrade}
+            score={live ? report!.efficiency_score : null}
+          />
         </div>
         <div className="health-head-meta">
           <div className="health-status">
@@ -159,29 +170,91 @@ export function HealthOverview({
             <Signal label="regressions" value={report.signals.regressed_queries} tone="warn" />
           </div>
 
-          {/* ── 3) RANKED ISSUE LIST ────────────────────── */}
-          {report.issues.length === 0 ? (
-            <div className="empty">
-              <div className="empty-card">
-                <div className="empty-glyph">✦</div>
-                <div className="empty-title">No actionable issues</div>
-                <div className="empty-hint">
-                  {report.is_learning
-                    ? "Signal counters are still warming up. Re-check after the workload runs for a while."
-                    : "No missing/unused/duplicate indexes or sentinel pain detected. Healthy."}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="health-issue-list">
-              {report.issues.map((iss) => (
-                <IssueCard key={iss.id} iss={iss} ui={ui} setUi={setUi} />
-              ))}
-            </div>
-          )}
+          {/* ── 3) LANED ISSUE SECTIONS ─────────────────── */}
+          <IssueSection
+            tone="reliability"
+            heading="RELIABILITY — affecting users"
+            emptyLine="No reliability issues — users are unaffected."
+            issues={report.issues.filter((i) => i.lane === "reliability")}
+            ui={ui}
+            setUi={setUi}
+          />
+          <IssueSection
+            tone="opportunity"
+            heading="OPPORTUNITIES — performance & cost wins"
+            emptyLine="Fully optimized — no opportunities found."
+            issues={report.issues.filter((i) => i.lane === "opportunity")}
+            ui={ui}
+            setUi={setUi}
+          />
         </>
       ) : null}
     </div>
+  );
+}
+
+/** One headline grade cell: big grade chip + score, with a plain-English sublabel. */
+function GradeBlock({
+  label,
+  sublabel,
+  grade,
+  score,
+}: {
+  label: string;
+  sublabel: string;
+  grade: string;
+  score: number | null;
+}) {
+  const gradeClass = gradeChipClass(grade);
+  return (
+    <div className="health-grade" title={`${label} grade`}>
+      <div className={`health-grade-chip ${gradeClass}`}>
+        <span className={`pill ${gradeClass}`}>{grade}</span>
+        <span className="health-score">{score != null ? score : "—"}</span>
+      </div>
+      <div className="health-grade-meta">
+        <div className="health-grade-label">{label}</div>
+        <div className="health-grade-sub">{sublabel}</div>
+      </div>
+    </div>
+  );
+}
+
+/** A laned group of issue cards with a counted header and an empty-line fallback. */
+function IssueSection({
+  tone,
+  heading,
+  emptyLine,
+  issues,
+  ui,
+  setUi,
+}: {
+  tone: "reliability" | "opportunity";
+  heading: string;
+  emptyLine: string;
+  issues: Issue[];
+  ui: UiPrefs;
+  setUi: (u: UiPrefs) => void;
+}) {
+  return (
+    <section className={`health-section health-section-${tone}`}>
+      <div className="section-header">
+        <span className="section-dot" aria-hidden>
+          ●
+        </span>
+        <span className="section-title">{heading}</span>
+        <span className="section-count">{issues.length}</span>
+      </div>
+      {issues.length === 0 ? (
+        <div className="section-empty">{emptyLine}</div>
+      ) : (
+        <div className="health-issue-list">
+          {issues.map((iss) => (
+            <IssueCard key={iss.id} iss={iss} ui={ui} setUi={setUi} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -243,6 +316,8 @@ function IssueCard({
       <div className="advisor-object">
         <code>{iss.affected_object}</code>
       </div>
+
+      {iss.consequence && <p className="health-consequence">{iss.consequence}</p>}
 
       {iss.rationale && (
         <>

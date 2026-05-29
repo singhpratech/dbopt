@@ -33,9 +33,16 @@ pub struct HealthReport {
     pub window_from: DateTime<Utc>,
     pub window_to: DateTime<Utc>,
     pub connected: ConnectedInfo,
+    /// Back-compat headline = the RELIABILITY values ("are users hurting").
     pub score: u8,
     pub grade: char,
     pub status: String,
+    /// Reliability lane (active harm / risk to users).
+    pub reliability_score: u8,
+    pub reliability_grade: char,
+    /// Efficiency lane (100 = fully optimized; lower = more wins available).
+    pub efficiency_score: u8,
+    pub efficiency_grade: char,
     pub is_learning: bool,
     pub counts: SeverityCounts,
     pub issues: Vec<Issue>,
@@ -68,6 +75,11 @@ pub struct Issue {
     pub kind: String,
     /// `critical` | `error` | `warning` | `info`
     pub severity: String,
+    /// `reliability` (active harm / risk to users) | `opportunity` (faster /
+    /// cheaper, nothing broken). Drives lane grouping + scoring.
+    pub lane: String,
+    /// One plain-English sentence of user impact.
+    pub consequence: String,
     /// 0..=10000 — rank within a severity bucket (higher = more impactful).
     pub impact_rank: u32,
     pub title: String,
@@ -189,51 +201,81 @@ fn bucket_points(severity: &str) -> u32 {
     }
 }
 
-/// True when an issue contributes to the *structural* penalty bucket
-/// (index/schema shape) rather than the *pain* bucket (live runtime hurt).
-fn is_structural(kind: &str) -> bool {
-    matches!(
-        kind,
-        "missing_index" | "unused_index" | "duplicate_index" | "columnstore_candidate" | "finding"
-    )
+/// Outcome of dual-lane scoring. The top-level back-compat `score`/`grade`/
+/// `status` headline mirrors the *reliability* lane.
+pub struct LaneScores {
+    pub reliability_score: u8,
+    pub reliability_grade: char,
+    /// status word, from the reliability band (or "learning").
+    pub status: String,
+    pub efficiency_score: u8,
+    pub efficiency_grade: char,
+    pub is_learning: bool,
 }
 
-/// Compute `(score, grade, status, is_learning)` from the ranked issues + the
-/// signal summary.
+/// Compute the two lane scores from the ranked issues + the signal summary.
 ///
-/// LEARNING: a connection with literally no signal (no issues, no deadlocks,
-/// no blocking, sub-second top wait) is almost always a freshly restarted
-/// instance whose DMV counters reset — absence of signal is not the same as
-/// health, so we report a provisional A/95 in "learning" mode instead of a
-/// perfect 100.
-pub fn score_report(issues: &[Issue], signals: &SignalSummary) -> (u8, char, String, bool) {
-    let is_learning = issues.is_empty()
+/// Each lane sums severity-bucket points over its own issues:
+///   - `reliability_score` = clamp(100 - penalty, 0, 100), penalty capped at 80.
+///   - `efficiency_score`  = clamp(100 - penalty, 0, 100), penalty capped at 60.
+/// Grades A/B/C/D/F fall out of the 90/80/70/60 bands per lane.
+///
+/// LEARNING: when BOTH lanes have zero issues and there is no live
+/// deadlock/blocking/wait signal, the connection is almost always a freshly
+/// restarted instance whose DMV counters reset — absence of signal is not the
+/// same as health, so we report a provisional A/95 in "learning" mode for both
+/// lanes instead of a perfect 100.
+pub fn score_report(issues: &[Issue], signals: &SignalSummary) -> LaneScores {
+    let mut reliability_penalty: u32 = 0;
+    let mut opportunity_penalty: u32 = 0;
+    let mut reliability_count: u32 = 0;
+    let mut opportunity_count: u32 = 0;
+    for issue in issues {
+        let pts = bucket_points(&issue.severity);
+        if issue.lane == "opportunity" {
+            opportunity_penalty += pts;
+            opportunity_count += 1;
+        } else {
+            // Default unknown/empty lanes to reliability (conservative).
+            reliability_penalty += pts;
+            reliability_count += 1;
+        }
+    }
+
+    let is_learning = reliability_count == 0
+        && opportunity_count == 0
         && signals.deadlock_count == 0
         && signals.blocking_incidents == 0
         && signals.top_wait_time_ms < 1000;
     if is_learning {
-        return (95, 'A', "learning".to_string(), true);
+        return LaneScores {
+            reliability_score: 95,
+            reliability_grade: 'A',
+            status: "learning".to_string(),
+            efficiency_score: 95,
+            efficiency_grade: 'A',
+            is_learning: true,
+        };
     }
 
-    let mut structural: u32 = 0;
-    let mut pain: u32 = 0;
-    for issue in issues {
-        let pts = bucket_points(&issue.severity);
-        if is_structural(&issue.kind) {
-            structural += pts;
-        } else {
-            pain += pts;
-        }
+    // Caps: reliability penalty ≤ 80, opportunity penalty ≤ 60.
+    let reliability_penalty = reliability_penalty.min(80);
+    let opportunity_penalty = opportunity_penalty.min(60);
+
+    let reliability_score = (100i32 - reliability_penalty as i32).clamp(0, 100) as u8;
+    let efficiency_score = (100i32 - opportunity_penalty as i32).clamp(0, 100) as u8;
+
+    let (reliability_grade, status) = band(reliability_score);
+    let (efficiency_grade, _) = band(efficiency_score);
+
+    LaneScores {
+        reliability_score,
+        reliability_grade,
+        status: status.to_string(),
+        efficiency_score,
+        efficiency_grade,
+        is_learning: false,
     }
-    // Caps: structural ≤ 35, pain ≤ 45. Combined floor is 100-35-45 = 20.
-    let structural = structural.min(35);
-    let pain = pain.min(45);
-
-    let score = 100i32 - structural as i32 - pain as i32;
-    let score = score.clamp(0, 100) as u8;
-
-    let (grade, status) = band(score);
-    (score, grade, status.to_string(), false)
 }
 
 /// Map a score to a letter grade + status word.
