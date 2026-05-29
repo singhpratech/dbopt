@@ -142,3 +142,77 @@ export interface HealthReport {
   issues: Issue[];
   signals: SignalSummary;
 }
+
+/* ============================================================
+   Issue Detail + Remediation — the deep view behind a clicked
+   Issue card. ONE Remediation object renders uniformly whether
+   it is BACKEND-ENRICHED (deadlock/blocking/wait/regression, via
+   POST /api/health/issue/detail) or FRONTEND-TEMPLATED from
+   fields already on the Issue (the four advisor kinds + finding).
+
+   Shape mirrors the Rust serde structs in
+   crates/backend/src/health/enrichment.rs (snake_case wire).
+   ============================================================ */
+
+/** One ordered, imperative remediation step; may carry copy-paste T-SQL. */
+export interface RemediationStep {
+  /** Imperative step label. */
+  title: string;
+  /** Optional elaboration / rationale for the step. */
+  detail?: string;
+  /** Optional copy-paste T-SQL for this step. */
+  sql?: string;
+}
+
+/** Coarse, explainable risk band — never a fake-precise score (playbook §3). */
+export type RiskLevel = "safe" | "moderate" | "risky";
+
+/**
+ * One rung of a ranked solution ladder for the investigate kinds
+ * (deadlock/blocking/wait/regression). rank 0 = safest / most-likely first.
+ * Each rung pairs benefit (estimated_impact) with cost/caveat (notes) so the
+ * problem and the fix share a currency (playbook §2/§4).
+ */
+export interface SolutionOption {
+  /** 0 = safest / most-likely first. */
+  rank: number;
+  /** "index" | "lock-order" | "isolation" | "txn-scope" | "stats" | "query-rewrite" | … */
+  category: string;
+  description: string;
+  /** Null/omitted for procedural (non-DDL) fixes. */
+  sql_fix?: string;
+  risk_level: RiskLevel;
+  estimated_impact: string;
+  notes: string;
+}
+
+/**
+ * The complete remediation contract for ONE issue. diagnosis → solution →
+ * apply_safely → validate → rollback → impact, in that order (because-before-fix,
+ * playbook §1). advisor kinds omit `solutions`; deadlock carries `supplemental`
+ * (the parsed graph JSON) for power-user verification.
+ */
+export interface Remediation {
+  /** FK to Issue.id. */
+  issue_id: string;
+  /** Mirror of Issue.kind. */
+  issue_kind: string;
+  /** Root-cause prose (extends Issue.rationale). */
+  diagnosis: string;
+  /** Ordered human steps — always present. */
+  solution_steps: RemediationStep[];
+  /** Ranked ladder for investigate-kinds; omitted for advisor kinds. */
+  solutions?: SolutionOption[];
+  /** Primary executable DDL (advisor kinds: = Issue.fix_sql). */
+  fix_sql?: string;
+  /** Pre-flight checklist (gates / preconditions). */
+  apply_safely: string[];
+  /** Post-change verification queries / checks (prove-it-worked loop). */
+  validate: string[];
+  /** Undo steps / inverse DDL — mandatory output, never optional. */
+  rollback: string[];
+  /** One-line expected effect + honest confidence. */
+  impact: string;
+  /** Deadlock-only: parsed graph JSON for power users (raw artifact). */
+  supplemental?: unknown;
+}

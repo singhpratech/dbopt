@@ -20,6 +20,7 @@ use serde::Serialize;
 
 use crate::routes::ConnectReq;
 
+pub mod enrichment;
 pub mod sqlserver;
 
 // ===========================================================================

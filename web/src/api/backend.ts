@@ -1,4 +1,4 @@
-import type { ConnectionInfo, HealthReport } from "../types";
+import type { ConnectionInfo, HealthReport, Issue, Remediation } from "../types";
 import type { ProviderConfig } from "../store/persist";
 
 // Re-export the Health front-door wire types so components can import them
@@ -10,6 +10,10 @@ export type {
   FixAction,
   SeverityCounts,
   SignalSummary,
+  Remediation,
+  RemediationStep,
+  SolutionOption,
+  RiskLevel,
 } from "../types";
 
 const BASE = "/api";
@@ -141,6 +145,37 @@ export async function getDbHealth(info: ConnectionInfo, engine = "sqlserver"): P
     throw new Error(e.error ?? `health scan failed (${r.status})`);
   }
   return r.json() as Promise<HealthReport>;
+}
+
+/**
+ * Lazy issue-detail enrichment for the investigate kinds only
+ * (deadlock/blocking/wait/regression — Issue.fix_action === "investigate").
+ *
+ * POSTs the Issue identity + connection to /api/health/issue/detail and gets
+ * back ONE structured Remediation built from live sentinel data the backend
+ * already holds (parsed deadlock graph, blocking sample, wait-type table,
+ * regression row). The four advisor kinds + `finding` never call this — they
+ * are templated client-side from fields already on the Issue.
+ *
+ * The backend returns a GRACEFUL Remediation (never 500) for parse misses, so
+ * a non-ok status here is a genuine error (e.g. unknown kind → 400).
+ */
+export async function getIssueDetail(info: ConnectionInfo, issue: Issue): Promise<Remediation> {
+  const r = await fetch(`${BASE}/health/issue/detail`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...info,
+      issue_id: issue.id,
+      issue_kind: issue.kind,
+      affected_object: issue.affected_object,
+    }),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `issue detail failed (${r.status})`);
+  }
+  return r.json() as Promise<Remediation>;
 }
 
 export async function pullDmv(info: ConnectionInfo) {

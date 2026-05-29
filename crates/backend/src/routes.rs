@@ -18,6 +18,7 @@ pub fn router() -> Router {
         .route("/databases", post(databases))
         .route("/advise", post(advise))
         .route("/health/db", post(health_db))
+        .route("/health/issue/detail", post(crate::health::enrichment::issue_detail))
         .route("/dmv", post(dmv))
         .route("/explain", post(explain))
         .route("/llm/models", get(llm_models))

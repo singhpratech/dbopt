@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type { HealthReport, Issue, IssueSeverity } from "../api/backend";
+import { IssueDetailPane } from "./IssueDetailPane";
 
 /**
  * The HEALTH workspace — the one-screen front-door (default landing).
@@ -26,6 +27,9 @@ export function HealthOverview({
   const [report, setReport] = useState<HealthReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The clicked issue, by id. Derived (not stored) into selectedIssue below —
+  // collision-safe because Issue.id is unique post-dedup.
+  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
 
   const connected = !!conn.server;
 
@@ -33,6 +37,9 @@ export function HealthOverview({
     if (!conn.server) return;
     setBusy(true);
     setErr(null);
+    // A fresh scan re-keys the issue list; clear the open pane so a stale id
+    // can't dangle against a re-built report.
+    setSelectedIssueId(null);
     try {
       const info = {
         server: conn.server,
@@ -55,6 +62,7 @@ export function HealthOverview({
 
   // Auto-fetch on mount + whenever the active server/database changes.
   useEffect(() => {
+    setSelectedIssueId(null); // conn changed → close any open pane.
     if (conn.server) void scan();
     else {
       setReport(null);
@@ -66,6 +74,14 @@ export function HealthOverview({
   const live = connected && !!report && !err;
   const reliabilityGrade = live ? report!.reliability_grade ?? "?" : "?";
   const efficiencyGrade = live ? report!.efficiency_grade ?? "?" : "?";
+
+  // The selected Issue is DERIVED from the id, never stored separately.
+  const selectedIssue = report?.issues.find((i) => i.id === selectedIssueId) ?? null;
+  // Toggle: re-clicking the same card closes the pane.
+  const openIssue = useCallback(
+    (id: string) => setSelectedIssueId((prev) => (prev === id ? null : id)),
+    [],
+  );
 
   return (
     <div className="advisor form">
@@ -178,6 +194,7 @@ export function HealthOverview({
             issues={report.issues.filter((i) => i.lane === "reliability")}
             ui={ui}
             setUi={setUi}
+            onOpen={openIssue}
           />
           <IssueSection
             tone="opportunity"
@@ -186,7 +203,21 @@ export function HealthOverview({
             issues={report.issues.filter((i) => i.lane === "opportunity")}
             ui={ui}
             setUi={setUi}
+            onOpen={openIssue}
           />
+
+          {/* ── Issue Detail slide-over — sibling of the list so the
+                health context stays mounted underneath. ──────────── */}
+          {selectedIssue && (
+            <IssueDetailPane
+              key={selectedIssue.id}
+              issue={selectedIssue}
+              conn={conn}
+              ui={ui}
+              setUi={setUi}
+              onClose={() => setSelectedIssueId(null)}
+            />
+          )}
         </>
       ) : null}
     </div>
@@ -228,6 +259,7 @@ function IssueSection({
   issues,
   ui,
   setUi,
+  onOpen,
 }: {
   tone: "reliability" | "opportunity";
   heading: string;
@@ -235,6 +267,7 @@ function IssueSection({
   issues: Issue[];
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
+  onOpen: (id: string) => void;
 }) {
   return (
     <section className={`health-section health-section-${tone}`}>
@@ -250,7 +283,7 @@ function IssueSection({
       ) : (
         <div className="health-issue-list">
           {issues.map((iss) => (
-            <IssueCard key={iss.id} iss={iss} ui={ui} setUi={setUi} />
+            <IssueCard key={iss.id} iss={iss} ui={ui} setUi={setUi} onOpen={onOpen} />
           ))}
         </div>
       )}
@@ -282,15 +315,18 @@ function IssueCard({
   iss,
   ui,
   setUi,
+  onOpen,
 }: {
   iss: Issue;
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
+  onOpen: (id: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(false);
 
-  async function copy() {
+  async function copy(e: React.MouseEvent) {
+    e.stopPropagation(); // don't also open the detail pane
     if (!iss.fix_sql) return;
     try {
       await navigator.clipboard.writeText(iss.fix_sql);
@@ -303,8 +339,24 @@ function IssueCard({
 
   const links = deepLinks(iss);
 
+  // The whole card is a button into the detail pane; inner controls stop
+  // propagation so they keep their own behavior without also opening the pane.
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onOpen(iss.id);
+    }
+  }
+
   return (
-    <div className="advisor-card health-issue">
+    <div
+      className="advisor-card health-issue health-issue-clickable"
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(iss.id)}
+      onKeyDown={onKeyDown}
+      aria-label={`View fix for ${iss.title}`}
+    >
       <div className="advisor-card-head">
         <span className={`pill ${severityClass(iss.severity)}`}>{iss.severity}</span>
         <span className="advisor-kind">{kindLabel(iss.kind)}</span>
@@ -321,30 +373,40 @@ function IssueCard({
 
       {iss.rationale && (
         <>
-          <button className="health-toggle" onClick={() => setOpen((o) => !o)}>
+          <button
+            className="health-toggle"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }}
+          >
             {open ? "▾ rationale" : "▸ rationale"}
           </button>
           {open && <div className="advisor-rationale">{iss.rationale}</div>}
         </>
       )}
 
-      {(iss.fix_sql || links.length > 0) && (
-        <div className="health-issue-foot">
-          {links.map((l) => (
-            <button
-              key={l.workspace}
-              className="ddl-copy"
-              onClick={() => setUi({ ...ui, workspace: l.workspace })}
-              title={`Jump to the ${l.label} workspace`}
-            >
-              {l.label}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="health-issue-foot">
+        <span className="health-issue-cta" aria-hidden>
+          View fix →
+        </span>
+        {links.map((l) => (
+          <button
+            key={l.workspace}
+            className="ddl-copy"
+            onClick={(e) => {
+              e.stopPropagation();
+              setUi({ ...ui, workspace: l.workspace });
+            }}
+            title={`Jump to the ${l.label} workspace`}
+          >
+            {l.label}
+          </button>
+        ))}
+      </div>
 
       {iss.fix_sql && (
-        <div className="ddl-wrap">
+        <div className="ddl-wrap" onClick={(e) => e.stopPropagation()}>
           <button className="ddl-copy" onClick={copy} title="Copy fix SQL to clipboard">
             {copied ? "Copied ✓" : "Copy"}
           </button>
