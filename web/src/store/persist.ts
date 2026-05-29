@@ -49,9 +49,13 @@ export const defaultConn: SqlConnectionConfig = {
   database: "",
   user: "",
   password: "",
-  remember_password: false,
+  // Remember credentials by default: this is a local desktop tool (like SSMS /
+  // Azure Data Studio), and a forgotten password silently breaks the Sentinel
+  // daemon (it persists creds to run unattended). Default to SQL auth because
+  // Integrated/Windows auth is not wired on Linux/macOS builds.
+  remember_password: true,
   trust_cert: true,
-  auth_mode: "integrated",
+  auth_mode: "sql",
 };
 
 /**
