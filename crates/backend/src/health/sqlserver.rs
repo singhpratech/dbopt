@@ -133,12 +133,11 @@ impl HealthProvider for SqlServerHealthProvider {
                 fix_action: "investigate".to_string(),
             });
         }
-        // Top wait.
-        if pain.top_wait_time_ms > 120_000 {
-            let wait_label = pain
-                .top_wait_type
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
+        // Top wait — only surface ACTIONABLE wait types (allowlist). Benign/idle
+        // background waits (SOS_WORK_DISPATCHER, PVS_PREALLOCATE, PREEMPTIVE_XE_*,
+        // …) are noise and must never ding the Reliability grade.
+        let wait_label = pain.top_wait_type.clone().unwrap_or_default();
+        if pain.top_wait_time_ms > 120_000 && is_actionable_wait(&wait_label) {
             issues.push(Issue {
                 id: format!("sentinel:wait:{wait_label}"),
                 source: "sentinel".to_string(),
@@ -339,4 +338,26 @@ fn static_impact(s: Severity) -> u32 {
         Severity::Warning => 4000,
         Severity::Info => 1000,
     }
+}
+
+/// Allowlist of waits a DBA can actually act on. We only raise a reliability
+/// issue for these — every other (idle/background/scheduler) wait is noise and
+/// is never surfaced, so the grade reflects real, fixable pain.
+fn is_actionable_wait(w: &str) -> bool {
+    const PREFIXES: &[&str] = &["PAGEIOLATCH_", "LCK_M_", "PAGELATCH_", "LATCH_"];
+    const EXACT: &[&str] = &[
+        "WRITELOG",
+        "RESOURCE_SEMAPHORE",
+        "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+        "ASYNC_NETWORK_IO",
+        "THREADPOOL",
+        "SOS_SCHEDULER_YIELD",
+        "CXPACKET",
+        "IO_COMPLETION",
+        "ASYNC_IO_COMPLETION",
+        "BACKUPIO",
+        "HADR_SYNC_COMMIT",
+        "MEMORY_ALLOCATION_EXT",
+    ];
+    PREFIXES.iter().any(|p| w.starts_with(p)) || EXACT.contains(&w)
 }

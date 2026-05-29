@@ -11,7 +11,7 @@ use chrono::Utc;
 
 use crate::{
     conn,
-    storage::{Storage, WaitDeltaRow},
+    storage::{ignorable_waits_in_clause, Storage, WaitDeltaRow},
     ConnectionInfo,
 };
 
@@ -22,29 +22,24 @@ pub async fn poll_wait_stats(conn_info: &ConnectionInfo, storage: &Storage) -> a
     let mut client = conn::open(conn_info).await?;
     let instance_id: i64 = storage.ensure_instance(&conn_info.server, conn_info)?;
 
-    const SQL: &str = r#"
+    // Exclude the canonical benign/idle waits (shared with the top-wait pick) so
+    // background scheduler noise never lands in the time-series or the grade.
+    let sql = format!(
+        r#"
         SELECT TOP (30)
             wait_type,
             CAST(waiting_tasks_count AS BIGINT) AS waiting_tasks_count,
             CAST(wait_time_ms        AS BIGINT) AS wait_time_ms,
             CAST(signal_wait_time_ms AS BIGINT) AS signal_wait_ms
         FROM sys.dm_os_wait_stats
-        WHERE wait_type NOT IN (
-            'CLR_AUTO_EVENT','CLR_MANUAL_EVENT','SLEEP_TASK','BROKER_TASK_STOP',
-            'BROKER_TO_FLUSH','BROKER_RECEIVE_WAITFOR','SQLTRACE_BUFFER_FLUSH',
-            'CLR_SEMAPHORE','LAZYWRITER_SLEEP','SLEEP_SYSTEMTASK','SLEEP_BPOOL_FLUSH',
-            'CHECKPOINT_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH','LOGMGR_QUEUE',
-            'XE_TIMER_EVENT','XE_DISPATCHER_WAIT','BROKER_EVENTHANDLER',
-            'TRACEWRITE','FT_IFTS_SCHEDULER_IDLE_WAIT','DISPATCHER_QUEUE_SEMAPHORE',
-            'WAITFOR','ONDEMAND_TASK_QUEUE','BROKER_TRANSMITTER','SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
-            'HADR_FILESTREAM_IOMGR_IOCOMPLETION','HADR_WORK_QUEUE','HADR_TIMER_TASK',
-            'PREEMPTIVE_OS_WAITFOROBJECT','DIRTY_PAGE_POLL','SP_SERVER_DIAGNOSTICS_SLEEP'
-        )
+        WHERE wait_type NOT IN ({})
           AND waiting_tasks_count > 0
         ORDER BY wait_time_ms DESC;
-    "#;
+    "#,
+        ignorable_waits_in_clause()
+    );
 
-    let stream = client.simple_query(SQL).await?;
+    let stream = client.simple_query(&sql).await?;
     let rows = stream.into_first_result().await?;
 
     // (waiting_tasks_count, wait_time_ms, signal_wait_ms)

@@ -78,6 +78,48 @@ pub struct PainSummary {
     pub blocking_incidents: i64,
 }
 
+/// Benign/idle/system wait types — noise, not user-facing pain (Paul Randal /
+/// the community real-time script ignorable list). Excluded by the wait poller AND the top-wait
+/// pick so the Reliability grade isn't dinged by background scheduler waits.
+pub const IGNORABLE_WAITS: &[&str] = &[
+    "CLR_AUTO_EVENT","CLR_MANUAL_EVENT","CLR_SEMAPHORE",
+    "SLEEP_TASK","SLEEP_SYSTEMTASK","SLEEP_BPOOL_FLUSH","SLEEP_DBSTARTUP",
+    "SLEEP_DCOMSTARTUP","SLEEP_MASTERDBREADY","SLEEP_MASTERMDREADY",
+    "SLEEP_MASTERUPGRADED","SLEEP_MSDBSTARTUP","SLEEP_TEMPDBSTARTUP",
+    "LAZYWRITER_SLEEP","BROKER_TASK_STOP","BROKER_TO_FLUSH",
+    "BROKER_RECEIVE_WAITFOR","BROKER_EVENTHANDLER","BROKER_TRANSMITTER",
+    "SQLTRACE_BUFFER_FLUSH","SQLTRACE_INCREMENTAL_FLUSH_SLEEP","SQLTRACE_WAIT_ENTRIES",
+    "CHECKPOINT_QUEUE","REQUEST_FOR_DEADLOCK_SEARCH","LOGMGR_QUEUE",
+    "XE_TIMER_EVENT","XE_DISPATCHER_WAIT","XE_DISPATCHER_JOIN","XE_LIVE_TARGET_TVF",
+    "TRACEWRITE","FT_IFTS_SCHEDULER_IDLE_WAIT","FT_IFTSHC_MUTEX",
+    "DISPATCHER_QUEUE_SEMAPHORE","WAITFOR","ONDEMAND_TASK_QUEUE",
+    "HADR_FILESTREAM_IOMGR_IOCOMPLETION","HADR_WORK_QUEUE","HADR_TIMER_TASK",
+    "HADR_CLUSAPI_CALL","HADR_LOGCAPTURE_WAIT","HADR_NOTIFICATION_DEQUEUE",
+    "PREEMPTIVE_OS_WAITFOROBJECT","PREEMPTIVE_XE_GETTARGETSTATE",
+    "PREEMPTIVE_XE_DISPATCHER","PREEMPTIVE_XE_TARGETINIT","PREEMPTIVE_XE_SESSIONCOMMIT",
+    "PREEMPTIVE_OS_FLUSHFILEBUFFERS","PREEMPTIVE_OS_AUTHENTICATIONOPS",
+    "PREEMPTIVE_OS_GETPROCADDRESS","PREEMPTIVE_OS_LIBRARYOPS",
+    "DIRTY_PAGE_POLL","SP_SERVER_DIAGNOSTICS_SLEEP","SOS_WORK_DISPATCHER",
+    "QDS_PERSIST_TASK_MAIN_LOOP_SLEEP","QDS_ASYNC_QUEUE","QDS_SHUTDOWN_QUEUE",
+    "QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP",
+    "WAIT_XTP_OFFLINE_CKPT_NEW_LOG","WAIT_XTP_CKPT_CLOSE","WAIT_XTP_HOST_WAIT",
+    "WAIT_XTP_RECOVERY","STARTUP_DEPENDENCY_MANAGER","CXCONSUMER",
+    "PARALLEL_REDO_DRAIN_WORKER","PARALLEL_REDO_WORKER_WAIT_WORK",
+    "PWAIT_DIRECTLOGCONSUMER_GETNEXT","PWAIT_EXTENSIBILITY_CLEANUP_TASK",
+    "VDI_CLIENT_OTHER","DBMIRROR_DBM_EVENT","DBMIRROR_EVENTS_QUEUE",
+    "DBMIRRORING_CMD","DBMIRROR_WORKER_QUEUE","SNI_HTTP_ACCEPT",
+    "SERVER_IDLE_CHECK","RESOURCE_QUEUE","KSOURCE_WAKEUP","SLEEP_RETRY_VIRTUALALLOC",
+];
+
+/// `'A','B',...` for embedding in a SQL `NOT IN (...)` clause.
+pub fn ignorable_waits_in_clause() -> String {
+    IGNORABLE_WAITS
+        .iter()
+        .map(|w| format!("'{w}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Index that has accumulated writes but no reads in the window.
 #[derive(Debug, Clone, Serialize)]
 pub struct UnusedIndexRow {
@@ -460,14 +502,19 @@ impl Storage {
 
     pub fn pain_summary(&self, window: TimeRange) -> anyhow::Result<PainSummary> {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let top_wait_sql = format!(
+            "SELECT wait_type, SUM(wait_time_ms_delta) AS w
+             FROM wait_stats_delta
+             WHERE captured_at >= ?1 AND captured_at < ?2
+               AND wait_type NOT IN ({})
+             GROUP BY wait_type
+             ORDER BY w DESC
+             LIMIT 1",
+            ignorable_waits_in_clause()
+        );
         let top_wait: Option<(String, i64)> = lock
             .query_row(
-                "SELECT wait_type, SUM(wait_time_ms_delta) AS w
-                 FROM wait_stats_delta
-                 WHERE captured_at >= ?1 AND captured_at < ?2
-                 GROUP BY wait_type
-                 ORDER BY w DESC
-                 LIMIT 1",
+                &top_wait_sql,
                 params![window.from_ms(), window.to_ms()],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
