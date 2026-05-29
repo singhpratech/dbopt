@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProviderConfig, ProviderKey } from "../store/persist";
 import { evaluate, PROVIDER_LABEL, type ProviderRuntimeStatus } from "../llm/router";
-import { clearAll } from "../store/persist";
+import { clearAll, load as loadLS, save as saveLS } from "../store/persist";
 import { listCloudModels, testCloudKey, DISCOVERY_PROVIDERS, type CloudModel } from "../api/backend";
 
 const ORDER: ProviderKey[] = ["ollama", "webllm", "openai", "anthropic", "openrouter", "azure", "bedrock"];
@@ -38,8 +38,11 @@ export function ProvidersPanel({
   const [statuses, setStatuses] = useState<Record<ProviderKey, ProviderRuntimeStatus | null>>(
     () => Object.fromEntries(ORDER.map((k) => [k, null])) as any,
   );
-  // Per-provider key-test + model-discovery state.
-  const [models, setModels] = useState<Partial<Record<ProviderKey, CloudModel[]>>>({});
+  // Per-provider key-test + model-discovery state. The loaded catalog persists so
+  // the combobox stays populated across workspace switches and reloads (Reload re-fetches).
+  const [models, setModels] = useState<Partial<Record<ProviderKey, CloudModel[]>>>(
+    () => loadLS<Partial<Record<ProviderKey, CloudModel[]>>>("provider_models", {}),
+  );
   const [busy, setBusy] = useState<Partial<Record<ProviderKey, "test" | "models">>>({});
   const [testMsg, setTestMsg] = useState<Partial<Record<ProviderKey, { ok: boolean; text: string }>>>({});
   const [comboOpen, setComboOpen] = useState<ProviderKey | null>(null);
@@ -114,6 +117,9 @@ export function ProvidersPanel({
     })();
     return () => { cancelled = true; };
   }, [providers]);
+
+  // Persist the loaded model catalogs.
+  useEffect(() => { saveLS("provider_models", models); }, [models]);
 
   function patch(key: ProviderKey, fields: Partial<ProviderConfig>) {
     setProviders({ ...providers, [key]: { ...providers[key], ...fields } });

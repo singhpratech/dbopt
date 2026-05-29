@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisReport } from "../types";
 import type { ProviderConfig, ProviderKey } from "../store/persist";
+import * as P from "../store/persist";
 import * as router from "../llm/router";
 import * as webllm from "../llm/webllm";
 import type { ChatMessage } from "../api/backend";
@@ -24,14 +25,33 @@ export function LlmChat({
   report: AnalysisReport | null;
   providers: Record<ProviderKey, ProviderConfig>;
 }) {
-  const [input, setInput] = useState("Explain the three worst issues and rewrite the SQL.");
-  const [fanout, setFanout] = useState(true);
-  const [cols, setCols] = useState<ColumnState[]>([]);
-  const [activeSingle, setActiveSingle] = useState<ProviderKey>("ollama");
+  // All of these persist (localStorage) so the conversation, prompt, and target
+  // survive switching workspaces AND a full reload — nothing is lost on tab change.
+  const [input, setInput] = useState(() => P.load<string>("chat_input", "Explain the three worst issues and rewrite the SQL."));
+  const [fanout, setFanout] = useState(() => P.load<boolean>("chat_fanout", true));
+  // Coerce any "streaming" state from a prior session (e.g. closed mid-stream) to a settled state.
+  const [cols, setCols] = useState<ColumnState[]>(() =>
+    P.load<ColumnState[]>("chat_cols", []).map((c) =>
+      c.state === "streaming" ? { ...c, state: c.body ? "done" : "err", error: c.body ? undefined : "interrupted", endedAt: c.endedAt ?? c.startedAt } : c,
+    ),
+  );
+  const [activeSingle, setActiveSingle] = useState<ProviderKey>(() => P.load<ProviderKey>("chat_single", "ollama"));
   const [webllmProgress, setWebllmProgress] = useState("");
   const handlesRef = useRef<{ cancelAll: () => void } | null>(null);
 
   useEffect(() => webllm.onProgress(setWebllmProgress), []);
+
+  // Persist prompt / target / fanout immediately; persist results only once they
+  // settle (not on every streamed token).
+  useEffect(() => { P.save("chat_input", input); }, [input]);
+  useEffect(() => { P.save("chat_fanout", fanout); }, [fanout]);
+  useEffect(() => { P.save("chat_single", activeSingle); }, [activeSingle]);
+  useEffect(() => {
+    if (!cols.some((c) => c.state === "streaming")) P.save("chat_cols", cols);
+  }, [cols]);
+
+  // Cancel any in-flight stream if the component unmounts (workspace switch).
+  useEffect(() => () => handlesRef.current?.cancelAll(), []);
 
   // Pick a sensible default single-target if the current one is disabled
   useEffect(() => {
@@ -111,6 +131,12 @@ export function LlmChat({
     handlesRef.current?.cancelAll();
   }
 
+  function clearChat() {
+    handlesRef.current?.cancelAll();
+    setCols([]);
+    P.save("chat_cols", []);
+  }
+
   function onKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -156,6 +182,9 @@ export function LlmChat({
           <button className="stop" onClick={stop}>Stop</button>
         ) : (
           <button className="send" onClick={ask}>Send ⌘↵</button>
+        )}
+        {cols.length > 0 && !isRunning && (
+          <button className="clear" onClick={clearChat} title="Clear the conversation">Clear</button>
         )}
       </div>
 

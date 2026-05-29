@@ -1194,6 +1194,12 @@ body {
   padding: 0 14px; cursor: pointer;
   font: 11px var(--f-tech); letter-spacing: 0.1em; text-transform: uppercase;
 }
+.ai-input .clear {
+  background: transparent; border: 1px solid var(--line-strong, var(--line)); color: var(--text-muted);
+  padding: 0 14px; cursor: pointer;
+  font: 11px var(--f-tech); letter-spacing: 0.1em; text-transform: uppercase;
+}
+.ai-input .clear:hover { border-color: var(--signal); color: var(--signal); }
 
 .ai-results {
   flex: 1; display: flex; min-height: 0; overflow: auto;
