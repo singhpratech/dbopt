@@ -197,6 +197,36 @@ pub struct Recommendation {
     pub ddl: String,
     /// Numeric impact for ranking within a kind (not comparable across kinds).
     pub impact_score: f64,
+    /// Evidence chips (label, value) drawn from the SAME DMV numbers used to
+    /// build `rationale`. Lets the health layer render grounded metrics without
+    /// re-deriving anything. Additive: defaults to `[]` for any old payload.
+    #[serde(default)]
+    pub metrics: Vec<(String, String)>,
+    /// Provenance of the numbers: `observed` (measured from DMV counters),
+    /// `estimated` (SQL Server's own projection), or `heuristic` (rule of
+    /// thumb). Additive: defaults to `observed`.
+    #[serde(default = "default_confidence")]
+    pub confidence: String,
+}
+
+fn default_confidence() -> String { "observed".to_string() }
+
+/// Format a kilobyte count as a human MB string with one decimal (e.g. `12.0`).
+fn kb_to_mb(kb: u64) -> String { format!("{:.1}", kb as f64 / 1024.0) }
+/// Format a kilobyte count as a human GB string with one decimal.
+fn kb_to_gb(kb: u64) -> String { format!("{:.1}", kb as f64 / 1_048_576.0) }
+/// Thousands-separate an integer count (e.g. `4,200`). No external deps.
+fn commas(n: u64) -> String {
+    let s = n.to_string();
+    let len = s.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i != 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Strip brackets/whitespace from an identifier fragment.
@@ -242,6 +272,13 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ),
             ddl,
             impact_score: score,
+            metrics: vec![
+                ("Seeks that benefit".into(), commas(m.user_seeks)),
+                ("Est. cost reduction".into(), format!("~{:.0}%", m.avg_user_impact)),
+                ("Avg query cost".into(), format!("{:.2}", m.avg_total_user_cost)),
+            ],
+            // These are SQL Server's own projections, not measured outcomes.
+            confidence: "estimated".into(),
         });
     }
 
@@ -254,6 +291,16 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ix,
         );
     }
+    // Reserved KB per (schema, table, index) so a drop/merge rec can report the
+    // storage it reclaims. Sum across partitions of the same index.
+    let mut reserved_by_index: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+    for p in &bundle.partition_stats {
+        if let Some(ix_name) = &p.index_name {
+            *reserved_by_index
+                .entry((p.schema_name.to_lowercase(), p.table_name.to_lowercase(), ix_name.to_lowercase()))
+                .or_insert(0) += p.reserved_kb;
+        }
+    }
     for u in &bundle.index_usage {
         let reads = u.user_seeks + u.user_scans + u.user_lookups;
         if reads != 0 || u.user_updates <= 100 { continue; }
@@ -264,6 +311,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         }
         if u.index_name.to_lowercase().starts_with("pk_") || u.index_name.eq_ignore_ascii_case("PK") { continue; }
         let priority = if u.user_updates >= 100_000 { "high" } else if u.user_updates >= 10_000 { "medium" } else { "low" };
+        let reserved_kb = reserved_by_index.get(&key).copied().unwrap_or(0);
         recs.push(Recommendation {
             kind: RecKind::DropIndex,
             priority: priority.into(),
@@ -275,6 +323,13 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ),
             ddl: format!("DROP INDEX {} ON {}.{};", br(&u.index_name), br(&u.schema_name), br(&u.table_name)),
             impact_score: u.user_updates as f64,
+            metrics: vec![
+                ("Writes maintained".into(), commas(u.user_updates)),
+                ("Reads".into(), "0".into()),
+                ("Storage reclaimed".into(), format!("~{} MB", kb_to_mb(reserved_kb))),
+            ],
+            // Counters are measured directly from sys.dm_db_index_usage_stats.
+            confidence: "observed".into(),
         });
     }
 
@@ -296,6 +351,10 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                     else if b.is_primary_key || b.is_unique { (b, a) }
                     else { (a, b) };
                 if drop.is_primary_key || drop.is_unique { continue; }
+                let drop_reserved_kb = reserved_by_index
+                    .get(&(schema.to_lowercase(), table.to_lowercase(), drop.index_name.to_lowercase()))
+                    .copied()
+                    .unwrap_or(0);
                 recs.push(Recommendation {
                     kind: RecKind::MergeIndex,
                     priority: "medium".into(),
@@ -310,6 +369,12 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                         br(&keep.index_name), br(&drop.index_name), br(schema), br(table)
                     ),
                     impact_score: 5_000.0,
+                    metrics: vec![
+                        ("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb))),
+                        ("Reads".into(), "0 unique".into()),
+                    ],
+                    // Identical key columns are read directly from catalog metadata.
+                    confidence: "observed".into(),
                 });
             }
         }
@@ -353,6 +418,13 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                     idfrag(table), br(schema), br(table)
                 ),
                 impact_score: *reserved_kb as f64,
+                metrics: vec![
+                    ("Rows".into(), commas(*rows)),
+                    ("Size".into(), format!("~{} GB", kb_to_gb(*reserved_kb))),
+                    ("Scans".into(), commas(scans)),
+                ],
+                // 5–10× compression is a rule-of-thumb, not a measured outcome.
+                confidence: "heuristic".into(),
             });
         }
     }

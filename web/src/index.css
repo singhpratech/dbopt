@@ -2163,6 +2163,291 @@ kbd {
 }
 .editor-hint-load:hover { background: #e5ff75; }
 
+/* ============================================================
+   Pass 2 — provenance + focus + trust loop
+   Evidence chips + confidence badge (issue cards & detail pane),
+   START HERE focus callout, re-scan delta banner, and the readable
+   deadlock cycle. All colors alias existing theme tokens, so they
+   track light/dark automatically.
+   ============================================================ */
+
+/* ── Evidence: grounded metric chips ──────────────── */
+.metric-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.issue-detail-metrics { margin-top: 12px; }
+
+.metric-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  white-space: nowrap;
+  max-width: 100%;
+}
+.metric-chip-k {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.metric-chip-v {
+  font: 12px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Confidence badge — provenance of the numbers ─── */
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  /* override the .term dotted underline — it's a pill here, not inline text. */
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  font: 9px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: help;
+  color: var(--text-muted);
+  background: var(--bg-elev);
+}
+.confidence-badge:hover,
+.confidence-badge:focus-visible {
+  border-bottom-color: var(--line-strong);
+}
+/* observed = measured (trust it most) → signal; estimated = engine's own
+   projection → info; heuristic = rule of thumb (verify) → warn. */
+.confidence-badge.conf-observed {
+  color: var(--signal);
+  border-color: var(--signal-dim);
+  background: var(--signal-faint);
+}
+.confidence-badge.conf-observed:hover,
+.confidence-badge.conf-observed:focus-visible {
+  color: var(--signal);
+  border-bottom-color: var(--signal-dim);
+}
+.confidence-badge.conf-estimated {
+  color: var(--info-sev);
+  border-color: rgba(127, 180, 255, 0.4);
+  background: rgba(127, 180, 255, 0.1);
+}
+.confidence-badge.conf-estimated:hover,
+.confidence-badge.conf-estimated:focus-visible {
+  color: var(--info-sev);
+  border-bottom-color: rgba(127, 180, 255, 0.4);
+}
+.confidence-badge.conf-heuristic {
+  color: var(--warn);
+  border-color: rgba(255, 209, 102, 0.4);
+  background: rgba(255, 209, 102, 0.1);
+}
+.confidence-badge.conf-heuristic:hover,
+.confidence-badge.conf-heuristic:focus-visible {
+  color: var(--warn);
+  border-bottom-color: rgba(255, 209, 102, 0.4);
+}
+
+/* ── START HERE — focus callout above the issue lanes ── */
+.start-here {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--signal-dim);
+  border-left: 2px solid var(--signal);
+  background: var(--signal-faint);
+}
+.start-here-tag {
+  font: 600 10px var(--f-tech);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+.start-here-lead {
+  font: 12px var(--f-sans);
+  color: var(--text);
+}
+.start-here-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.start-here-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 360px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  font: 12px var(--f-sans);
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.start-here-chip:hover,
+.start-here-chip:focus-visible {
+  border-color: var(--signal);
+  outline: none;
+}
+.start-here-chip.lane-rel { border-left: 2px solid var(--crit); }
+.start-here-chip.lane-opp { border-left: 2px solid var(--signal); }
+.start-here-dot { font-size: 8px; line-height: 1; }
+.start-here-dot.crit { color: var(--crit); }
+.start-here-dot.warn { color: var(--warn); }
+.start-here-dot.dim { color: var(--text-muted); }
+.start-here-chip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.start-here-chip-go { color: var(--text-muted); }
+.start-here-chip:hover .start-here-chip-go { color: var(--signal); }
+
+/* ── Re-scan delta banner — the trust loop ─────────── */
+.rescan-delta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 12px;
+  padding: 9px 14px;
+  border: 1px solid var(--info-sev);
+  border-left: 2px solid var(--info-sev);
+  background: rgba(127, 180, 255, 0.08);
+  font: 12px var(--f-sans);
+  color: var(--text);
+  animation: rescan-delta-in 0.25s ease-out;
+}
+@keyframes rescan-delta-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.rescan-delta-tag {
+  font: 600 9px var(--f-tech);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--info-sev);
+}
+.rescan-delta-sep { color: var(--text-dim); }
+.rescan-delta-leg { display: inline-flex; align-items: baseline; gap: 6px; }
+.rescan-delta-label {
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.rescan-delta-grades {
+  font: 13px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+.rescan-delta-arrow { margin: 0 2px; color: var(--text-dim); }
+.rescan-delta-detail {
+  font: 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+/* Color the leg by direction so an improvement reads green at a glance. */
+.rescan-delta-leg.dir-up .rescan-delta-grades,
+.rescan-delta-leg.dir-up .rescan-delta-detail { color: var(--ok); }
+.rescan-delta-leg.dir-down .rescan-delta-grades,
+.rescan-delta-leg.dir-down .rescan-delta-detail { color: var(--crit); }
+.rescan-delta-x {
+  margin-left: auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  font: 11px var(--f-tech);
+  cursor: pointer;
+}
+.rescan-delta-x:hover { color: var(--signal); }
+
+/* ── Deadlock cycle — readable A ──waits for──▶ B ──▶ A ── */
+.deadlock-cycle { margin-bottom: 12px; }
+.deadlock-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 4px 6px;
+}
+.deadlock-node-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.deadlock-node {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 280px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--info-sev);
+  background: var(--bg-elev);
+}
+.deadlock-node.victim {
+  border-left-color: var(--crit);
+  background: var(--crit-glow);
+}
+.deadlock-node.ghost {
+  opacity: 0.6;
+  border-style: dashed;
+}
+.deadlock-node-id {
+  font: 11px var(--f-tech);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+.deadlock-victim-tag { color: var(--crit); }
+.deadlock-node-sql {
+  font: 11px/1.45 var(--f-mono);
+  color: var(--text-muted);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.deadlock-arrow {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  color: var(--crit);
+}
+.deadlock-arrow-label {
+  font: 8px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.deadlock-arrow-glyph {
+  font: 12px var(--f-mono);
+  color: var(--crit);
+  line-height: 1;
+}
+.deadlock-cycle-note {
+  margin: 12px 0 0;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--text-muted);
+}
+
 @media (max-width: 768px) {
   .help-panel { width: 100vw; }
 }

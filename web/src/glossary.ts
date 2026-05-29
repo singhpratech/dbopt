@@ -137,4 +137,9 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short:
       "A seek jumps straight to the matching rows via an index (fast); a scan reads the whole table/index (slow on big tables). Turning scans into seeks is the core index win.",
   },
+  confidence: {
+    term: "Confidence",
+    short:
+      "How grounded the numbers are. Observed = measured directly from DMV counters. Estimated = SQL Server's own projection (its number, not ours). Heuristic = a rule-of-thumb — verify before acting.",
+  },
 };

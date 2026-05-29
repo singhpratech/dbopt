@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
-import type { HealthReport, Issue, IssueSeverity } from "../api/backend";
+import type { Confidence, HealthReport, Issue, IssueSeverity, Metric } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
 import { Term } from "./Term";
+
+/** A computed re-scan delta — how the two grades moved between scans. */
+interface ScanDelta {
+  reliability: { fromGrade: string; toGrade: string; fromScore: number; toScore: number };
+  efficiency: { fromGrade: string; toGrade: string; fromScore: number; toScore: number };
+}
 
 /**
  * The HEALTH workspace — the one-screen front-door (default landing).
@@ -34,6 +40,11 @@ export function HealthOverview({
   // The clicked issue, by id. Derived (not stored) into selectedIssue below —
   // collision-safe because Issue.id is unique post-dedup.
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  // Re-scan trust loop: the previous report (kept across a refresh) lets us
+  // compute a "did the fix work?" delta banner; it auto-dismisses after ~6s.
+  const prevReportRef = useRef<HealthReport | null>(null);
+  const [delta, setDelta] = useState<ScanDelta | null>(null);
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connected = !!conn.server;
 
@@ -53,6 +64,15 @@ export function HealthOverview({
         trust_cert: conn.trust_cert,
       };
       const r = await backend.getDbHealth(info);
+      // Trust loop: if we already had a report THIS session, show how the two
+      // grades moved (the proof a fix landed), then auto-dismiss after ~6s.
+      const prev = prevReportRef.current;
+      if (prev) {
+        setDelta(computeDelta(prev, r));
+        if (deltaTimer.current) clearTimeout(deltaTimer.current);
+        deltaTimer.current = setTimeout(() => setDelta(null), 6000);
+      }
+      prevReportRef.current = r;
       setReport(r);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -64,9 +84,22 @@ export function HealthOverview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conn.server, conn.database, conn.user, conn.password, conn.auth_mode, conn.trust_cert]);
 
+  // Clear the delta timer on unmount so it can't fire into an unmounted tree.
+  useEffect(
+    () => () => {
+      if (deltaTimer.current) clearTimeout(deltaTimer.current);
+    },
+    [],
+  );
+
   // Auto-fetch on mount + whenever the active server/database changes.
   useEffect(() => {
     setSelectedIssueId(null); // conn changed → close any open pane.
+    // A new server/db is a new baseline — drop the prior report + any delta so
+    // the trust banner never compares across different databases.
+    prevReportRef.current = null;
+    setDelta(null);
+    if (deltaTimer.current) clearTimeout(deltaTimer.current);
     if (conn.server) void scan();
     else {
       setReport(null);
@@ -122,16 +155,25 @@ export function HealthOverview({
           <div className="health-window">
             {report && !err
               ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}`
-              : "aggregated database health · one-screen front-door"}
+              : "one-screen snapshot + what to fix first"}
           </div>
         </div>
         <div className="form-actions health-actions">
-          <button className="btn primary" onClick={() => void scan()} disabled={busy || !connected}>
-            {busy ? "Scanning…" : "Refresh"}
+          <button
+            className="btn primary"
+            onClick={() => void scan()}
+            disabled={busy || !connected}
+            title={report ? "Re-scan and prove the fix worked" : "Run the first scan"}
+          >
+            {busy ? "Scanning…" : report ? "Re-scan" : "Scan"}
           </button>
           {busy && <span className="advisor-spinner" aria-hidden />}
         </div>
       </div>
+
+      {/* Re-scan trust loop: after a re-scan, show how the two grades moved.
+          Auto-dismisses after ~6s — the "did the fix work?" proof. */}
+      {delta && !busy && <RescanDelta delta={delta} onDismiss={() => setDelta(null)} />}
 
       {/* Plain-language read of the two grades, so the letters never stand alone. */}
       <p className="health-grade-explain">
@@ -221,7 +263,10 @@ export function HealthOverview({
             <Signal label="regressions" term="regression" value={report.signals.regressed_queries} tone="warn" />
           </div>
 
-          {/* ── 3) LANED ISSUE SECTIONS ─────────────────── */}
+          {/* ── 3) START HERE — the 1-3 issues to fix first ─ */}
+          <StartHere issues={topIssues(report.issues)} onOpen={openIssue} />
+
+          {/* ── 4) LANED ISSUE SECTIONS ─────────────────── */}
           <IssueSection
             tone="reliability"
             heading="RELIABILITY — affecting users"
@@ -331,6 +376,118 @@ function IssueSection({
   );
 }
 
+/**
+ * One evidence chip — a grounded label/value pair (e.g. "Writes maintained
+ * 412/wk"). Pre-formatted server-side; rendered verbatim. Reuses .pill geometry.
+ */
+function MetricChip({ metric }: { metric: Metric }) {
+  return (
+    <span className="metric-chip" title={`${metric.label}: ${metric.value}`}>
+      <span className="metric-chip-k">{metric.label}</span>
+      <span className="metric-chip-v">{metric.value}</span>
+    </span>
+  );
+}
+
+/**
+ * Small provenance badge — observed / estimated / heuristic — with a <Term>
+ * tooltip explaining the difference so we never imply fake precision.
+ */
+function ConfidenceBadge({ confidence }: { confidence?: Confidence }) {
+  const c = confidence ?? "observed";
+  return (
+    <Term k="confidence" className={`confidence-badge conf-${c}`}>
+      {c}
+    </Term>
+  );
+}
+
+/**
+ * START HERE — the focus callout. Names the top 1-3 issues to fix first as
+ * clickable chips that open their detail pane. Highest-severity reliability
+ * wins over opportunity; ties break on impact_rank.
+ */
+function StartHere({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) => void }) {
+  if (issues.length === 0) return null;
+  return (
+    <div className="start-here" role="group" aria-label="Where to start">
+      <span className="start-here-tag">START HERE</span>
+      <span className="start-here-lead">
+        Fix {issues.length === 1 ? "this first" : `these ${issues.length} first`}:
+      </span>
+      <div className="start-here-chips">
+        {issues.map((iss) => (
+          <button
+            key={iss.id}
+            type="button"
+            className={`start-here-chip ${iss.lane === "reliability" ? "lane-rel" : "lane-opp"}`}
+            onClick={() => onOpen(iss.id)}
+            title={iss.consequence || iss.title}
+          >
+            <span className={`start-here-dot ${severityClass(iss.severity)}`} aria-hidden>
+              ●
+            </span>
+            <span className="start-here-chip-title">{iss.title}</span>
+            <span className="start-here-chip-go" aria-hidden>
+              →
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Re-scan delta banner — the trust loop. Shows how each grade moved between the
+ * previous and current scan (e.g. "Reliability A→A · Efficiency C→B (71→81)").
+ */
+function RescanDelta({ delta, onDismiss }: { delta: ScanDelta; onDismiss: () => void }) {
+  return (
+    <div className="rescan-delta" role="status">
+      <span className="rescan-delta-tag">Re-scan</span>
+      <DeltaLeg label="Reliability" leg={delta.reliability} />
+      <span className="rescan-delta-sep" aria-hidden>
+        ·
+      </span>
+      <DeltaLeg label="Efficiency" leg={delta.efficiency} />
+      <button className="rescan-delta-x" onClick={onDismiss} title="Dismiss" aria-label="Dismiss">
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function DeltaLeg({
+  label,
+  leg,
+}: {
+  label: string;
+  leg: ScanDelta["reliability"];
+}) {
+  const dir = deltaDir(leg.fromScore, leg.toScore);
+  const gradeMoved = leg.fromGrade !== leg.toGrade;
+  return (
+    <span className={`rescan-delta-leg dir-${dir}`}>
+      <span className="rescan-delta-label">{label}</span>{" "}
+      <span className="rescan-delta-grades">
+        {leg.fromGrade}
+        <span className="rescan-delta-arrow" aria-hidden>
+          →
+        </span>
+        {leg.toGrade}
+      </span>{" "}
+      <span className="rescan-delta-detail">
+        {gradeMoved
+          ? `(${leg.toScore > leg.fromScore ? "+" : ""}${leg.toScore - leg.fromScore} score, ${leg.fromScore}→${leg.toScore})`
+          : dir === "flat"
+          ? "(no change)"
+          : `(${leg.fromScore}→${leg.toScore})`}
+      </span>
+    </span>
+  );
+}
+
 function Signal({
   label,
   term,
@@ -414,6 +571,16 @@ function IssueCard({
         <code>{iss.affected_object}</code>
       </div>
 
+      {/* Evidence: first 2-3 grounded metric chips + a provenance badge. */}
+      {(iss.metrics?.length > 0 || iss.confidence) && (
+        <div className="metric-row">
+          {(iss.metrics ?? []).slice(0, 3).map((m, i) => (
+            <MetricChip key={i} metric={m} />
+          ))}
+          <ConfidenceBadge confidence={iss.confidence} />
+        </div>
+      )}
+
       {iss.consequence && <p className="health-consequence">{iss.consequence}</p>}
 
       {iss.rationale && (
@@ -479,6 +646,56 @@ function deepLinks(iss: Issue): { workspace: UiPrefs["workspace"]; label: string
     default:
       return [];
   }
+}
+
+/**
+ * Pick the top 1-3 issues to fix first. Reliability outranks opportunity (active
+ * harm beats a cheaper win); within a lane, higher severity then higher
+ * impact_rank wins. The backend already pre-ranks, so this is a light re-sort.
+ */
+const SEVERITY_ORDER: Record<IssueSeverity, number> = {
+  critical: 0,
+  error: 1,
+  warning: 2,
+  info: 3,
+};
+function topIssues(issues: Issue[]): Issue[] {
+  return [...issues]
+    .sort((a, b) => {
+      // Reliability first.
+      if (a.lane !== b.lane) return a.lane === "reliability" ? -1 : 1;
+      // Then by severity (critical first).
+      const sev = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
+      if (sev !== 0) return sev;
+      // Then by impact_rank (higher = fix first).
+      return b.impact_rank - a.impact_rank;
+    })
+    .slice(0, 3);
+}
+
+/** Build the two-grade delta between a previous and a current scan. */
+function computeDelta(prev: HealthReport, next: HealthReport): ScanDelta {
+  return {
+    reliability: {
+      fromGrade: prev.reliability_grade ?? "?",
+      toGrade: next.reliability_grade ?? "?",
+      fromScore: prev.reliability_score,
+      toScore: next.reliability_score,
+    },
+    efficiency: {
+      fromGrade: prev.efficiency_grade ?? "?",
+      toGrade: next.efficiency_grade ?? "?",
+      fromScore: prev.efficiency_score,
+      toScore: next.efficiency_score,
+    },
+  };
+}
+
+/** up = score improved, down = regressed, flat = unchanged (drives leg color). */
+function deltaDir(from: number, to: number): "up" | "down" | "flat" {
+  if (to > from) return "up";
+  if (to < from) return "down";
+  return "flat";
 }
 
 /** critical/error → crit, warning → warn, info → dim (reuses .pill variants). */

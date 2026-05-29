@@ -64,6 +64,15 @@ pub struct SeverityCounts {
     pub info: u32,
 }
 
+/// One evidence chip rendered on an [`Issue`] (e.g. `{label:"Reads", value:"0"}`).
+/// Snake_case on the wire to match the rest of the health contract.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Metric {
+    pub label: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     /// `"{source}:{kind}:{affected_object}"`
@@ -89,6 +98,13 @@ pub struct Issue {
     pub fix_sql: Option<String>,
     /// `execute` | `review` | `investigate`
     pub fix_action: String,
+    /// Evidence chips: grounded DMV/sentinel numbers behind this issue. May be
+    /// empty. (Default `[]`.)
+    pub metrics: Vec<Metric>,
+    /// Provenance of the numbers: `observed` (measured from DMV/sentinel
+    /// counters), `estimated` (SQL Server's own projection), or `heuristic`
+    /// (rule of thumb). (Default `observed`.)
+    pub confidence: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

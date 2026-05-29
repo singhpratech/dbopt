@@ -85,6 +85,24 @@ export type FixAction = "execute" | "review" | "investigate";
 
 export type IssueLane = "reliability" | "opportunity";
 
+/**
+ * Provenance of an Issue's numbers, so we never imply fake precision:
+ *  • observed   — measured directly from DMV counters (writes, deadlock count).
+ *  • estimated  — SQL Server's OWN projection (e.g. missing-index avg impact).
+ *  • heuristic  — a rule-of-thumb (columnstore compression ratios). Verify first.
+ */
+export type Confidence = "observed" | "estimated" | "heuristic";
+
+/**
+ * One evidence chip — a grounded label/value pair lifted from the same DMV data
+ * used to build the rationale (e.g. {label:"Writes maintained", value:"412/wk"}).
+ * Pre-formatted server-side (MB/GB, thousands-separated); rendered verbatim.
+ */
+export interface Metric {
+  label: string;
+  value: string;
+}
+
 export interface Issue {
   id: string;
   source: "advisor" | "sentinel" | "static";
@@ -100,6 +118,10 @@ export interface Issue {
   rationale: string;
   fix_sql?: string;
   fix_action: FixAction;
+  /** Grounded evidence chips (may be empty). Pre-formatted server-side. */
+  metrics: Metric[];
+  /** Provenance band for the metrics/impact — defaults "observed". */
+  confidence: Confidence;
 }
 
 export interface SeverityCounts {

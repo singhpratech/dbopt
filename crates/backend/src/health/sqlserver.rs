@@ -20,7 +20,7 @@ use crate::sqlserver as ss;
 
 use super::{
     count_severities, dedup, rank, score_report, ConnectedInfo, HealthProvider, HealthReport,
-    Issue, SignalSummary,
+    Issue, Metric, SignalSummary,
 };
 
 pub struct SqlServerHealthProvider;
@@ -75,6 +75,13 @@ impl HealthProvider for SqlServerHealthProvider {
                     .unwrap_or_else(|| f.message.clone()),
                 fix_sql: None,
                 fix_action: "review".to_string(),
+                // A static finding has no DMV counter behind it — the one honest
+                // signal is its severity, which IS measured from the rule match.
+                metrics: vec![Metric {
+                    label: "Severity".to_string(),
+                    value: severity.to_string(),
+                }],
+                confidence: "observed".to_string(),
             });
         }
 
@@ -103,6 +110,18 @@ impl HealthProvider for SqlServerHealthProvider {
                 ),
                 fix_sql: None,
                 fix_action: "investigate".to_string(),
+                metrics: vec![
+                    Metric {
+                        label: "Deadlocks (7d)".to_string(),
+                        value: commas_i64(pain.deadlock_count),
+                    },
+                    Metric {
+                        label: "Victims".to_string(),
+                        value: "killed & rolled back".to_string(),
+                    },
+                ],
+                // Counted directly from captured deadlock graphs.
+                confidence: "observed".to_string(),
             });
         }
         // Blocking.
@@ -131,6 +150,12 @@ impl HealthProvider for SqlServerHealthProvider {
                 ),
                 fix_sql: None,
                 fix_action: "investigate".to_string(),
+                metrics: vec![Metric {
+                    label: "Blocking incidents (7d)".to_string(),
+                    value: commas_i64(pain.blocking_incidents),
+                }],
+                // Counted directly from sentinel blocking samples.
+                confidence: "observed".to_string(),
             });
         }
         // Top wait — only surface ACTIONABLE wait types (allowlist). Benign/idle
@@ -156,6 +181,18 @@ impl HealthProvider for SqlServerHealthProvider {
                 ),
                 fix_sql: None,
                 fix_action: "investigate".to_string(),
+                metrics: vec![
+                    Metric {
+                        label: "Wait type".to_string(),
+                        value: wait_label.clone(),
+                    },
+                    Metric {
+                        label: "Time waited".to_string(),
+                        value: format!("{:.1} s", pain.top_wait_time_ms as f64 / 1000.0),
+                    },
+                ],
+                // Accumulated wait time is read straight from the wait DMV.
+                confidence: "observed".to_string(),
             });
         }
 
@@ -188,6 +225,21 @@ impl HealthProvider for SqlServerHealthProvider {
                 ),
                 fix_sql: None,
                 fix_action: "investigate".to_string(),
+                metrics: vec![
+                    Metric {
+                        label: "Slowdown".to_string(),
+                        value: format!("+{:.0}%", r.delta_pct),
+                    },
+                    Metric {
+                        label: "Duration".to_string(),
+                        value: format!(
+                            "{} → {} ms",
+                            r.baseline_duration_ms, r.current_duration_ms
+                        ),
+                    },
+                ],
+                // Baseline vs current durations are measured by the sentinel.
+                confidence: "observed".to_string(),
             });
         }
         // NOTE: report.unused_indexes is intentionally NOT re-emitted — the
@@ -268,18 +320,56 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
     } else {
         "review"
     };
+    // Pull a value out of the rec's own metric pairs by label so the grounded
+    // consequence reuses the SAME numbers as the chips (no re-derivation).
+    let metric = |label: &str| -> Option<&str> {
+        rec.metrics
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v.as_str())
+    };
+    // Quantified, honestly-labelled impact per kind. Falls back to the generic
+    // sentence only if the expected metric is missing.
     let consequence = match rec.kind {
         RecKind::CreateIndex => {
-            "Queries scan the whole table instead of seeking — slow reads and high CPU."
+            // estimated — SQL Server's OWN projection, label it as such.
+            match (metric("Est. cost reduction"), metric("Seeks that benefit")) {
+                (Some(impact), Some(seeks)) => format!(
+                    "SQL Server's own missing-index estimate: {} lower cost across {} seeks that currently scan instead of seeking.",
+                    impact, seeks
+                ),
+                _ => "Queries scan the whole table instead of seeking — slow reads and high CPU.".to_string(),
+            }
         }
         RecKind::DropIndex => {
-            "Written on every change but never read — wasted write cost and storage."
+            // observed — measured write counters + reclaimed storage.
+            match (metric("Storage reclaimed"), metric("Writes maintained")) {
+                (Some(storage), Some(writes)) => format!(
+                    "Dropping it reclaims {} and removes {} writes/window for zero reads.",
+                    storage, writes
+                ),
+                _ => "Written on every change but never read — wasted write cost and storage.".to_string(),
+            }
         }
         RecKind::MergeIndex => {
-            "Redundant with another index — double the write cost for no read benefit."
+            // observed — reclaimed storage + halved write maintenance.
+            match metric("Storage") {
+                Some(storage) => format!(
+                    "Redundant with another index: dropping it reclaims {} and halves the write maintenance on this key for zero unique reads.",
+                    storage
+                ),
+                _ => "Redundant with another index — double the write cost for no read benefit.".to_string(),
+            }
         }
         RecKind::ColumnstoreCandidate => {
-            "Large scan-heavy rowstore table — a columnstore index can be 5–10x faster and much smaller."
+            // heuristic — rule-of-thumb compression; tell them to verify.
+            match metric("Size") {
+                Some(size) => format!(
+                    "≈5–10× compression on {}; scan-dominated. Verify the workload is analytic before converting.",
+                    size
+                ),
+                _ => "Large scan-heavy rowstore table — a columnstore index can be 5–10x faster and much smaller.".to_string(),
+            }
         }
     };
     Issue {
@@ -288,13 +378,23 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         kind: kind.to_string(),
         severity: severity.to_string(),
         lane: "opportunity".to_string(),
-        consequence: consequence.to_string(),
+        consequence,
         impact_rank: impact_rank_for(rec),
         title: rec.title.clone(),
         affected_object: rec.object.clone(),
         rationale: rec.rationale.clone(),
         fix_sql: Some(rec.ddl.clone()),
         fix_action: fix_action.to_string(),
+        // Carry the advisor's grounded chips + provenance straight through.
+        metrics: rec
+            .metrics
+            .iter()
+            .map(|(label, value)| Metric {
+                label: label.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        confidence: rec.confidence.clone(),
     }
 }
 
@@ -318,6 +418,23 @@ fn impact_rank_for(rec: &Recommendation) -> u32 {
             }
         }
     }
+}
+
+/// Thousands-separate a non-negative `i64` count (negatives passed through).
+fn commas_i64(n: i64) -> String {
+    if n < 0 {
+        return n.to_string();
+    }
+    let s = n.to_string();
+    let len = s.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i != 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Pass a static-finding [`Severity`] through to the wire severity string.

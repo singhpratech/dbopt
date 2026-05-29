@@ -8,6 +8,8 @@ export type {
   Issue,
   IssueSeverity,
   FixAction,
+  Metric,
+  Confidence,
   SeverityCounts,
   SignalSummary,
   Remediation,

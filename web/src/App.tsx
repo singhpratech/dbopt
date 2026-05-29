@@ -414,7 +414,7 @@ export function App() {
 
       <main className="main">
         {ui.workspace === "health" && (
-          <Workspace title="Health" subtitle="aggregated database health · one-screen front-door">
+          <Workspace title="Health" subtitle="one-screen snapshot + what to fix first">
             <HealthOverview conn={conn} ui={ui} setUi={setUi} onOpenHelp={openHelp} />
           </Workspace>
         )}
@@ -575,7 +575,7 @@ export function App() {
         )}
 
         {ui.workspace === "advisor" && (
-          <Workspace title="Advisor" subtitle="ranked, prescriptive fixes with copy-paste T-SQL">
+          <Workspace title="Advisor" subtitle="full ranked recommendation explorer · prescriptive fixes with copy-paste T-SQL">
             <AdvisorPanel conn={conn} />
           </Workspace>
         )}

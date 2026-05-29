@@ -2,13 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type {
+  Confidence,
   Issue,
   IssueSeverity,
+  Metric,
   Remediation,
   RemediationStep,
   RiskLevel,
   SolutionOption,
 } from "../api/backend";
+import { Term } from "./Term";
 
 /**
  * Issue Detail + Remediation — a right-side SLIDE-OVER pane (not a route, not a
@@ -138,6 +141,16 @@ export function IssueDetailPane({
         <h2 className="issue-detail-title">{issue.title}</h2>
         <AffectedObject object={issue.affected_object} />
         {issue.consequence && <p className="issue-detail-consequence">{issue.consequence}</p>}
+
+        {/* Evidence: ALL grounded metric chips + a provenance badge. */}
+        {((issue.metrics?.length ?? 0) > 0 || issue.confidence) && (
+          <div className="metric-row issue-detail-metrics">
+            {(issue.metrics ?? []).map((m, i) => (
+              <MetricChip key={i} metric={m} />
+            ))}
+            <ConfidenceBadge confidence={issue.confidence} />
+          </div>
+        )}
       </div>
 
       {/* ── Body ───────────────────────────────────────── */}
@@ -233,9 +246,12 @@ function RemediationView({ rem }: { rem: Remediation }) {
         <p className="issue-detail-impact">{rem.impact}</p>
       </Section>
 
-      {/* Raw artifact — the parsed deadlock graph for power-user verification. */}
+      {/* Deadlock graph — render the parsed supplemental as a readable cycle
+          (A ──waits for──▶ B ──▶ A, victim marked) instead of raw JSON. The raw
+          JSON stays available collapsed beneath for power users. */}
       {rem.supplemental != null && (
-        <Section title="Parsed graph (raw artifact)" tone="raw">
+        <Section title="Deadlock graph" tone="raw">
+          <DeadlockGraph supplemental={rem.supplemental} />
           <details className="issue-supplemental">
             <summary>Show parsed deadlock graph JSON</summary>
             <pre className="ddl issue-supplemental-pre">
@@ -245,6 +261,207 @@ function RemediationView({ rem }: { rem: Remediation }) {
         </Section>
       )}
     </>
+  );
+}
+
+/* ============================================================
+   Deadlock graph → readable cycle. The backend's parsed supplemental
+   carries the victim + processes (each with SQL) + the resource
+   owner→waiter chain. We render it as
+       Session A (UPDATE orders…) ──waits for──▶ Session B (…) ──▶ A
+   with the victim marked. Shape is best-effort / defensive: if the
+   expected fields are absent we fall back to the raw-JSON details
+   block only (the generic text path).
+   ============================================================ */
+
+interface DeadlockProcess {
+  id?: string;
+  spid?: string | number;
+  session_id?: string | number;
+  sql?: string;
+  statement?: string;
+  is_victim?: boolean;
+}
+interface DeadlockEdge {
+  /** Resource owner (holds the lock). */
+  owner?: string;
+  /** Resource waiter (blocked on it). */
+  waiter?: string;
+  resource?: string;
+}
+interface DeadlockGraphShape {
+  victim?: string;
+  processes?: DeadlockProcess[];
+  edges?: DeadlockEdge[];
+  /** Some parsers emit the chain under "chain"/"waits"/"owner_waiter". */
+  chain?: DeadlockEdge[];
+  waits?: DeadlockEdge[];
+  owner_waiter?: DeadlockEdge[];
+}
+
+function DeadlockGraph({ supplemental }: { supplemental: unknown }) {
+  const g = (supplemental ?? {}) as DeadlockGraphShape;
+  const procs = Array.isArray(g.processes) ? g.processes : [];
+  const edges =
+    (Array.isArray(g.edges) && g.edges) ||
+    (Array.isArray(g.chain) && g.chain) ||
+    (Array.isArray(g.waits) && g.waits) ||
+    (Array.isArray(g.owner_waiter) && g.owner_waiter) ||
+    [];
+
+  // Victim: explicit field, else the process flagged is_victim.
+  const victimId =
+    (typeof g.victim === "string" && g.victim) ||
+    procs.find((p) => p.is_victim)?.id ||
+    (procs.find((p) => p.is_victim)?.session_id != null
+      ? String(procs.find((p) => p.is_victim)?.session_id)
+      : undefined);
+
+  // If we can't recover a recognisable graph, signal the caller to fall back.
+  if (procs.length === 0 && edges.length === 0) {
+    return (
+      <p className="issue-detail-prose dim">
+        No structured graph was parsed for this deadlock — see the raw artifact below.
+      </p>
+    );
+  }
+
+  const procLabel = (id?: string | number) => procKey(procFind(procs, id));
+  const procSqlOf = (id?: string | number) => {
+    const p = procFind(procs, id);
+    return p ? p.sql ?? p.statement : undefined;
+  };
+
+  // Build the visual cycle from edges if present, else just list participants.
+  const nodes = edges.length > 0 ? edgeChainNodes(edges) : procs.map((p) => procKey(p));
+
+  return (
+    <div className="deadlock-cycle">
+      {nodes.length > 1 ? (
+        <div className="deadlock-chain">
+          {nodes.map((nid, i) => {
+            const isVictim = victimId != null && nid === victimId;
+            const sql = procSqlOf(nid);
+            return (
+              <span className="deadlock-node-wrap" key={`${nid}-${i}`}>
+                <span className={`deadlock-node${isVictim ? " victim" : ""}`}>
+                  <span className="deadlock-node-id">
+                    Session {procLabel(nid)}
+                    {isVictim && <span className="deadlock-victim-tag"> · victim</span>}
+                  </span>
+                  {sql && <code className="deadlock-node-sql">{truncate(sql, 120)}</code>}
+                </span>
+                {i < nodes.length - 1 && (
+                  <span className="deadlock-arrow" aria-label="waits for">
+                    <span className="deadlock-arrow-label">waits for</span>
+                    <span className="deadlock-arrow-glyph" aria-hidden>
+                      ──▶
+                    </span>
+                  </span>
+                )}
+              </span>
+            );
+          })}
+          {/* Close the cycle back to the first node (deadlocks are cyclic). */}
+          {nodes.length > 1 && (
+            <span className="deadlock-node-wrap deadlock-cycle-close">
+              <span className="deadlock-arrow" aria-label="waits for">
+                <span className="deadlock-arrow-label">waits for</span>
+                <span className="deadlock-arrow-glyph" aria-hidden>
+                  ──▶
+                </span>
+              </span>
+              <span className="deadlock-node ghost">
+                <span className="deadlock-node-id">Session {procLabel(nodes[0])}</span>
+              </span>
+            </span>
+          )}
+        </div>
+      ) : (
+        // Single recognizable participant — list it without a (meaningless) cycle.
+        <div className="deadlock-chain">
+          {procs.map((p, i) => {
+            const id = p.id ?? (p.session_id != null ? String(p.session_id) : undefined);
+            const isVictim = victimId != null && id === victimId;
+            return (
+              <span className="deadlock-node-wrap" key={i}>
+                <span className={`deadlock-node${isVictim ? " victim" : ""}`}>
+                  <span className="deadlock-node-id">
+                    Session {procKey(p)}
+                    {isVictim && <span className="deadlock-victim-tag"> · victim</span>}
+                  </span>
+                  {(p.sql ?? p.statement) && (
+                    <code className="deadlock-node-sql">{truncate(p.sql ?? p.statement!, 120)}</code>
+                  )}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <p className="deadlock-cycle-note">
+        SQL Server broke the cycle by killing the victim and rolling back its transaction. Re-run
+        the loser, or apply a fix below so the cycle can't form again.
+      </p>
+    </div>
+  );
+}
+
+/** Order the owner→waiter edges into a single chain of node ids. */
+function edgeChainNodes(edges: DeadlockEdge[]): string[] {
+  const out: string[] = [];
+  for (const e of edges) {
+    const owner = e.owner != null ? String(e.owner) : undefined;
+    const waiter = e.waiter != null ? String(e.waiter) : undefined;
+    if (owner && !out.includes(owner)) out.push(owner);
+    if (waiter && !out.includes(waiter)) out.push(waiter);
+  }
+  return out;
+}
+
+function procFind(procs: DeadlockProcess[], id?: string | number): DeadlockProcess | undefined {
+  if (id == null) return undefined;
+  const s = String(id);
+  return procs.find(
+    (p) =>
+      p.id === s ||
+      (p.session_id != null && String(p.session_id) === s) ||
+      (p.spid != null && String(p.spid) === s),
+  );
+}
+
+/** Best display key for a process: its session id / spid / id, else the raw id. */
+function procKey(p?: DeadlockProcess | string | number): string {
+  if (p == null) return "?";
+  if (typeof p === "string" || typeof p === "number") return String(p);
+  return String(p.session_id ?? p.spid ?? p.id ?? "?");
+}
+
+function truncate(s: string, n: number): string {
+  const t = s.trim();
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+}
+
+/**
+ * One evidence chip — a grounded label/value pair, pre-formatted server-side.
+ * Mirrors HealthOverview's MetricChip (kept file-local on both sides).
+ */
+function MetricChip({ metric }: { metric: Metric }) {
+  return (
+    <span className="metric-chip" title={`${metric.label}: ${metric.value}`}>
+      <span className="metric-chip-k">{metric.label}</span>
+      <span className="metric-chip-v">{metric.value}</span>
+    </span>
+  );
+}
+
+/** Provenance badge with a <Term> tooltip — observed / estimated / heuristic. */
+function ConfidenceBadge({ confidence }: { confidence?: Confidence }) {
+  const c = confidence ?? "observed";
+  return (
+    <Term k="confidence" className={`confidence-badge conf-${c}`}>
+      {c}
+    </Term>
   );
 }
 
