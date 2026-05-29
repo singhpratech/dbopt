@@ -1,5 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { Confidence, Metric } from "../api/backend";
+import { confGlyph, confTitle, confTier } from "../confidence";
 
 /**
  * One evidence chip — a grounded label/value pair (e.g. "Writes maintained
@@ -53,9 +54,24 @@ export function MetricChip({
     ? `${metric.label}: ${metric.value} — measured from ${metric.source}`
     : `${metric.label}: ${metric.value}`;
 
+  // A1: glanceable per-chip confidence glyph (✓ observed / ○ estimated / ⚡
+  // heuristic) using the ONE shared vocabulary. Derived from the owning issue's
+  // confidence band; omitted when no band is known (older payloads).
+  const tier = confidence ? confTier(confidence) : null;
+  const glyph = tier ? (
+    <span
+      className={`metric-chip-tier conf-${tier}`}
+      title={confTitle(confidence)}
+      aria-label={`confidence: ${tier}`}
+    >
+      {confGlyph(confidence)}
+    </span>
+  ) : null;
+
   if (!hasDrill) {
     return (
       <span className="metric-chip" title={titleText}>
+        {glyph}
         <span className="metric-chip-k">{metric.label}</span>
         <span className="metric-chip-v">{metric.value}</span>
       </span>
@@ -85,6 +101,7 @@ export function MetricChip({
       // Don't also trigger the card's "open detail pane" click.
       onClick={(e) => e.stopPropagation()}
     >
+      {glyph}
       <span className="metric-chip-k">{metric.label}</span>
       <span className="metric-chip-v">{metric.value}</span>
       {open && (

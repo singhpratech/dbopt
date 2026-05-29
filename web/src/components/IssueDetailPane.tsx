@@ -11,7 +11,8 @@ import type {
   SolutionOption,
 } from "../api/backend";
 import { MetricChip } from "./MetricChip";
-import { Term } from "./Term";
+import { Term, TermText } from "./Term";
+import { CONF_GLYPH } from "../confidence";
 
 /**
  * Issue Detail + Remediation — a right-side SLIDE-OVER pane (not a route, not a
@@ -191,7 +192,9 @@ function RemediationView({ rem }: { rem: Remediation }) {
   return (
     <>
       <Section title="Diagnosis" tone="diagnosis">
-        <p className="issue-detail-prose">{rem.diagnosis}</p>
+        <p className="issue-detail-prose">
+          <TermText>{rem.diagnosis}</TermText>
+        </p>
       </Section>
 
       <Section title="Solution" tone="solution">
@@ -243,7 +246,9 @@ function RemediationView({ rem }: { rem: Remediation }) {
       </Section>
 
       <Section title="Impact & confidence" tone="impact">
-        <p className="issue-detail-impact">{rem.impact}</p>
+        <p className="issue-detail-impact">
+          <TermText>{rem.impact}</TermText>
+        </p>
       </Section>
 
       {/* Deadlock graph — render the parsed supplemental as a readable cycle
@@ -442,11 +447,18 @@ function truncate(s: string, n: number): string {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 }
 
-/** Provenance badge with a <Term> tooltip — observed / estimated / heuristic. */
+/**
+ * Provenance badge with a <Term> tooltip — observed / estimated / heuristic.
+ * The leading glyph (✓ / ○ / ⚡) is the SAME glanceable vocabulary used by the
+ * metric chips and the HealthOverview signal strip.
+ */
 function ConfidenceBadge({ confidence }: { confidence?: Confidence }) {
   const c = confidence ?? "observed";
   return (
     <Term k="confidence" className={`confidence-badge conf-${c}`}>
+      <span className="confidence-badge-glyph" aria-hidden>
+        {CONF_GLYPH[c]}
+      </span>
       {c}
     </Term>
   );
@@ -472,8 +484,14 @@ function Section({
 function StepItem({ step }: { step: RemediationStep }) {
   return (
     <li className="issue-step">
-      <span className="issue-step-title">{step.title}</span>
-      {step.detail && <span className="issue-step-detail">{step.detail}</span>}
+      <span className="issue-step-title">
+        <TermText>{step.title}</TermText>
+      </span>
+      {step.detail && (
+        <span className="issue-step-detail">
+          <TermText>{step.detail}</TermText>
+        </span>
+      )}
       {step.sql && (
         <div className="ddl-wrap">
           <CopyButton sql={step.sql} label="Copy" />
@@ -495,7 +513,9 @@ function SolutionCard({ opt }: { opt: SolutionOption }) {
           #{opt.rank}
         </span>
       </div>
-      <p className="issue-detail-prose">{opt.description}</p>
+      <p className="issue-detail-prose">
+        <TermText>{opt.description}</TermText>
+      </p>
       {opt.sql_fix && (
         <div className="ddl-wrap">
           <CopyButton sql={opt.sql_fix} label="Copy" />

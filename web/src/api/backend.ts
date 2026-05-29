@@ -1,4 +1,4 @@
-import type { ConnectionInfo, HealthReport, Issue, Remediation } from "../types";
+import type { Confidence, ConnectionInfo, HealthReport, Issue, Remediation } from "../types";
 import type { ProviderConfig } from "../store/persist";
 
 // Re-export the Health front-door wire types so components can import them
@@ -108,6 +108,18 @@ export interface Recommendation {
   rationale: string;
   ddl: string;           // exact T-SQL, multi-line
   impact_score: number;
+  /**
+   * Grounded evidence chips (label/value), drawn from the SAME DMV numbers the
+   * rationale is built from. Serde-defaults to `[]` on the backend, so it is
+   * optional here for older payloads.
+   */
+  metrics?: Array<[string, string]>;
+  /**
+   * Provenance of the numbers — "observed" | "estimated" | "heuristic"
+   * (analyzer-core Recommendation.confidence; serde-defaults "observed").
+   * Columnstore recs are "heuristic" (rule-of-thumb compression ratios).
+   */
+  confidence?: Confidence;
 }
 
 /**

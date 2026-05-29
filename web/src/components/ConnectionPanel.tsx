@@ -254,6 +254,11 @@ export function ConnectionPanel({
               autoCapitalize="off"
               autoCorrect="off"
             />
+            <p className="form-hint">
+              <code>host</code> or <code>host,port</code> — e.g. <code>localhost,1433</code>. Use a
+              comma (not a colon) before the port; named instances use{" "}
+              <code>host\instance</code>.
+            </p>
           </div>
           <div className="form-row full">
             <label>Authentication</label>
@@ -261,6 +266,17 @@ export function ConnectionPanel({
               <option value="integrated">Windows (Integrated · requires backend feature flag on Linux)</option>
               <option value="sql">SQL Server (user + password)</option>
             </select>
+            <p className="form-hint">
+              {conn.auth_mode === "sql" ? (
+                <>SQL auth needs a login + password (e.g. <code>sa</code>).</>
+              ) : (
+                <>
+                  Windows / Integrated uses your current credentials — it needs the
+                  integrated-auth backend build (a feature-flagged binary, not the default on
+                  Linux). On Linux without it, pick <strong>SQL Server</strong> auth instead.
+                </>
+              )}
+            </p>
           </div>
           {conn.auth_mode === "sql" && (
             <>
@@ -301,6 +317,13 @@ export function ConnectionPanel({
             />
             Trust server certificate (skip TLS validation)
           </label>
+          {conn.trust_cert && (
+            <p className="form-hint form-hint-caution full">
+              ⚠ Skips TLS certificate validation — fine for local / dev instances, but avoid it
+              against untrusted networks (it can't detect a man-in-the-middle). Uncheck it when
+              connecting to a properly-certificated production server.
+            </p>
+          )}
         </div>
         <div className="form-actions">
           <button className="btn primary" onClick={connectAndList} disabled={busy}>

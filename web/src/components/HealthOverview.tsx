@@ -1,16 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type { Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
 import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
-
-/** A computed re-scan delta — how the two grades moved between scans. */
-interface ScanDelta {
-  reliability: { fromGrade: string; toGrade: string; fromScore: number; toScore: number };
-  efficiency: { fromGrade: string; toGrade: string; fromScore: number; toScore: number };
-}
+import { CONF_GLYPH, confGlyph, confTitle } from "../confidence";
+import * as scanlog from "../store/scanlog";
+import type { ScanDiff, ScanSnapshot } from "../store/scanlog";
 
 /**
  * The HEALTH workspace — the one-screen front-door (default landing).
@@ -41,11 +38,19 @@ export function HealthOverview({
   // The clicked issue, by id. Derived (not stored) into selectedIssue below —
   // collision-safe because Issue.id is unique post-dedup.
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
-  // Re-scan trust loop: the previous report (kept across a refresh) lets us
-  // compute a "did the fix work?" delta banner; it auto-dismisses after ~6s.
-  const prevReportRef = useRef<HealthReport | null>(null);
-  const [delta, setDelta] = useState<ScanDelta | null>(null);
-  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Persistent re-scan trust loop: the prior PERSISTED snapshot (survives reload
+  // / sessions) lets us compute an ISSUE-LEVEL diff — which fixes landed, what's
+  // new, how the grades moved. Shown as a dismissible "Since last scan" strip
+  // that stays until the user dismisses it (no 6s auto-dismiss).
+  const [diff, setDiff] = useState<ScanDiff | null>(null);
+  const [diffDismissed, setDiffDismissed] = useState(false);
+
+  // Live view of the durable scan-history for THIS server·db (re-renders on
+  // append/clear). Drives the "Scan history" trend table.
+  const scanHistory = useSyncExternalStore(
+    scanlog.subscribe,
+    () => scanlog.history(conn.server, conn.database || undefined),
+  );
 
   const connected = !!conn.server;
 
@@ -64,16 +69,19 @@ export function HealthOverview({
         password: conn.auth_mode === "sql" ? conn.password : undefined,
         trust_cert: conn.trust_cert,
       };
+      // Capture the prior persisted snapshot BEFORE we append this scan, so the
+      // diff compares against the last run (not against itself).
+      const prev = scanlog.latest(conn.server, conn.database || undefined);
       const r = await backend.getDbHealth(info);
-      // Trust loop: if we already had a report THIS session, show how the two
-      // grades moved (the proof a fix landed), then auto-dismiss after ~6s.
-      const prev = prevReportRef.current;
       if (prev) {
-        setDelta(computeDelta(prev, r));
-        if (deltaTimer.current) clearTimeout(deltaTimer.current);
-        deltaTimer.current = setTimeout(() => setDelta(null), 6000);
+        setDiff(scanlog.diff(prev, r));
+        setDiffDismissed(false);
+      } else {
+        // First-ever scan for this server·db: nothing to diff against.
+        setDiff(null);
       }
-      prevReportRef.current = r;
+      // Persist this scan to the durable audit trail (server·db keyed).
+      scanlog.append(conn.server, conn.database || undefined, r);
       setReport(r);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -85,22 +93,14 @@ export function HealthOverview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conn.server, conn.database, conn.user, conn.password, conn.auth_mode, conn.trust_cert]);
 
-  // Clear the delta timer on unmount so it can't fire into an unmounted tree.
-  useEffect(
-    () => () => {
-      if (deltaTimer.current) clearTimeout(deltaTimer.current);
-    },
-    [],
-  );
-
   // Auto-fetch on mount + whenever the active server/database changes.
   useEffect(() => {
     setSelectedIssueId(null); // conn changed → close any open pane.
-    // A new server/db is a new baseline — drop the prior report + any delta so
-    // the trust banner never compares across different databases.
-    prevReportRef.current = null;
-    setDelta(null);
-    if (deltaTimer.current) clearTimeout(deltaTimer.current);
+    // A new server/db is a new baseline — drop any visible diff so the strip
+    // never compares across different databases (the diff is re-derived from
+    // the persisted history of the new server·db on its next scan).
+    setDiff(null);
+    setDiffDismissed(false);
     if (conn.server) void scan();
     else {
       setReport(null);
@@ -180,9 +180,12 @@ export function HealthOverview({
         </div>
       </div>
 
-      {/* Re-scan trust loop: after a re-scan, show how the two grades moved.
-          Auto-dismisses after ~6s — the "did the fix work?" proof. */}
-      {delta && !busy && <RescanDelta delta={delta} onDismiss={() => setDelta(null)} />}
+      {/* Persistent re-scan trust loop: after a re-scan, an ISSUE-LEVEL "did the
+          fix work?" strip — resolved/new titles + grade moves. Stays until the
+          user dismisses it (survives reload via the scanlog store). */}
+      {diff && !diffDismissed && !busy && (
+        <SinceLastScan diff={diff} onDismiss={() => setDiffDismissed(true)} />
+      )}
 
       {/* Plain-language read of the two grades, so the letters never stand alone. */}
       <p className="health-grade-explain">
@@ -204,6 +207,9 @@ export function HealthOverview({
         <div className="health-learning">
           Learning mode — DMV signal counters look freshly reset (post-restart). Absence of
           signal is not proof of health; the grade is provisional until a workload accumulates.
+          <span className="health-learning-eta">
+            Baseline builds as the server runs; grades firm up after ~7 days of monitoring.
+          </span>
         </div>
       )}
 
@@ -319,6 +325,15 @@ export function HealthOverview({
             onOpen={openIssue}
           />
 
+          {/* ── 5) SCAN HISTORY — durable trend / proof fixes moved the needle ── */}
+          <ScanHistory
+            entries={scanHistory}
+            onClear={() => {
+              scanlog.clear(conn.server, conn.database || undefined);
+              setDiff(null);
+            }}
+          />
+
           {/* ── Issue Detail slide-over — sibling of the list so the
                 health context stays mounted underneath. ──────────── */}
           {selectedIssue && (
@@ -366,7 +381,7 @@ function GradeBlock({
   // confident; the chip carries the band only when the grade is real.
   const gradeClass = provisional ? "grade-provisional" : gradeChipClass(grade);
   const provisionalTip =
-    "Provisional — not observed long enough yet (DMV stats reset on restart). The letter firms up once a workload accumulates.";
+    "Provisional — baseline builds as the server runs; grades firm up after ~7 days of monitoring. (DMV stats reset on restart, so we don't penalize the grade yet.)";
   return (
     <div
       className={`health-grade${provisional ? " provisional" : ""}`}
@@ -454,12 +469,17 @@ function IssueSection({
 
 /**
  * Small provenance badge — observed / estimated / heuristic — with a <Term>
- * tooltip explaining the difference so we never imply fake precision.
+ * tooltip explaining the difference so we never imply fake precision. The
+ * leading glyph (✓ / ○ / ⚡) is the SAME glanceable vocabulary as the metric
+ * chips and the signal strip.
  */
 function ConfidenceBadge({ confidence }: { confidence?: Confidence }) {
   const c = confidence ?? "observed";
   return (
     <Term k="confidence" className={`confidence-badge conf-${c}`}>
+      <span className="confidence-badge-glyph" aria-hidden>
+        {CONF_GLYPH[c]}
+      </span>
       {c}
     </Term>
   );
@@ -502,52 +522,165 @@ function StartHere({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) =
 }
 
 /**
- * Re-scan delta banner — the trust loop. Shows how each grade moved between the
- * previous and current scan (e.g. "Reliability A→A · Efficiency C→B (71→81)").
+ * "Since last scan" strip — the persistent trust loop. Beyond the aggregate
+ * grade move it names the ISSUE-LEVEL diff: which issues were RESOLVED (the
+ * proof a fix landed), which are NEW, and how each grade shifted. Stays put
+ * until dismissed; survives reload because it's derived from the durable
+ * scanlog snapshot, not session memory.
  */
-function RescanDelta({ delta, onDismiss }: { delta: ScanDelta; onDismiss: () => void }) {
+function SinceLastScan({ diff, onDismiss }: { diff: ScanDiff; onDismiss: () => void }) {
+  const { resolved, added, reliability, efficiency } = diff;
+  // The "headline" tone: net improvement (more resolved than new) reads up.
+  const net = resolved.length - added.length;
+  const tone = net > 0 ? "up" : net < 0 ? "down" : "flat";
   return (
-    <div className="rescan-delta" role="status">
-      <span className="rescan-delta-tag">Re-scan</span>
-      <DeltaLeg label="Reliability" leg={delta.reliability} />
-      <span className="rescan-delta-sep" aria-hidden>
-        ·
-      </span>
-      <DeltaLeg label="Efficiency" leg={delta.efficiency} />
-      <button className="rescan-delta-x" onClick={onDismiss} title="Dismiss" aria-label="Dismiss">
-        ✕
-      </button>
+    <div className={`since-scan tone-${tone}`} role="status">
+      <div className="since-scan-row">
+        <span className="since-scan-tag">Since last scan</span>
+        <span className="since-scan-when">{relTime(diff.prevAt)}</span>
+        <button className="since-scan-x" onClick={onDismiss} title="Dismiss" aria-label="Dismiss">
+          ✕
+        </button>
+      </div>
+      <div className="since-scan-body">
+        {/* Issue-level — the headline. */}
+        <IssueDiffLeg kind="resolved" issues={resolved} />
+        <span className="since-scan-sep" aria-hidden>·</span>
+        <IssueDiffLeg kind="added" issues={added} />
+        <span className="since-scan-sep" aria-hidden>·</span>
+        {/* Grade moves — the aggregate context. */}
+        <GradeLeg label="Reliability" leg={reliability} />
+        <GradeLeg label="Efficiency" leg={efficiency} />
+      </div>
     </div>
   );
 }
 
-function DeltaLeg({
+/** One side of the issue-level diff (resolved or added), naming up to 3 titles. */
+function IssueDiffLeg({
+  kind,
+  issues,
+}: {
+  kind: "resolved" | "added";
+  issues: { id: string; title: string }[];
+}) {
+  const word = kind === "resolved" ? "Resolved" : "New";
+  const titles = issues.slice(0, 3).map((i) => i.title);
+  const more = issues.length - titles.length;
+  return (
+    <span className={`since-scan-leg since-scan-${kind}`}>
+      <span className="since-scan-leg-n">
+        {word}: {issues.length}
+      </span>
+      {titles.length > 0 && (
+        <span className="since-scan-leg-titles" title={issues.map((i) => i.title).join(" · ")}>
+          {" "}
+          {titles.join(" · ")}
+          {more > 0 ? ` +${more} more` : ""}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function GradeLeg({
   label,
   leg,
 }: {
   label: string;
-  leg: ScanDelta["reliability"];
+  leg: ScanDiff["reliability"];
 }) {
   const dir = deltaDir(leg.fromScore, leg.toScore);
   const gradeMoved = leg.fromGrade !== leg.toGrade;
   return (
-    <span className={`rescan-delta-leg dir-${dir}`}>
-      <span className="rescan-delta-label">{label}</span>{" "}
-      <span className="rescan-delta-grades">
+    <span className={`since-scan-grade dir-${dir}`}>
+      <span className="since-scan-grade-label">{label}</span>{" "}
+      <span className="since-scan-grade-val">
         {leg.fromGrade}
-        <span className="rescan-delta-arrow" aria-hidden>
-          →
-        </span>
+        <span className="since-scan-arrow" aria-hidden>→</span>
         {leg.toGrade}
       </span>{" "}
-      <span className="rescan-delta-detail">
+      <span className="since-scan-grade-detail">
         {gradeMoved
-          ? `(${leg.toScore > leg.fromScore ? "+" : ""}${leg.toScore - leg.fromScore} score, ${leg.fromScore}→${leg.toScore})`
+          ? `(${leg.toScore > leg.fromScore ? "+" : ""}${leg.toScore - leg.fromScore}, ${leg.fromScore}→${leg.toScore})`
           : dir === "flat"
           ? "(no change)"
           : `(${leg.fromScore}→${leg.toScore})`}
       </span>
     </span>
+  );
+}
+
+/**
+ * SCAN HISTORY — a collapsible, compact trend table of past scans (newest
+ * first): time · Reliability grade · Efficiency grade · #issues. The durable
+ * proof that fixes moved the needle across sessions. Clearable.
+ */
+function ScanHistory({
+  entries,
+  onClear,
+}: {
+  entries: ScanSnapshot[];
+  onClear: () => void;
+}) {
+  // Default collapsed once there's enough trail to be interesting; if it's just
+  // the single current scan there's no trend to see, so stay collapsed/quiet.
+  const [open, setOpen] = useState(false);
+  if (entries.length === 0) return null;
+  return (
+    <section className="scan-history">
+      <div className="scan-history-head">
+        <button
+          className="scan-history-toggle"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+        >
+          <span className="scan-history-caret" aria-hidden>
+            {open ? "▾" : "▸"}
+          </span>
+          Scan history
+          <span className="scan-history-count">{entries.length}</span>
+        </button>
+        {open && entries.length > 0 && (
+          <button className="scan-history-clear" onClick={onClear} title="Forget the scan trail for this database">
+            Clear
+          </button>
+        )}
+      </div>
+      {open && (
+        <table className="scan-history-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Rel</th>
+              <th>Eff</th>
+              <th className="num">Issues</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((e, i) => (
+              <tr key={e.at} className={i === 0 ? "is-latest" : undefined}>
+                <td className="scan-history-time" title={fmtTime(e.at)}>
+                  {relTime(e.at)}
+                  {i === 0 && <span className="scan-history-latest-tag">latest</span>}
+                </td>
+                <td>
+                  <span className={`pill scan-history-grade ${gradeChipClass(e.reliability_grade)}`}>
+                    {e.reliability_grade}
+                  </span>
+                </td>
+                <td>
+                  <span className={`pill scan-history-grade ${gradeChipClass(e.efficiency_grade)}`}>
+                    {e.efficiency_grade}
+                  </span>
+                </td>
+                <td className="num scan-history-issues">{e.issues.length}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 
@@ -593,8 +726,12 @@ function Signal({
       <span className="health-signal-k">
         {term ? <Term k={term}>{label}</Term> : label}
         {isMeasured && (
-          <span className="health-signal-measured" title="Measured directly from live DMV / sentinel data" aria-label="measured">
-            ✓
+          <span
+            className="health-signal-measured conf-observed"
+            title={confTitle("observed")}
+            aria-label="observed"
+          >
+            {confGlyph("observed")}
           </span>
         )}
       </span>
@@ -617,7 +754,10 @@ function IssueCard({
   onOpen: (id: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const [open, setOpen] = useState(false);
+  // B2: ONE disclosure now gates the lower-density detail (consequence +
+  // rationale remainder + DDL) so the resting card is just title · chips ·
+  // rationale lead. Reduces the 5-6 stacked sections to a tight 3.
+  const [showDetails, setShowDetails] = useState(false);
 
   async function copy(e: React.MouseEvent) {
     e.stopPropagation(); // don't also open the detail pane
@@ -632,6 +772,11 @@ function IssueCard({
   }
 
   const links = deepLinks(iss);
+  const { lead, rest } = iss.rationale ? splitRationale(iss.rationale) : { lead: "", rest: "" };
+  // Is there anything worth a "details" disclosure? (consequence, more
+  // rationale, or copy-paste DDL). If not, we drop the toggle entirely.
+  const hasDetails = !!iss.consequence || !!rest || !!iss.fix_sql;
+  const sevGutter = severityClass(iss.severity);
 
   // The whole card is a button into the detail pane; inner controls stop
   // propagation so they keep their own behavior without also opening the pane.
@@ -644,7 +789,7 @@ function IssueCard({
 
   return (
     <div
-      className="advisor-card health-issue health-issue-clickable"
+      className={`advisor-card health-issue health-issue-clickable health-issue-gutter gutter-${sevGutter}`}
       role="button"
       tabIndex={0}
       onClick={() => onOpen(iss.id)}
@@ -652,7 +797,7 @@ function IssueCard({
       aria-label={`View fix for ${iss.title}`}
     >
       <div className="advisor-card-head">
-        <span className={`pill ${severityClass(iss.severity)}`}>{iss.severity}</span>
+        <span className={`pill ${sevGutter}`}>{iss.severity}</span>
         <span className="advisor-kind">{kindLabel(iss.kind)}</span>
         <span className="advisor-title">{iss.title}</span>
         <span className="advisor-score" title="impact rank">
@@ -673,41 +818,56 @@ function IssueCard({
         </div>
       )}
 
-      {iss.consequence && <p className="health-consequence">{iss.consequence}</p>}
+      {/* The inline rationale lead — the only prose at rest. */}
+      {lead && <p className="health-rationale-lead">{lead}</p>}
 
-      {iss.rationale && (() => {
-        // P2: inline the first 1-2 lines of rationale; collapse the rest behind
-        // the existing toggle so the gist is visible without a click.
-        const { lead, rest } = splitRationale(iss.rationale);
-        return (
-          <>
-            <p className="health-rationale-lead">{lead}</p>
-            {rest && (
-              <>
-                <button
-                  className="health-toggle"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setOpen((o) => !o);
-                  }}
-                >
-                  {open ? "▾ less" : "▸ more rationale"}
-                </button>
-                {open && <div className="advisor-rationale">{rest}</div>}
-              </>
-            )}
-          </>
-        );
-      })()}
+      {/* B2: everything else (impact, rest of rationale, DDL) collapses behind a
+          SINGLE toggle so the resting card stays compact. */}
+      {hasDetails && (
+        <>
+          <button
+            className="health-toggle"
+            aria-expanded={showDetails}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowDetails((o) => !o);
+            }}
+          >
+            {showDetails ? "▾ less" : "▸ details"}
+          </button>
+          {showDetails && (
+            <div className="health-issue-details">
+              {iss.consequence && <p className="health-consequence">{iss.consequence}</p>}
+              {rest && <div className="advisor-rationale">{rest}</div>}
+              {iss.fix_sql && (
+                <div className="ddl-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button className="ddl-copy" onClick={copy} title="Copy fix SQL to clipboard">
+                    {copied ? "Copied ✓" : "Copy"}
+                  </button>
+                  <pre className="ddl">{iss.fix_sql}</pre>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
+      {/* ONE prominent primary action (View fix → opens the detail pane); the
+          deep-links are lighter secondary buttons. */}
       <div className="health-issue-foot">
-        <span className="health-issue-cta" aria-hidden>
+        <button
+          className="btn primary health-issue-primary"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(iss.id);
+          }}
+        >
           View fix →
-        </span>
+        </button>
         {links.map((l) => (
           <button
             key={l.workspace}
-            className="ddl-copy"
+            className="health-issue-secondary"
             onClick={(e) => {
               e.stopPropagation();
               setUi({ ...ui, workspace: l.workspace });
@@ -718,15 +878,6 @@ function IssueCard({
           </button>
         ))}
       </div>
-
-      {iss.fix_sql && (
-        <div className="ddl-wrap" onClick={(e) => e.stopPropagation()}>
-          <button className="ddl-copy" onClick={copy} title="Copy fix SQL to clipboard">
-            {copied ? "Copied ✓" : "Copy"}
-          </button>
-          <pre className="ddl">{iss.fix_sql}</pre>
-        </div>
-      )}
     </div>
   );
 }
@@ -773,24 +924,6 @@ function topIssues(issues: Issue[]): Issue[] {
       return b.impact_rank - a.impact_rank;
     })
     .slice(0, 3);
-}
-
-/** Build the two-grade delta between a previous and a current scan. */
-function computeDelta(prev: HealthReport, next: HealthReport): ScanDelta {
-  return {
-    reliability: {
-      fromGrade: prev.reliability_grade ?? "?",
-      toGrade: next.reliability_grade ?? "?",
-      fromScore: prev.reliability_score,
-      toScore: next.reliability_score,
-    },
-    efficiency: {
-      fromGrade: prev.efficiency_grade ?? "?",
-      toGrade: next.efficiency_grade ?? "?",
-      fromScore: prev.efficiency_score,
-      toScore: next.efficiency_score,
-    },
-  };
 }
 
 /** up = score improved, down = regressed, flat = unchanged (drives leg color). */
@@ -852,6 +985,27 @@ function splitRationale(text: string): { lead: string; rest: string } {
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/**
+ * Compact relative time ("2m ago", "3h ago", "yesterday") for the scan trail;
+ * falls back to a local date for anything older than a week. Keeps the history
+ * table scannable instead of full timestamps (those live in the title= hover).
+ */
+function relTime(iso: string): string {
+  const d = new Date(iso).getTime();
+  if (Number.isNaN(d)) return iso;
+  const sec = Math.round((Date.now() - d) / 1000);
+  if (sec < 5) return "just now";
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day === 1) return "yesterday";
+  if (day < 7) return `${day}d ago`;
+  return new Date(d).toLocaleDateString();
 }
 
 function fmtMs(ms: number): string {

@@ -3,6 +3,7 @@ import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type { Recommendation, RecommendationKind, RecommendationPriority } from "../api/backend";
 import { Term, TermText } from "./Term";
+import { CONF_GLYPH, confTier } from "../confidence";
 
 /**
  * The ADVISOR workspace — the ranked, full-detail view of the fixes summarised
@@ -170,6 +171,11 @@ function RecCard({ rec }: { rec: Recommendation }) {
     }
   }
 
+  // A3: surface the confidence tier (glyph + label) so users see which recs are
+  // grounded vs rule-of-thumb. Columnstore lands as "heuristic" (⚡) — the
+  // strongest "verify first" signal — using the ONE shared vocabulary.
+  const tier = confTier(rec.confidence);
+
   return (
     <div className="advisor-card">
       <div className="advisor-card-head">
@@ -177,6 +183,12 @@ function RecCard({ rec }: { rec: Recommendation }) {
         <span className="advisor-kind">
           <Term k={kindTerm(rec.kind)}>{kindLabel(rec.kind)}</Term>
         </span>
+        <Term k="confidence" className={`confidence-badge conf-${tier}`}>
+          <span className="confidence-badge-glyph" aria-hidden>
+            {CONF_GLYPH[tier]}
+          </span>
+          {tier}
+        </Term>
         <span className="advisor-title">{rec.title}</span>
         <span className="advisor-score" title="impact score">
           {Math.round(rec.impact_score).toLocaleString()}
@@ -186,6 +198,15 @@ function RecCard({ rec }: { rec: Recommendation }) {
         <code>{rec.object}</code>
       </div>
       <div className="advisor-rationale"><TermText>{rec.rationale}</TermText></div>
+      {tier === "heuristic" && (
+        <p className="advisor-heuristic-note">
+          <span className="advisor-heuristic-glyph" aria-hidden>
+            {CONF_GLYPH.heuristic}
+          </span>
+          Heuristic — based on rule-of-thumb ratios, not a measured outcome. Benchmark a
+          representative query before applying.
+        </p>
+      )}
       <div className="ddl-wrap">
         <button className="ddl-copy" onClick={copy} title="Copy T-SQL to clipboard">
           {copied ? "Copied ✓" : "Copy"}

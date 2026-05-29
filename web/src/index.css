@@ -750,6 +750,26 @@ body {
   background: var(--bg-elev-2);
 }
 .form-row input::placeholder { color: var(--text-dim); }
+/* A6: inline connection-form coaching text under a field. */
+.form-hint {
+  margin: 2px 0 0;
+  font: 11px/1.5 var(--f-sans);
+  color: var(--text-muted);
+}
+.form-hint code {
+  font: 10px var(--f-mono);
+  color: var(--signal);
+  background: var(--signal-faint);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.form-hint.full { grid-column: 1 / -1; }
+.form-hint-caution {
+  color: var(--warn);
+  padding: 7px 10px;
+  background: rgba(255, 209, 102, 0.08);
+  border-left: 2px solid var(--warn);
+}
 .form-row.cb {
   flex-direction: row;
   align-items: center;
@@ -1227,6 +1247,24 @@ kbd {
   font: 12px/1.5 var(--f-sans);
   color: var(--text-muted);
 }
+/* A3: inline "verify first" caveat under a heuristic (columnstore) advisor rec. */
+.advisor-heuristic-note {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  font: 11px/1.45 var(--f-sans);
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.08);
+  border-left: 2px solid var(--warn);
+}
+.advisor-heuristic-glyph {
+  flex: none;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--warn);
+}
 
 .ddl-wrap { position: relative; margin-top: 12px; }
 .ddl {
@@ -1390,6 +1428,14 @@ kbd {
   border: 1px solid rgba(255, 209, 102, 0.4);
   border-left: 2px solid var(--warn);
 }
+/* A4: learning-mode ETA — the honest "when does it firm up?" line on the banner. */
+.health-learning-eta {
+  display: block;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.9;
+}
 
 /* ── Signal strip — topbar-counter style ──────────── */
 .health-signals {
@@ -1495,17 +1541,19 @@ kbd {
   color: var(--text-muted);
 }
 
-/* Consequence — the plain-English user impact, prominent under the title. */
+/* Consequence — the plain-English user impact. B2: now lives INSIDE the
+   collapsed details block, so it sits flush with the rest of the disclosure. */
 .health-consequence {
-  margin: 8px 0 0;
+  margin: 0 0 0;
   font: 13px/1.5 var(--f-sans);
   color: var(--text);
 }
 
-/* P2: the first 1-2 rationale lines shown inline; the rest collapses. */
+/* B2: the inline rationale lead — the only prose at rest. Tightened rhythm:
+   sits close under the chip row (4px) instead of the old 8px gap. */
 .health-rationale-lead {
-  margin: 8px 0 0;
-  font: 12px/1.55 var(--f-sans);
+  margin: 4px 0 0;
+  font: 12px/1.5 var(--f-sans);
   color: var(--text-muted);
 }
 
@@ -1524,7 +1572,7 @@ kbd {
   margin-top: 16px;
 }
 .health-toggle {
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 0;
   background: none;
   border: 0;
@@ -1534,8 +1582,19 @@ kbd {
   color: var(--text-muted);
 }
 .health-toggle:hover { color: var(--signal); }
+
+/* B2: the single details disclosure — consequence + rationale-rest + DDL all
+   collapse here so the resting card is just title · chips · rationale lead. */
+.health-issue-details {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .health-issue-foot {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 12px;
@@ -1543,21 +1602,50 @@ kbd {
 .health-issue-foot .ddl-copy { position: static; }
 .health-err-card .form-status { margin-top: 14px; text-align: left; }
 
-/* A clickable issue card → opens the detail slide-over. The "View fix →"
-   cta sits in the footer; the whole card is a role=button. */
+/* A clickable issue card → opens the detail slide-over. The whole card is a
+   role=button; the footer "View fix" button is the one prominent action. */
 .health-issue-clickable { cursor: pointer; }
 .health-issue-clickable:focus-visible {
   outline: none;
   border-left-color: var(--signal);
   box-shadow: 0 0 0 1px var(--signal-dim) inset;
 }
-.health-issue-cta {
-  font: 10px var(--f-tech);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--signal);
-  align-self: center;
-  margin-right: auto;
+
+/* ── B2: HEALTH issue card — distinct from the reused advisor look ──
+   A faint severity-colored LEFT GUTTER makes severity glanceable and sets the
+   card apart from ADVISE recs. Tighter padding for the denser layout. */
+.health-issue-gutter {
+  border-left-width: 3px;
+  padding: 12px 16px;
+}
+.health-issue-gutter .advisor-object { margin-top: 6px; }
+.health-issue-gutter .metric-row { margin-top: 8px; }
+/* Faint, theme-stable gutter tints (rgba over the panel — matching the
+   rgba-tint convention used elsewhere in this file rather than color-mix). */
+.health-issue.gutter-crit { border-left-color: rgba(255, 58, 74, 0.55); }
+.health-issue.gutter-warn { border-left-color: rgba(255, 209, 102, 0.55); }
+.health-issue.gutter-dim  { border-left-color: rgba(127, 180, 255, 0.45); }
+/* Keep the focus/hover signal accent winning over the resting gutter color. */
+.health-issue-gutter:hover { border-left-color: var(--signal); }
+
+/* ONE prominent primary action; deep-links are lighter secondary buttons. */
+.health-issue-primary {
+  padding: 5px 14px;
+  font-size: 12px;
+}
+.health-issue-secondary {
+  padding: 5px 11px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font: 11px var(--f-tech);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.health-issue-secondary:hover {
+  color: var(--text-strong);
+  border-color: var(--line-strong);
 }
 
 /* ============================================================
@@ -1996,6 +2084,57 @@ kbd {
 .help-step-body {
   font: 12px/1.55 var(--f-sans);
   color: var(--text);
+}
+
+/* A5: unified A–F grade rubric + dimensions + provenance tiers — the single
+   place the grade vocabulary is defined; linked from the HEALTH explainer. */
+.help-rubric {
+  margin-bottom: 26px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--signal);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.help-rubric.focus {
+  border-color: var(--signal);
+  box-shadow: 0 0 0 1px var(--signal-dim), 0 0 18px var(--signal-glow);
+}
+.help-rubric .help-section-title { margin-bottom: 8px; }
+.help-rubric-lead {
+  margin: 0 0 12px;
+  font: 12px/1.55 var(--f-sans);
+  color: var(--text);
+}
+.help-rubric-scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.help-rubric-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.help-rubric-grade {
+  min-width: 22px;
+  justify-content: center;
+}
+.help-rubric-band {
+  font: 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.help-rubric-prov {
+  margin: 0;
+  font: 11px/1.6 var(--f-sans);
+  color: var(--text-muted);
+}
+.help-rubric-tier {
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* Glossary */
@@ -2454,6 +2593,38 @@ kbd {
   border-bottom-color: rgba(255, 209, 102, 0.4);
 }
 
+/* ============================================================
+   Confidence vocabulary — ONE glyph + color tier everywhere
+   (Pass 4 / Phase A). Maps to src/confidence.ts:
+     observed  = ✓  → --signal
+     estimated = ○  → --info-sev
+     heuristic = ⚡ → --warn
+   Standalone `.conf-*` color helpers so the SAME tier color can be
+   reused on any element (signal-strip tick, rubric tiers, glyphs)
+   without re-declaring it. Phase B should reuse these too.
+   ============================================================ */
+.conf-observed  { color: var(--signal); }
+.conf-estimated { color: var(--info-sev); }
+.conf-heuristic { color: var(--warn); }
+
+/* The leading glyph inside a .confidence-badge pill — inherits the badge's
+   tier color, just nudged for optical balance against the label word. */
+.confidence-badge-glyph {
+  font-size: 11px;
+  line-height: 1;
+  margin-right: 4px;
+}
+
+/* Per-metric tier glyph that prefixes a metric chip (A1). Small, color-coded by
+   the issue's confidence band; the chip's existing title/popover still carries
+   the full provenance text. */
+.metric-chip-tier {
+  font-size: 10px;
+  line-height: 1;
+  flex: none;
+  opacity: 0.9;
+}
+
 /* ── START HERE — focus callout above the issue lanes ── */
 .start-here {
   display: flex;
@@ -2514,56 +2685,44 @@ kbd {
 .start-here-chip-go { color: var(--text-muted); }
 .start-here-chip:hover .start-here-chip-go { color: var(--signal); }
 
-/* ── Re-scan delta banner — the trust loop ─────────── */
-.rescan-delta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 12px;
+/* ── "Since last scan" strip — the PERSISTENT issue-level trust loop ──
+   Beyond the aggregate grade move it names the resolved/new issues so the
+   user sees proof a fix landed. Stays until dismissed (no auto-dismiss). */
+.since-scan {
   margin-top: 12px;
-  padding: 9px 14px;
+  padding: 9px 14px 10px;
   border: 1px solid var(--info-sev);
   border-left: 2px solid var(--info-sev);
   background: rgba(127, 180, 255, 0.08);
   font: 12px var(--f-sans);
   color: var(--text);
-  animation: rescan-delta-in 0.25s ease-out;
+  animation: since-scan-in 0.25s ease-out;
 }
-@keyframes rescan-delta-in {
+/* Net improvement tints the strip toward "ok"; a regression toward "crit". */
+.since-scan.tone-up    { border-color: var(--ok);   border-left-color: var(--ok);   background: rgba(58, 210, 159, 0.08); }
+.since-scan.tone-down  { border-color: var(--crit); border-left-color: var(--crit); background: rgba(255, 58, 74, 0.07); }
+@keyframes since-scan-in {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.rescan-delta-tag {
+.since-scan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.since-scan-tag {
   font: 600 9px var(--f-tech);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--info-sev);
 }
-.rescan-delta-sep { color: var(--text-dim); }
-.rescan-delta-leg { display: inline-flex; align-items: baseline; gap: 6px; }
-.rescan-delta-label {
-  font: 10px var(--f-tech);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-.rescan-delta-grades {
-  font: 13px var(--f-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-strong);
-}
-.rescan-delta-arrow { margin: 0 2px; color: var(--text-dim); }
-.rescan-delta-detail {
+.since-scan.tone-up   .since-scan-tag { color: var(--ok); }
+.since-scan.tone-down .since-scan-tag { color: var(--crit); }
+.since-scan-when {
   font: 11px var(--f-mono);
-  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
 }
-/* Color the leg by direction so an improvement reads green at a glance. */
-.rescan-delta-leg.dir-up .rescan-delta-grades,
-.rescan-delta-leg.dir-up .rescan-delta-detail { color: var(--ok); }
-.rescan-delta-leg.dir-down .rescan-delta-grades,
-.rescan-delta-leg.dir-down .rescan-delta-detail { color: var(--crit); }
-.rescan-delta-x {
+.since-scan-x {
   margin-left: auto;
   padding: 2px 8px;
   background: transparent;
@@ -2572,7 +2731,150 @@ kbd {
   font: 11px var(--f-tech);
   cursor: pointer;
 }
-.rescan-delta-x:hover { color: var(--signal); }
+.since-scan-x:hover { color: var(--signal); }
+.since-scan-body {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+}
+.since-scan-sep { color: var(--text-dim); }
+.since-scan-leg { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; }
+.since-scan-leg-n {
+  font: 600 11px var(--f-tech);
+  letter-spacing: 0.04em;
+}
+.since-scan-resolved .since-scan-leg-n { color: var(--ok); }
+.since-scan-added .since-scan-leg-n { color: var(--warn); }
+.since-scan-leg-titles {
+  font: 11px var(--f-sans);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.since-scan-grade { display: inline-flex; align-items: baseline; gap: 5px; }
+.since-scan-grade-label {
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.since-scan-grade-val {
+  font: 12px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+.since-scan-arrow { margin: 0 2px; color: var(--text-dim); }
+.since-scan-grade-detail {
+  font: 10px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.since-scan-grade.dir-up .since-scan-grade-val,
+.since-scan-grade.dir-up .since-scan-grade-detail { color: var(--ok); }
+.since-scan-grade.dir-down .since-scan-grade-val,
+.since-scan-grade.dir-down .since-scan-grade-detail { color: var(--crit); }
+
+/* ── Scan history — collapsible trend table (durable proof) ────────── */
+.scan-history {
+  margin-top: 22px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.scan-history-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.scan-history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: 12px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.scan-history-toggle:hover { color: var(--text-strong); }
+.scan-history-caret { font-size: 10px; color: var(--text-dim); }
+.scan-history-count {
+  font: 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  letter-spacing: 0;
+}
+.scan-history-clear {
+  margin-left: auto;
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.scan-history-clear:hover { color: var(--crit); border-color: var(--crit); }
+.scan-history-table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font: 12px var(--f-sans);
+}
+.scan-history-table th {
+  text-align: left;
+  padding: 4px 10px;
+  font: 9px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--line);
+}
+.scan-history-table th.num,
+.scan-history-table td.num { text-align: right; }
+.scan-history-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.scan-history-table tr:last-child td { border-bottom: 0; }
+.scan-history-table tr.is-latest td { color: var(--text); }
+.scan-history-time {
+  font: 11px var(--f-mono);
+  white-space: nowrap;
+}
+.scan-history-latest-tag {
+  margin-left: 8px;
+  padding: 0 6px;
+  font: 8px var(--f-tech);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--signal);
+  border: 1px solid var(--signal-dim);
+  border-radius: 999px;
+}
+.scan-history-grade {
+  font: 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  padding: 0 7px;
+}
+.scan-history-issues {
+  font: 12px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
 
 /* ── Deadlock cycle — readable A ──waits for──▶ B ──▶ A ── */
 .deadlock-cycle { margin-bottom: 12px; }

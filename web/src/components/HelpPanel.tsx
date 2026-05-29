@@ -35,6 +35,22 @@ export const HELP_STEPS: { n: string; title: string; body: string }[] = [
   },
 ];
 
+/**
+ * The unified A–F grade rubric — defined in ONE place (here) so the grade
+ * letters mean the same thing everywhere. Linked from HealthOverview's grade
+ * explainer via onOpenHelp("grade_rubric").
+ */
+export const GRADE_RUBRIC: { grade: string; band: string; cls: string }[] = [
+  { grade: "A", band: "90–100", cls: "grade-a" },
+  { grade: "B", band: "80–89", cls: "grade-b" },
+  { grade: "C", band: "70–79", cls: "grade-c" },
+  { grade: "D", band: "60–69", cls: "grade-d" },
+  { grade: "F", band: "<60", cls: "grade-f" },
+];
+
+/** Sentinel focusTerm value that scrolls the Help panel to the grade rubric. */
+export const GRADE_RUBRIC_FOCUS = "grade_rubric";
+
 export function HelpPanel({
   open,
   onClose,
@@ -47,6 +63,7 @@ export function HelpPanel({
   const [q, setQ] = useState("");
   const bodyRef = useRef<HTMLDivElement>(null);
   const focusRowRef = useRef<HTMLDivElement>(null);
+  const rubricRef = useRef<HTMLElement>(null);
 
   // ESC closes from anywhere while open.
   useEffect(() => {
@@ -58,14 +75,21 @@ export function HelpPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // When opened with a focusTerm, scroll it into view.
+  // When opened with a focusTerm, scroll it into view. The rubric anchor and
+  // the two grade slugs both resolve to the rubric section; any other slug
+  // scrolls to its glossary row.
+  const focusRubric =
+    focusTerm === GRADE_RUBRIC_FOCUS ||
+    focusTerm === "reliability_grade" ||
+    focusTerm === "efficiency_grade";
   useEffect(() => {
     if (!open || !focusTerm) return;
     const t = setTimeout(() => {
-      focusRowRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+      const el = focusRubric ? rubricRef.current : focusRowRef.current;
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 120);
     return () => clearTimeout(t);
-  }, [open, focusTerm]);
+  }, [open, focusTerm, focusRubric]);
 
   const entries = useMemo(() => {
     const all = Object.entries(GLOSSARY);
@@ -116,6 +140,41 @@ export function HelpPanel({
                 </div>
               </div>
             ))}
+          </section>
+
+          {/* A5: the ONE place the A–F rubric + grade dimensions + provenance
+              tiers are defined, so the letters mean the same thing everywhere.
+              Linked from the HEALTH grade explainer. */}
+          <section
+            className={`help-rubric${focusRubric ? " focus" : ""}`}
+            ref={rubricRef}
+            aria-label="How grades work"
+          >
+            <h3 className="help-section-title">How grades work</h3>
+            <p className="help-rubric-lead">
+              Two grades, two questions. <strong>Reliability</strong> asks{" "}
+              <em>“are users hitting errors right now?”</em> (deadlocks, blocking, harmful
+              waits, regressions). <strong>Efficiency</strong> asks{" "}
+              <em>“how much speed and cost could you reclaim?”</em> — a lower efficiency grade
+              means more easy wins are available, not that anything is broken.
+            </p>
+            <div className="help-rubric-scale">
+              {GRADE_RUBRIC.map((r) => (
+                <div className="help-rubric-row" key={r.grade}>
+                  <span className={`pill ${r.cls} help-rubric-grade`}>{r.grade}</span>
+                  <span className="help-rubric-band">{r.band}</span>
+                </div>
+              ))}
+            </div>
+            <p className="help-rubric-prov">
+              Every number carries a provenance tier so we never imply fake precision:{" "}
+              <span className="conf-observed help-rubric-tier">✓ observed</span> — measured
+              directly from DMV counters;{" "}
+              <span className="conf-estimated help-rubric-tier">○ estimated</span> — SQL
+              Server's own projection;{" "}
+              <span className="conf-heuristic help-rubric-tier">⚡ heuristic</span> — a
+              rule-of-thumb, verify before acting.
+            </p>
           </section>
 
           <section className="help-glossary">
