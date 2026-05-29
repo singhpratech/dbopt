@@ -151,7 +151,7 @@ export function App() {
   };
   // Collapsible nav rail: icon-only by default; expands to show labels beside
   // each icon. Persisted so the choice sticks.
-  const [railExpanded, setRailExpanded] = useState<boolean>(() => P.load<boolean>("rail_expanded", false));
+  const [railExpanded, setRailExpanded] = useState<boolean>(() => P.load<boolean>("rail_expanded", true));
   useEffect(() => { P.save("rail_expanded", railExpanded); }, [railExpanded]);
 
   // ── Persistence effects ─────────────────────────────
@@ -429,11 +429,6 @@ export function App() {
                 ? "…"
                 : "NOT SET"}
             </span>
-            {dbStatus === "connected" && conn.server && (
-              <span className="v" style={{ color: "var(--text-dim)" }}>
-                {conn.server}
-              </span>
-            )}
           </div>
           {dmvLoading ? (
             <div className="group">
