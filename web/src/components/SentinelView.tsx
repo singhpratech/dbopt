@@ -249,7 +249,18 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
       {/* ── Top queries ────────────────────────────────── */}
       <Section title={`TOP ${report?.top_queries.length ?? 0} QUERIES BY TOTAL DURATION`}>
         {report && report.top_queries.length > 0 ? (
-          <table className="findings" style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+            {/* Fixed layout takes column widths from the FIRST row, so define
+                them once here — otherwise the header (no widths) and the data
+                cells (their own widths) disagree and the columns drift apart.
+                The SQL-text col has no width → it absorbs the remaining space. */}
+            <colgroup>
+              <col style={{ width: 56 }} />
+              <col />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 110 }} />
+              <col style={{ width: 96 }} />
+            </colgroup>
             <thead>
               <Th cols={["Query", "SQL text", "Total", "Executions", "Avg"]} aligns={["l", "l", "r", "r", "r"]} />
             </thead>
@@ -290,7 +301,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
       {/* ── Regressions ────────────────────────────────── */}
       <Section title="REGRESSIONS (≥2× SLOWER VS. BASELINE HALF-WINDOW)">
         {report && report.regressions.length > 0 ? (
-          <table className="findings" style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <Th cols={["Query", "Baseline", "Current", "Δ"]} aligns={["l", "r", "r", "r"]} />
             </thead>
@@ -313,7 +324,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
       {/* ── Unused indexes ────────────────────────────── */}
       <Section title="INDEXES ACCUMULATING WRITES WITH ZERO READS">
         {report && report.unused_indexes.length > 0 ? (
-          <table className="findings" style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <Th cols={["Table", "Index", "Writes"]} aligns={["l", "l", "r"]} />
             </thead>
@@ -383,7 +394,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div style={{ borderBottom: "1px solid var(--line)" }}>
       <div
         className="pane-title"
-        style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--bg, #0a0d12)" }}
+        style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--bg-panel)" }}
       >
         <div className="label">
           <b>{title}</b>
@@ -405,9 +416,10 @@ function Th({ cols, aligns }: { cols: string[]; aligns: ("l" | "r")[] }) {
             padding: "6px 14px",
             borderBottom: "1px solid var(--line)",
             font: "10px var(--f-mono, ui-monospace, Menlo, monospace)",
-            color: "var(--text-dim)",
+            color: "var(--text-muted)",
             letterSpacing: "0.1em",
-            fontWeight: 400,
+            fontWeight: 500,
+            textTransform: "uppercase",
           }}
         >
           {c}
