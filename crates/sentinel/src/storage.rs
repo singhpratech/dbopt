@@ -23,6 +23,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0002_poller_state",  include_str!("../migrations/0002_poller_state.sql")),
     ("0003_logs",          include_str!("../migrations/0003_logs.sql")),
     ("0004_query_text",    include_str!("../migrations/0004_query_text.sql")),
+    ("0005_deadlock_graph_hash", include_str!("../migrations/0005_deadlock_graph_hash.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -241,17 +242,33 @@ impl Storage {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
         lock.execute(
             "INSERT INTO deadlock_capture(instance_id, captured_at, xml_blob,
-                 victim_session_id, victim_resource)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
+                 victim_session_id, victim_resource, graph_hash)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 instance_id,
                 row.captured_at.timestamp_millis(),
                 row.xml_blob,
                 row.victim_session_id,
                 row.victim_resource,
+                row.graph_hash,
             ],
         )?;
         Ok(())
+    }
+
+    /// True if a deadlock graph with this hash is already stored — so we count
+    /// each real deadlock once instead of re-counting it every poll.
+    pub fn deadlock_graph_exists(&self, instance_id: i64, hash: &str) -> bool {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT 1 FROM deadlock_capture WHERE instance_id = ?1 AND graph_hash = ?2 LIMIT 1",
+            params![instance_id, hash],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
     }
 
     pub fn insert_index_usage_delta(&self, instance_id: i64, row: &IndexUsageDeltaRow) -> anyhow::Result<()> {
@@ -794,6 +811,8 @@ pub struct DeadlockRow {
     pub xml_blob: String,
     pub victim_session_id: Option<i64>,
     pub victim_resource: Option<String>,
+    /// SHA-256 (prefix) of this single deadlock graph; dedup key across polls.
+    pub graph_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
