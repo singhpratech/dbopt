@@ -706,6 +706,86 @@ body {
   border-top: 1px solid var(--line);
 }
 
+/* ── Grouped findings (rule-level, fix-first) ─────────────────
+   Collapses thousands of findings into one card per rule so large
+   scripts stay readable. */
+.findings-grouped { display: flex; flex-direction: column; }
+.findings-summary {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+  font: 11px var(--f-tech); letter-spacing: 0.06em;
+  color: var(--text-muted); text-transform: uppercase;
+  position: sticky; top: 0; z-index: 2;
+}
+.findings-summary strong { color: var(--text-strong); }
+.findings-summary .dot { color: var(--text-dim); }
+.findings-summary .sev-counts { display: flex; gap: 8px; }
+.findings-summary .sc.crit { color: var(--crit); }
+.findings-summary .sc.err { color: var(--err); }
+.findings-summary .sc.warn { color: var(--warn); }
+.findings-summary .sc.info { color: var(--info-sev); }
+.findings-summary .hint { margin-left: auto; color: var(--text-dim); text-transform: none; letter-spacing: 0; font: 10px var(--f-mono); }
+
+.finding-group { border-bottom: 1px solid var(--line-soft); }
+.fg-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px 10px 0;
+  cursor: pointer;
+  position: relative;
+}
+.fg-head:hover { background: rgba(212, 255, 78, 0.03); }
+.finding-group.expanded .fg-head { background: rgba(212, 255, 78, 0.04); }
+.fg-head .gutter { width: 4px; align-self: stretch; background: var(--text-dim); flex-shrink: 0; }
+.finding-group.sev-critical .fg-head .gutter { background: var(--crit); box-shadow: inset 0 0 6px var(--crit-glow); }
+.finding-group.sev-error    .fg-head .gutter { background: var(--err); }
+.finding-group.sev-warning  .fg-head .gutter { background: var(--warn); }
+.finding-group.sev-info     .fg-head .gutter { background: var(--info-sev); }
+.fg-head .rank { font: 10px var(--f-tech); color: var(--signal); font-weight: 600; flex-shrink: 0; }
+.fg-head .sev-tag {
+  font: 10px var(--f-tech); letter-spacing: 0.1em; flex-shrink: 0;
+  padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px;
+}
+.finding-group.sev-critical .fg-head .sev-tag { color: var(--crit); }
+.finding-group.sev-error    .fg-head .sev-tag { color: var(--err); }
+.finding-group.sev-warning  .fg-head .sev-tag { color: var(--warn); }
+.finding-group.sev-info     .fg-head .sev-tag { color: var(--info-sev); }
+.fg-head .rule { font: 12px var(--f-mono); color: var(--text-strong); font-weight: 500; flex-shrink: 0; }
+.fg-head .count {
+  font: 11px var(--f-mono); color: var(--signal);
+  background: var(--signal-faint, var(--bg-elev)); padding: 1px 7px; border-radius: 10px; flex-shrink: 0;
+}
+.fg-head .msg {
+  font: 12px var(--f-sans); color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
+}
+.fg-head .caret { font: 13px var(--f-tech); color: var(--text-dim); flex-shrink: 0; padding-right: 4px; }
+
+.fg-body { padding: 4px 16px 16px 18px; border-top: 1px solid var(--line-soft); }
+.fg-body .rec { margin: 10px 0; }
+.fg-body .rec-label { font: 10px var(--f-tech); letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 5px; }
+.fg-body .rec-body { font: 12px/1.6 var(--f-mono); color: var(--text); white-space: pre-wrap; }
+.fg-actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.fg-btn {
+  font: 10px var(--f-tech); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 6px 12px; border-radius: 5px; cursor: pointer;
+  background: var(--bg-elev); color: var(--text-muted); border: 1px solid var(--line-strong, var(--line));
+}
+.fg-btn:hover { border-color: var(--signal); color: var(--signal); }
+.fg-btn.primary { background: var(--signal); color: var(--bg-void); border-color: var(--signal); font-weight: 600; }
+.fg-btn.primary:hover { background: #e5ff75; color: var(--bg-void); }
+:root[data-theme="light"] .fg-btn.primary { color: #ffffff; }
+.fg-locs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.fg-locs-label { font: 10px var(--f-tech); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); margin-right: 4px; }
+.loc-chip {
+  font: 10px var(--f-mono); color: var(--text-muted);
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 4px;
+  padding: 2px 7px; cursor: pointer;
+}
+.loc-chip:hover { border-color: var(--signal); color: var(--signal); }
+.fg-locs-more { font: 10px var(--f-mono); color: var(--text-dim); }
+
 /* ============================================================
    Empty states
    ============================================================ */
@@ -1137,6 +1217,17 @@ body {
   gap: 10px;
   flex-wrap: wrap;
 }
+.ai-config .ai-trunc-pill {
+  font: 10px var(--f-mono);
+  color: var(--warn);
+  background: var(--warn-glow, rgba(240, 180, 60, 0.12));
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 2px 9px;
+  cursor: help;
+  white-space: nowrap;
+}
+.ai-config .ai-trunc-pill.right { margin-left: auto; }
 .ai-config .chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px;

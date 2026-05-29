@@ -24,6 +24,30 @@ interface Turn {
   cols: ColumnState[];
 }
 
+// Raw-SQL budget sent to the model. The deduped finding summary (below) always
+// covers the WHOLE script regardless of this, so large scripts are still handled.
+const SQL_BUDGET = 24000;
+
+const SEV_W: Record<string, number> = { critical: 4, error: 3, warning: 2, info: 1 };
+
+/**
+ * Deduped, whole-script finding summary: one row per rule with its occurrence
+ * count + example line numbers, ranked fix-first. This is what lets the AI
+ * reason about "750 non-SARGable predicates — fix the pattern once" even when
+ * the raw SQL is too big to send in full.
+ */
+function findingSummary(findings: AnalysisReport["findings"]) {
+  const map = new Map<string, { rule: string; severity: string; count: number; example_lines: number[]; what: string }>();
+  for (const f of findings) {
+    let g = map.get(f.rule);
+    if (!g) { g = { rule: f.rule, severity: f.severity, count: 0, example_lines: [], what: f.message }; map.set(f.rule, g); }
+    g.count++;
+    if ((SEV_W[f.severity] ?? 0) > (SEV_W[g.severity] ?? 0)) g.severity = f.severity;
+    if (f.location?.line && g.example_lines.length < 8) g.example_lines.push(f.location.line);
+  }
+  return [...map.values()].sort((a, b) => (SEV_W[b.severity] ?? 0) - (SEV_W[a.severity] ?? 0) || b.count - a.count);
+}
+
 function sanitizeThread(turns: Turn[]): Turn[] {
   // A turn saved mid-stream (e.g. tab closed) would still say "streaming"; settle it.
   return (turns ?? []).map((t) => ({
@@ -94,11 +118,26 @@ export function LlmChat({
       "When relevant, mention which SQL Server version the suggested construct requires.",
       "This is an ongoing conversation — use the earlier turns as context.",
     ];
-    if (report) {
-      const slim = report.findings.map((f) => ({ rule: f.rule, sev: f.severity, line: f.location?.line, msg: f.message }));
-      lines.push("Static analyzer findings (JSON):", JSON.stringify(slim));
+    if (report && report.findings.length) {
+      const summary = findingSummary(report.findings);
+      lines.push(
+        `Static analyzer findings — DEDUPED SUMMARY across the WHOLE script (${report.findings.length} findings, ${summary.length} distinct rules). Each row is a recurring pattern with its occurrence count and example line numbers. Treat high-count rows as systemic: propose ONE canonical fix to apply across all occurrences rather than fixing each line separately.`,
+        JSON.stringify(summary),
+      );
     }
-    if (sql) lines.push("Current SQL:", "```sql\n" + sql.slice(0, 8000) + "\n```");
+    if (sql) {
+      if (sql.length <= SQL_BUDGET) {
+        lines.push("Current SQL (full):", "```sql\n" + sql + "\n```");
+      } else {
+        const shown = sql.slice(0, SQL_BUDGET);
+        const shownLines = shown.split("\n").length;
+        const totalLines = sql.split("\n").length;
+        lines.push(
+          `Current SQL — LARGE script: showing the first ${shownLines} of ${totalLines} lines (${totalLines - shownLines} omitted to fit the context window). The DEDUPED SUMMARY above already covers the ENTIRE script — reason from it for code not shown here, or ask the user to focus on a specific line range.`,
+          "```sql\n" + shown + "\n```",
+        );
+      }
+    }
     return lines.join("\n\n");
   }
 
@@ -194,8 +233,16 @@ export function LlmChat({
             ))}
           </select>
         )}
+        {sql.length > SQL_BUDGET && (
+          <span
+            className="ai-trunc-pill right"
+            title={`Your script is ${sql.split("\n").length.toLocaleString()} lines. The AI always receives the full deduped finding summary (every rule + counts across the whole script), but only the first ~${Math.round(SQL_BUDGET / 1000)}k characters of raw SQL. Ask about a specific line range to dig into code beyond that.`}
+          >
+            📄 large script — AI sees full finding summary + first ~{Math.round(SQL_BUDGET / 1000)}k chars
+          </span>
+        )}
         {thread.length > 0 && (
-          <span className="right" style={{ font: "10px var(--f-mono)", color: "var(--text-dim)" }}>
+          <span style={{ font: "10px var(--f-mono)", color: "var(--text-dim)", marginLeft: sql.length > SQL_BUDGET ? 12 : "auto" }}>
             {thread.length} turn{thread.length === 1 ? "" : "s"} · remembered until Clear
           </span>
         )}

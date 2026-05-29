@@ -565,6 +565,12 @@ export function App() {
                   <FindingsList
                     findings={report?.findings ?? []}
                     onJump={(line, col) => editorHandle.current?.jumpTo(line, col)}
+                    onAskAi={(prompt) => {
+                      // Pre-fill the AI prompt and jump to the assistant. LlmChat
+                      // lazy-loads chat_input on mount, so saving then switching works.
+                      P.save("chat_input", prompt);
+                      setUi({ ...ui, workspace: "ai" });
+                    }}
                   />
                 </div>
               </div>
