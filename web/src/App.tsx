@@ -407,7 +407,7 @@ export function App() {
             <span className="v">{backendOk == null ? "…" : backendOk ? "UP" : "DOWN"}</span>
           </div>
           <div
-            className="group"
+            className={`group db-stat db-${dbStatus}`}
             title={
               dbStatus === "unconfigured"
                 ? "No SQL Server connection configured (open CONN)"
@@ -488,6 +488,15 @@ export function App() {
       </header>
 
       <nav className="rail">
+        <button
+          className="rail-btn rail-toggle"
+          onClick={() => setRailExpanded((e) => !e)}
+          title={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
+          aria-label={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
+        >
+          <span className="glyph">{railExpanded ? "«" : "≡"}</span>
+          <span>Collapse</span>
+        </button>
         {NAV_SECTIONS.map((sec, si) => (
           <div className="rail-group" key={sec.group}>
             {/* Thin divider + tiny uppercase caption between groups. The first
@@ -509,15 +518,6 @@ export function App() {
           </div>
         ))}
         <div className="rail-spacer" />
-        <button
-          className="rail-btn rail-toggle"
-          onClick={() => setRailExpanded((e) => !e)}
-          title={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
-          aria-label={railExpanded ? "Collapse sidebar" : "Expand sidebar"}
-        >
-          <span className="glyph">{railExpanded ? "«" : "»"}</span>
-          <span>{railExpanded ? "Collapse" : "Expand"}</span>
-        </button>
       </nav>
 
       <main className="main">

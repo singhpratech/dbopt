@@ -159,34 +159,36 @@ export function HealthOverview({
             provisional={provisional}
           />
         </div>
-        <div className="health-head-meta">
-          <div className="health-status">
-            {err
-              ? "Error"
-              : !connected
-              ? "Not connected"
-              : busy
-              ? "Scanning…"
-              : report
-              ? report.status
-              : "Idle"}
+        <div className="health-head-row2">
+          <div className="health-head-meta">
+            <div className="health-status">
+              {err
+                ? "Error"
+                : !connected
+                ? "Not connected"
+                : busy
+                ? "Scanning…"
+                : report
+                ? report.status
+                : "Idle"}
+            </div>
+            <div className="health-window">
+              {report && !err
+                ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}`
+                : "one-screen snapshot + what to fix first"}
+            </div>
           </div>
-          <div className="health-window">
-            {report && !err
-              ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}`
-              : "one-screen snapshot + what to fix first"}
+          <div className="form-actions health-actions">
+            <button
+              className="btn primary"
+              onClick={() => void scan()}
+              disabled={busy || !connected}
+              title={report ? "Re-scan and prove the fix worked" : "Run the first scan"}
+            >
+              {busy ? "Scanning…" : report ? "Re-scan" : "Scan"}
+            </button>
+            {busy && <span className="advisor-spinner" aria-hidden />}
           </div>
-        </div>
-        <div className="form-actions health-actions">
-          <button
-            className="btn primary"
-            onClick={() => void scan()}
-            disabled={busy || !connected}
-            title={report ? "Re-scan and prove the fix worked" : "Run the first scan"}
-          >
-            {busy ? "Scanning…" : report ? "Re-scan" : "Scan"}
-          </button>
-          {busy && <span className="advisor-spinner" aria-hidden />}
         </div>
       </div>
 

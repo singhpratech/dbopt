@@ -227,6 +227,28 @@ body {
 .topbar-status .v.info { color: var(--info-sev); }
 .topbar-status .v.ok   { color: var(--signal); }
 
+/* DB connection: a prominent green (connected) / red (offline) pill. */
+.topbar-status .group.db-stat {
+  border-right: 0;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+  flex-shrink: 0;
+}
+.topbar-status .group.db-stat .k,
+.topbar-status .group.db-stat .v { color: inherit; }
+.topbar-status .group.db-connected   { color: var(--ok);   background: rgba(58, 210, 159, 0.12); }
+.topbar-status .group.db-offline      { color: var(--crit); background: var(--crit-glow); }
+.topbar-status .group.db-checking     { color: var(--warn); }
+.topbar-status .group.db-unconfigured { color: var(--text-dim); border-color: var(--line); }
+.topbar-status .group.db-stat .dot.ok  { background: var(--ok); }
+
+/* Icon-only topbar toggles (theme + help): glyph + hover tooltip, no text label. */
+.topbar-controls .theme-toggle .lbl,
+.topbar-controls .help-toggle .lbl { display: none; }
+.topbar-controls .theme-toggle,
+.topbar-controls .help-toggle { padding: 0 12px; }
+
 .dot {
   display: inline-block;
   width: 6px; height: 6px;
@@ -294,8 +316,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 6px 0;
-  gap: 1px;
+  padding: 3px 0;
+  gap: 0;
   /* The grouped rail (13 items + 4 captions) can exceed a short viewport, so it
      MUST scroll-contain within its grid cell — otherwise the bottom items spill
      onto the status bar. Hidden scrollbar keeps the 52px rail clean. */
@@ -307,7 +329,7 @@ body {
 .rail::-webkit-scrollbar { width: 0; height: 0; }
 .rail-btn {
   width: 100%;
-  height: 40px;
+  height: 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -355,9 +377,9 @@ body {
   justify-content: center;
   /* hairline divider above the caption */
   border-top: 1px solid var(--line);
-  margin-top: 6px;
-  padding-top: 5px;
-  margin-bottom: 2px;
+  margin-top: 3px;
+  padding-top: 2px;
+  margin-bottom: 0;
 }
 /* The first group leads with just its caption — no divider above the rail top. */
 .rail-group-head.first {
@@ -399,9 +421,10 @@ body {
 .app.rail-expanded .rail-group-head { justify-content: flex-start; padding-left: 16px; }
 .app.rail-expanded .rail .rail-group-cap { display: block; text-align: left; }
 
-/* Expand/collapse toggle pinned at the rail bottom. */
-.rail-toggle { color: var(--text-dim); border-top: 1px solid var(--line); margin-top: 4px; flex-shrink: 0; }
+/* Expand/collapse toggle at the TOP of the rail (first item). */
+.rail-toggle { color: var(--text-dim); border-bottom: 1px solid var(--line); margin-bottom: 2px; flex-shrink: 0; }
 .rail-toggle:hover { color: var(--signal); }
+.rail-toggle .glyph { font-size: 16px; }
 
 /* ── Main area ────────────────────────────────────── */
 .main {
@@ -1344,19 +1367,25 @@ kbd {
    ============================================================ */
 .health-header {
   display: flex;
-  align-items: center;
-  gap: 18px;
+  flex-direction: column;     /* row 1 = the two wide grade tiles; row 2 = status + RE-SCAN */
+  align-items: stretch;
+  gap: 14px;
   padding: 16px 18px;
   border: 1px solid var(--line);
   border-left: 2px solid var(--line-strong);
   background: var(--bg-panel);
-  /* Wrap the status/window/actions below the grades when the row is too narrow,
-     so nothing overlaps. */
+}
+.health-header > .health-grades { width: 100%; }   /* tiles span full width → labels fit */
+/* Row 2: status/window on the left, RE-SCAN on the right. */
+.health-head-row2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   flex-wrap: wrap;
 }
-.health-header > .health-grades { flex: 1 1 420px; min-width: 0; }
-.health-header > .health-head-meta { flex-shrink: 0; min-width: 0; }
-.health-header > .health-actions { flex-shrink: 0; margin-left: auto; }
+.health-head-row2 .health-head-meta { min-width: 0; }
+.health-head-row2 .health-actions { flex-shrink: 0; margin-left: auto; }
 .health-header.scanning .health-grades { animation: pulse 1.2s infinite; }
 
 /* ── Dual-grade header: two side-by-side grade cells ──────── */
@@ -1375,10 +1404,11 @@ kbd {
   min-width: 0;            /* let the grid cell shrink so text never overflows */
 }
 .health-grade-meta { min-width: 0; }
+/* Wrap to a second line rather than truncating — show the full label/sublabel. */
 .health-grade-label, .health-grade-sub {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
 }
 /* The chip+score column carries the band color via the grade-* class. */
 .health-grade-chip {
@@ -1396,10 +1426,11 @@ kbd {
 }
 .health-grade-meta { display: flex; flex-direction: column; gap: 3px; }
 .health-grade-label {
-  font: 12px var(--f-tech);
-  letter-spacing: 0.14em;
+  font: 11px var(--f-tech);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-strong);
+  white-space: nowrap;     /* full-width tiles give it room — no wrap/truncation */
 }
 .health-grade-sub {
   font: 11px var(--f-sans);
