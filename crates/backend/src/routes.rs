@@ -24,6 +24,8 @@ pub fn router() -> Router {
         .route("/llm/models", get(llm_models))
         .route("/llm/chat", post(llm_chat))
         .route("/llm/cloud/:provider", post(llm_cloud))
+        .route("/llm/cloud/:provider/models", post(llm_cloud_models))
+        .route("/llm/cloud/:provider/test", post(llm_cloud_test))
         .route("/analyze", post(analyze))
         .route("/sentinel/start", post(sentinel_api::start))
         .route("/sentinel/stop", post(sentinel_api::stop))
@@ -180,6 +182,27 @@ async fn llm_cloud(
             Err(e) => bad(e),
         },
         other => bad(format!("unknown provider: {other}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverReq {
+    pub config: serde_json::Value,
+}
+
+/// List a cloud provider's available models (proxied to dodge browser CORS).
+async fn llm_cloud_models(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> impl IntoResponse {
+    match providers::discover::list_models(&provider, &req.config).await {
+        Ok(models) => (StatusCode::OK, Json(serde_json::json!({ "models": models }))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Validate a cloud provider API key (and, for OpenRouter, report credits).
+async fn llm_cloud_test(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> impl IntoResponse {
+    match providers::discover::test_key(&provider, &req.config).await {
+        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response(),
     }
 }
 

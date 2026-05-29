@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ProviderConfig, ProviderKey } from "../store/persist";
 import { evaluate, PROVIDER_LABEL, type ProviderRuntimeStatus } from "../llm/router";
 import { clearAll } from "../store/persist";
+import { listCloudModels, testCloudKey, DISCOVERY_PROVIDERS, type CloudModel } from "../api/backend";
 
 const ORDER: ProviderKey[] = ["ollama", "webllm", "openai", "anthropic", "openrouter", "azure", "bedrock"];
 
@@ -26,6 +27,38 @@ export function ProvidersPanel({
   const [statuses, setStatuses] = useState<Record<ProviderKey, ProviderRuntimeStatus | null>>(
     () => Object.fromEntries(ORDER.map((k) => [k, null])) as any,
   );
+  // Per-provider key-test + model-discovery state.
+  const [models, setModels] = useState<Partial<Record<ProviderKey, CloudModel[]>>>({});
+  const [filter, setFilter] = useState<Partial<Record<ProviderKey, string>>>({});
+  const [busy, setBusy] = useState<Partial<Record<ProviderKey, "test" | "models">>>({});
+  const [testMsg, setTestMsg] = useState<Partial<Record<ProviderKey, { ok: boolean; text: string }>>>({});
+
+  const supportsDiscovery = (k: ProviderKey) => (DISCOVERY_PROVIDERS as readonly string[]).includes(k);
+
+  async function runTest(k: ProviderKey) {
+    setBusy((b) => ({ ...b, [k]: "test" }));
+    setTestMsg((m) => ({ ...m, [k]: undefined }));
+    try {
+      const res = await testCloudKey(k, providers[k]);
+      setTestMsg((m) => ({ ...m, [k]: { ok: res.ok, text: res.detail } }));
+    } catch (e: any) {
+      setTestMsg((m) => ({ ...m, [k]: { ok: false, text: e.message } }));
+    } finally {
+      setBusy((b) => ({ ...b, [k]: undefined }));
+    }
+  }
+
+  async function loadModels(k: ProviderKey) {
+    setBusy((b) => ({ ...b, [k]: "models" }));
+    try {
+      const list = await listCloudModels(k, providers[k]);
+      setModels((m) => ({ ...m, [k]: list }));
+    } catch (e: any) {
+      setTestMsg((m) => ({ ...m, [k]: { ok: false, text: e.message } }));
+    } finally {
+      setBusy((b) => ({ ...b, [k]: undefined }));
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -202,6 +235,71 @@ export function ProvidersPanel({
                     </>
                   )}
                 </div>
+
+                {supportsDiscovery(k) && (
+                  <div className="provider-discovery">
+                    <div className="pd-actions">
+                      <button
+                        className="btn sm"
+                        disabled={busy[k] === "test"}
+                        onClick={() => runTest(k)}
+                        title="Validate this API key against the provider"
+                      >
+                        {busy[k] === "test" ? "Testing…" : "Test key"}
+                      </button>
+                      <button
+                        className="btn sm"
+                        disabled={busy[k] === "models"}
+                        onClick={() => loadModels(k)}
+                        title="Fetch the live list of models you can pick from"
+                      >
+                        {busy[k] === "models" ? "Loading…" : models[k] ? "Reload models" : "Load models"}
+                      </button>
+                      {testMsg[k] && (
+                        <span className={`pd-result ${testMsg[k]!.ok ? "ok" : "bad"}`}>
+                          {testMsg[k]!.ok ? "✓" : "✗"} {testMsg[k]!.text}
+                        </span>
+                      )}
+                    </div>
+
+                    {models[k] && (
+                      <div className="pd-picker">
+                        <input
+                          className="pd-filter"
+                          value={filter[k] ?? ""}
+                          onChange={(e) => setFilter((f) => ({ ...f, [k]: e.target.value }))}
+                          placeholder={`Filter ${models[k]!.length} models — then pick one below`}
+                          spellCheck={false}
+                        />
+                        <select
+                          className="pd-select"
+                          value={p.model}
+                          onChange={(e) => patch(k, { model: e.target.value })}
+                        >
+                          {models[k]!
+                            .filter((m) => {
+                              const f = (filter[k] ?? "").toLowerCase().trim();
+                              return !f || m.id.toLowerCase().includes(f) || (m.name ?? "").toLowerCase().includes(f);
+                            })
+                            .map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.id}
+                                {m.free
+                                  ? "  · free"
+                                  : m.price_in != null
+                                  ? `  · $${m.price_in.toFixed(2)}/${(m.price_out ?? 0).toFixed(2)} per M`
+                                  : ""}
+                                {m.context ? `  · ${Math.round(m.context / 1000)}k ctx` : ""}
+                              </option>
+                            ))}
+                        </select>
+                        <p className="pd-selected">
+                          Active model: <code>{p.model}</code>
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

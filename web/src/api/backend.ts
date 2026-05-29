@@ -257,6 +257,48 @@ export async function cloudChatStream(
   await consumeSse(r, onToken);
 }
 
+export interface CloudModel {
+  id: string;
+  name?: string | null;
+  context?: number | null;
+  price_in?: number | null;   // USD per 1M prompt tokens
+  price_out?: number | null;  // USD per 1M completion tokens
+  free: boolean;
+}
+
+export interface KeyTestResult {
+  ok: boolean;
+  detail: string;
+  credits_remaining?: number | null;
+}
+
+/** Providers that support backend key-test + model discovery. */
+export const DISCOVERY_PROVIDERS = ["openai", "openrouter", "anthropic"] as const;
+
+/** List a cloud provider's models (proxied through the backend). */
+export async function listCloudModels(providerKey: string, config: unknown): Promise<CloudModel[]> {
+  const r = await fetch(`${BASE}/llm/cloud/${providerKey}/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || (j as any).error) throw new Error((j as any).error || `HTTP ${r.status}`);
+  return (j as any).models as CloudModel[];
+}
+
+/** Validate a cloud provider API key (and report credits for OpenRouter). */
+export async function testCloudKey(providerKey: string, config: unknown): Promise<KeyTestResult> {
+  const r = await fetch(`${BASE}/llm/cloud/${providerKey}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || (j as any).error) throw new Error((j as any).error || `HTTP ${r.status}`);
+  return j as KeyTestResult;
+}
+
 async function consumeSse(r: Response, onToken: (s: string) => void) {
   if (!r.ok || !r.body) {
     let detail = "";

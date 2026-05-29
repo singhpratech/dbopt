@@ -1022,6 +1022,76 @@ body {
 }
 .provider-body .form-grid { grid-template-columns: 1fr 1fr; }
 
+/* Key-test + model discovery (Test key / Load models → filterable picker). */
+.provider-discovery {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.pd-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.provider-discovery .btn.sm {
+  font: 11px var(--f-tech);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  color: var(--text-muted);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 5px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.provider-discovery .btn.sm:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+.provider-discovery .btn.sm:disabled { opacity: 0.5; cursor: progress; }
+.pd-result {
+  font: 11px var(--f-mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pd-result.ok  { color: var(--ok); }
+.pd-result.bad { color: var(--crit); }
+.pd-picker { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pd-filter {
+  width: 100%;
+  font: 12px var(--f-mono);
+  padding: 7px 10px;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 5px;
+}
+.pd-filter:focus { outline: none; border-color: var(--signal); }
+.pd-filter::placeholder { color: var(--text-dim); }
+.pd-select {
+  width: 100%;
+  font: 12px var(--f-mono);
+  padding: 7px 10px;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 5px;
+  cursor: pointer;
+}
+.pd-select:focus { outline: none; border-color: var(--signal); }
+.pd-select option { background: var(--bg-panel); color: var(--text); }
+.pd-selected {
+  margin: 0;
+  font: 11px var(--f-mono);
+  color: var(--text-muted);
+}
+.pd-selected code {
+  color: var(--signal);
+  background: var(--signal-faint, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
 /* ============================================================
    AI chat / fanout
    ============================================================ */
