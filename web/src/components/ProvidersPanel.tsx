@@ -29,7 +29,6 @@ export function ProvidersPanel({
   );
   // Per-provider key-test + model-discovery state.
   const [models, setModels] = useState<Partial<Record<ProviderKey, CloudModel[]>>>({});
-  const [filter, setFilter] = useState<Partial<Record<ProviderKey, string>>>({});
   const [busy, setBusy] = useState<Partial<Record<ProviderKey, "test" | "models">>>({});
   const [testMsg, setTestMsg] = useState<Partial<Record<ProviderKey, { ok: boolean; text: string }>>>({});
 
@@ -52,6 +51,9 @@ export function ProvidersPanel({
     setBusy((b) => ({ ...b, [k]: "models" }));
     try {
       const list = await listCloudModels(k, providers[k]);
+      // Sort by vendor group (the "vendor/" prefix), then by id within a vendor,
+      // so e.g. all anthropic/* land together, all openai/* together, etc.
+      list.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
       setModels((m) => ({ ...m, [k]: list }));
     } catch (e: any) {
       setTestMsg((m) => ({ ...m, [k]: { ok: false, text: e.message } }));
@@ -138,6 +140,8 @@ export function ProvidersPanel({
                       value={p.model}
                       onChange={(e) => patch(k, { model: e.target.value })}
                       spellCheck={false}
+                      list={supportsDiscovery(k) && models[k] ? `dbopt-models-${k}` : undefined}
+                      placeholder={supportsDiscovery(k) && models[k] ? "type to search models, or pick from the list" : undefined}
                     />
                   </div>
                   {k !== "ollama" && k !== "webllm" && k !== "bedrock" && (
@@ -262,42 +266,38 @@ export function ProvidersPanel({
                       )}
                     </div>
 
-                    {models[k] && (
-                      <div className="pd-picker">
-                        <input
-                          className="pd-filter"
-                          value={filter[k] ?? ""}
-                          onChange={(e) => setFilter((f) => ({ ...f, [k]: e.target.value }))}
-                          placeholder={`Filter ${models[k]!.length} models — then pick one below`}
-                          spellCheck={false}
-                        />
-                        <select
-                          className="pd-select"
-                          value={p.model}
-                          onChange={(e) => patch(k, { model: e.target.value })}
-                        >
-                          {models[k]!
-                            .filter((m) => {
-                              const f = (filter[k] ?? "").toLowerCase().trim();
-                              return !f || m.id.toLowerCase().includes(f) || (m.name ?? "").toLowerCase().includes(f);
-                            })
-                            .map((m) => (
+                    {models[k] && (() => {
+                      const list = models[k]!;
+                      const fmt = (m: CloudModel) =>
+                        (m.free
+                          ? "free"
+                          : m.price_in != null
+                          ? `$${m.price_in.toFixed(2)}/${(m.price_out ?? 0).toFixed(2)} per M`
+                          : "") + (m.context ? `${m.price_in != null || m.free ? " · " : ""}${Math.round(m.context / 1000)}k ctx` : "");
+                      const sel = list.find((m) => m.id === p.model);
+                      // Typeable combobox: the datalist feeds the Model field above
+                      // (type to filter, or open to pick). Already sorted by vendor group.
+                      return (
+                        <div className="pd-picker">
+                          <datalist id={`dbopt-models-${k}`}>
+                            {list.map((m) => (
                               <option key={m.id} value={m.id}>
-                                {m.id}
-                                {m.free
-                                  ? "  · free"
-                                  : m.price_in != null
-                                  ? `  · $${m.price_in.toFixed(2)}/${(m.price_out ?? 0).toFixed(2)} per M`
-                                  : ""}
-                                {m.context ? `  · ${Math.round(m.context / 1000)}k ctx` : ""}
+                                {fmt(m)}
                               </option>
                             ))}
-                        </select>
-                        <p className="pd-selected">
-                          Active model: <code>{p.model}</code>
-                        </p>
-                      </div>
-                    )}
+                          </datalist>
+                          <p className="pd-selected">
+                            <strong>{list.length}</strong> models loaded — type in <em>Model</em> above to search, or open the list.
+                            {sel && (
+                              <>
+                                {" "}Active: <code>{sel.id}</code>
+                                {fmt(sel) ? ` · ${fmt(sel)}` : ""}
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>

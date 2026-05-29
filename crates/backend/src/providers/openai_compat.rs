@@ -7,6 +7,10 @@ use crate::ollama::Message;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    // The frontend's provider config object identifies the provider via `key`,
+    // not `provider`, and the route handler overwrites this from the URL path
+    // regardless — so it must default during deserialization, never be required.
+    #[serde(default)]
     pub provider: String,       // "openai" | "openrouter" | "azure"
     pub model: String,
     pub api_key: String,
