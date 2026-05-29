@@ -33,7 +33,7 @@ const LEGACY_SAMPLE_PREFIX = "-- sqlopt :: paste your T-SQL here";
 // NOLOCK hint, SELECT *, and a leading-wildcard LIKE — so the analyzer lights
 // up immediately and a first-time user can see what findings look like.
 const SAMPLE_SQL = `-- Sample query with a few common anti-patterns.
--- Load this to see what sqlopt flags; replace it with your own T-SQL.
+-- Load this to see what dbopt flags; replace it with your own T-SQL.
 SELECT *
 FROM dbo.Orders o WITH (NOLOCK)
 JOIN dbo.Customers c ON c.CustomerId = o.CustomerId
@@ -384,7 +384,7 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span className="mark">▣</span>
-          <span className="name">sqlopt<span className="dim">/observatory</span></span>
+          <span className="name">dbopt<span className="dim">/observatory</span></span>
           <span className="tag">v0.1</span>
         </div>
 
@@ -414,15 +414,10 @@ export function App() {
                 : `${conn.server}${conn.database ? " / " + conn.database : ""}`
             }
           >
-            <span
-              className={`dot ${
-                dbStatus === "connected" ? "ok" : dbStatus === "offline" ? "err" : dbStatus === "checking" ? "busy" : ""
-              }`}
-            />
-            <span className="k">db</span>
-            <span className={`v ${dbStatus === "connected" ? "ok" : dbStatus === "offline" ? "crit" : ""}`}>
+            <span className="db-stat-k">DB</span>
+            <span className="db-stat-v">
               {dbStatus === "connected"
-                ? "CONNECTED"
+                ? "ONLINE"
                 : dbStatus === "offline"
                 ? "OFFLINE"
                 : dbStatus === "checking"
@@ -468,16 +463,6 @@ export function App() {
             <span className="glyph">?</span>
             <span className="lbl">HELP</span>
           </button>
-          <label className="ctl" title="Target SQL Server version — tailors the rules and version-specific advice">
-            <select value={ui.server_version} onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}>
-              <option value={2014}>SQL Server 2014</option>
-              <option value={2016}>SQL Server 2016</option>
-              <option value={2017}>SQL Server 2017</option>
-              <option value={2019}>SQL Server 2019</option>
-              <option value={2022}>SQL Server 2022</option>
-              <option value={2025}>SQL Server 2025</option>
-            </select>
-          </label>
         </div>
       </header>
 
@@ -551,7 +536,7 @@ export function App() {
                 )}
                 {!ui.draft_sql.trim() && (
                   <div className="editor-hint-bar">
-                    <span className="editor-hint-text">Paste your T-SQL to analyze it live — or load a sample to see what sqlopt flags.</span>
+                    <span className="editor-hint-text">Paste your T-SQL to analyze it live — or load a sample to see what dbopt flags.</span>
                     <button
                       className="editor-hint-load"
                       onClick={() => setUi({ ...ui, draft_sql: SAMPLE_SQL })}
@@ -712,8 +697,23 @@ export function App() {
         <span className="sec">SQL <strong>{ui.draft_sql.length.toLocaleString()}</strong> chars</span>
         <span className="sec">Plan <strong>{ui.draft_plan ? `${(ui.draft_plan.length / 1024).toFixed(1)} KB` : "—"}</strong></span>
         <span className="sec">DMV <strong>{dmv ? "loaded" : "—"}</strong></span>
-        <span className="sec right"><strong>SQL Server {ui.server_version}</strong></span>
-        <span className="sec"><kbd>⌘K</kbd> · sqlopt</span>
+        <label
+          className="sec right statusbar-ver"
+          title="Target SQL Server version — tailors the rules and version-specific advice"
+        >
+          <select
+            value={ui.server_version}
+            onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}
+          >
+            <option value={2014}>SQL Server 2014</option>
+            <option value={2016}>SQL Server 2016</option>
+            <option value={2017}>SQL Server 2017</option>
+            <option value={2019}>SQL Server 2019</option>
+            <option value={2022}>SQL Server 2022</option>
+            <option value={2025}>SQL Server 2025</option>
+          </select>
+        </label>
+        <span className="sec"><kbd>⌘K</kbd> · dbopt</span>
       </footer>
 
       {/* Help & glossary slide-over — always mounted; `open` toggles it. */}

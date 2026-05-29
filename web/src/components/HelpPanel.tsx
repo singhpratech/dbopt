@@ -3,7 +3,7 @@ import { GLOSSARY } from "../glossary";
 
 /**
  * The "?" help slide-over. Two sections:
- *   1. "How sqlopt works" — the 4-step mental model.
+ *   1. "How dbopt works" — the 4-step mental model.
  *   2. "Glossary" — every GLOSSARY entry as a searchable term + definition row.
  *
  * Chrome reuses the issue-detail slide-over pattern (right-side pane, no
@@ -16,12 +16,12 @@ export const HELP_STEPS: { n: string; title: string; body: string }[] = [
   {
     n: "①",
     title: "Connect your SQL Server",
-    body: "Point sqlopt at an instance (host, login, database). Nothing leaves your machine — it talks to your server directly.",
+    body: "Point dbopt at an instance (host, login, database). Nothing leaves your machine — it talks to your server directly.",
   },
   {
     n: "②",
     title: "We scan DMVs + your workload",
-    body: "sqlopt reads SQL Server's built-in Dynamic Management Views to see what's running, what's waiting, and how indexes are used.",
+    body: "dbopt reads SQL Server's built-in Dynamic Management Views to see what's running, what's waiting, and how indexes are used.",
   },
   {
     n: "③",
@@ -118,7 +118,7 @@ export function HelpPanel({
       >
         <header className="help-panel-header">
           <span className="help-panel-eyebrow">Help &amp; glossary</span>
-          <h2 className="help-panel-title">How sqlopt works</h2>
+          <h2 className="help-panel-title">How dbopt works</h2>
           <button
             className="ddl-copy help-panel-close"
             onClick={onClose}
@@ -189,7 +189,7 @@ export function HelpPanel({
               single snapshot can't see a deadlock that happened last Tuesday at 2am.
             </p>
             <p className="help-sentinel-lead">
-              <strong>Sentinel</strong> (started with <code>WATCH</code>) is sqlopt's continuous
+              <strong>Sentinel</strong> (started with <code>WATCH</code>) is dbopt's continuous
               poller. It samples those views on an interval and keeps a local time-series in{" "}
               <code>~/.sqlopt/sentinel.db</code>, so runtime pain accumulates into real history you
               can grade against — and into the weekly pain report.

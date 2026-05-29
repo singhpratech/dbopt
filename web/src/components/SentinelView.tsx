@@ -157,13 +157,13 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
   async function downloadHtml() {
     const r = await fetch(`${BASE}/sentinel/report.html?days=${DAYS}`);
     const blob = await r.blob();
-    downloadBlob(blob, `sqlopt-sentinel-${new Date().toISOString().slice(0, 10)}.html`);
+    downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.html`);
   }
 
   async function downloadJson() {
     const r = await fetch(`${BASE}/sentinel/report?days=${DAYS}`);
     const blob = await r.blob();
-    downloadBlob(blob, `sqlopt-sentinel-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.json`);
   }
 
   const running = status?.running ?? false;

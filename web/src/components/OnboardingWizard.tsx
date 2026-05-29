@@ -10,7 +10,7 @@ import { HELP_STEPS } from "./HelpPanel";
  * when the user has never onboarded AND is not already connected.
  *
  * Two steps:
- *   1. WELCOME — what sqlopt does + the 4-step mental model (shared with
+ *   1. WELCOME — what dbopt does + the 4-step mental model (shared with
  *      HelpPanel) + [Get started] / [Skip].
  *   2. CONNECT — a minimal SQL-auth connect form. On success it lifts the
  *      connection into the app via onConnect(conn), marks onboarded, and closes
@@ -79,18 +79,18 @@ export function OnboardingWizard({
   }
 
   return (
-    <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-label="Welcome to sqlopt">
+    <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-label="Welcome to dbopt">
       <div className="onboarding-card">
         <div className="onboarding-brand">
           <span className="mark">▣</span>
-          <span className="name">sqlopt<span className="dim">/observatory</span></span>
+          <span className="name">dbopt<span className="dim">/observatory</span></span>
         </div>
 
         {step === 1 ? (
           <div className="onboarding-step">
             <h1 className="onboarding-title">Find what's slowing your SQL Server — in plain English.</h1>
             <p className="onboarding-lede">
-              sqlopt connects to your SQL Server, reads its built-in performance
+              dbopt connects to your SQL Server, reads its built-in performance
               views, and hands you a ranked, plain-English health report with
               copy-paste fixes. Nothing leaves your machine.
             </p>

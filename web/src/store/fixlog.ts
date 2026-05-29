@@ -1,7 +1,7 @@
 /**
  * Fix-log — the execution-FREE interactive remediation tracker (Pass 5 B1).
  *
- * sqlopt never runs DDL against the user's database. The remediation flow is
+ * dbopt never runs DDL against the user's database. The remediation flow is
  * therefore a MANUAL tracker: as the user works a fix in their own SQL client
  * (SSMS / sqlcmd), they tick off the solution steps here and — once they've run
  * the script + verified it themselves — flip a "Mark validated" toggle. None of
@@ -141,7 +141,7 @@ export function toggleStep(
  * Flip the user-asserted "Mark validated" toggle. Turning it ON stamps
  * validatedAt with the current client time (drives the "Validated ✓ (date)"
  * badge); turning it OFF clears the stamp. This is a MANUAL assertion only —
- * sqlopt does not execute anything to corroborate it.
+ * dbopt does not execute anything to corroborate it.
  */
 export function setValidated(
   server: string,

@@ -13,9 +13,9 @@ export function AiLogs() {
   function dl(kind: "json" | "csv") {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     if (kind === "json") {
-      ailog.download(`sqlopt-ailog-${stamp}.json`, "application/json", ailog.exportJson(redact));
+      ailog.download(`dbopt-ailog-${stamp}.json`, "application/json", ailog.exportJson(redact));
     } else {
-      ailog.download(`sqlopt-ailog-${stamp}.csv`, "text/csv", ailog.exportCsv(redact));
+      ailog.download(`dbopt-ailog-${stamp}.csv`, "text/csv", ailog.exportCsv(redact));
     }
   }
 

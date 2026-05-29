@@ -217,6 +217,10 @@ body {
 }
 .topbar-status .group:last-child { border-right: 0; }
 .topbar-status .k { color: var(--text-dim); }
+/* Light mode: the tiny uppercase status labels read too faint at --text-dim;
+   bump them to the secondary tone (~6.4:1) so analyzer/findings/backend are
+   clearly legible on a white topbar. Dark theme keeps its dimmer hierarchy. */
+:root[data-theme="light"] .topbar-status .k { color: var(--text-muted); }
 .topbar-status .v {
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
@@ -227,21 +231,35 @@ body {
 .topbar-status .v.info { color: var(--info-sev); }
 .topbar-status .v.ok   { color: var(--signal); }
 
-/* DB connection: a prominent green (connected) / red (offline) pill. */
+/* DB connection: a compact 2-line green (online) / red (offline) pill. */
 .topbar-status .group.db-stat {
   border-right: 0;
-  padding: 3px 10px;
-  border-radius: 5px;
+  padding: 3px 16px;
+  min-width: 78px;
+  border-radius: 6px;
   border: 1px solid currentColor;
   flex-shrink: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.15;
+  text-align: center;
 }
-.topbar-status .group.db-stat .k,
-.topbar-status .group.db-stat .v { color: inherit; }
+.topbar-status .group.db-stat .db-stat-k {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  opacity: 0.72;
+}
+.topbar-status .group.db-stat .db-stat-v {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+}
 .topbar-status .group.db-connected   { color: var(--ok);   background: rgba(58, 210, 159, 0.12); }
 .topbar-status .group.db-offline      { color: var(--crit); background: var(--crit-glow); }
 .topbar-status .group.db-checking     { color: var(--warn); }
 .topbar-status .group.db-unconfigured { color: var(--text-dim); border-color: var(--line); }
-.topbar-status .group.db-stat .dot.ok  { background: var(--ok); }
 
 /* Icon-only topbar toggles (theme + help): glyph + hover tooltip, no text label. */
 .topbar-controls .theme-toggle .lbl,
@@ -457,6 +475,30 @@ body {
 .statusbar .sec strong { color: var(--text); font-weight: 400; }
 .statusbar a { color: var(--text-muted); text-decoration: none; }
 .statusbar a:hover { color: var(--signal); }
+
+/* Clickable target-version selector, lives in the status bar (bottom).
+   Native <select> + text-transform under-reserves width, so give it an explicit
+   min-width and stop it shrinking so the full "SQL SERVER 2025" + caret show. */
+.statusbar .statusbar-ver {
+  flex: none;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px 1px 9px;
+}
+.statusbar .statusbar-ver:hover { border-color: var(--signal); color: var(--signal); }
+.statusbar .statusbar-ver select {
+  min-width: 142px;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  cursor: pointer;
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.statusbar .statusbar-ver:hover select { color: var(--signal); }
+.statusbar .statusbar-ver select option { background: var(--bg-panel); color: var(--text); }
 
 /* ============================================================
    Workspaces

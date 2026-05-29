@@ -190,7 +190,7 @@ export function IssueDetailPane({
       </div>
 
       {/* A2: persistent post-fix verify breadcrumb — after copying the fix DDL,
-          re-scan (read-only) to prove it landed. sqlopt never runs the DDL. */}
+          re-scan (read-only) to prove it landed. dbopt never runs the DDL. */}
       {onVerifyRescan && (
         <div className="verify-breadcrumb issue-detail-verify">
           <span className="verify-breadcrumb-lead">Ran the fix in your SQL client?</span>
@@ -298,7 +298,7 @@ function RemediationView({
       </Section>
 
       {/* B1: PRE-FLIGHT PREVIEW — what the fix DDL will do, its cost chips, and
-          the rollback, with the explicit "you run this — sqlopt does not execute"
+          the rollback, with the explicit "you run this — dbopt does not execute"
           line. Purely informational; renders only when there's DDL to preview. */}
       {rem.fix_sql && <PreflightPreview rem={rem} issue={issue} />}
 
@@ -307,7 +307,7 @@ function RemediationView({
         {/* Honest about the safety boundary (playbook §7): copy-and-run means
             the user owns the monitoring; there is no auto-validate/revert net. */}
         <p className="issue-detail-caveat">
-          You run these yourself. sqlopt ships the script + validation steps — it does NOT auto-apply
+          You run these yourself. dbopt ships the script + validation steps — it does NOT auto-apply
           or auto-revert in v1, so you own monitoring the change.
         </p>
       </Section>
@@ -626,16 +626,16 @@ function StepItem({
  *     write overhead) — no new measurement, just the grounded chips we already
  *     hold, framed as the COST of applying,
  *   • the rollback (so the undo path is visible before committing), and
- *   • an explicit "Run this in your SQL client — sqlopt does not execute changes"
+ *   • an explicit "Run this in your SQL client — dbopt does not execute changes"
  *     line so the execution boundary is unmistakable.
- * sqlopt executes nothing here — this is a read-only preview.
+ * dbopt executes nothing here — this is a read-only preview.
  */
 function PreflightPreview({ rem, issue }: { rem: Remediation; issue: Issue }) {
   const costs = costChips(issue);
   return (
     <Section title="Pre-flight — preview before you run it" tone="preflight">
       <p className="preflight-lead">
-        This is exactly what the fix will do. sqlopt does not run it — you apply it yourself.
+        This is exactly what the fix will do. dbopt does not run it — you apply it yourself.
       </p>
 
       {rem.fix_sql && (
@@ -670,7 +670,7 @@ function PreflightPreview({ rem, issue }: { rem: Remediation; issue: Issue }) {
         <span className="preflight-boundary-glyph" aria-hidden>
           ⌘
         </span>
-        Run this in your SQL client (SSMS / sqlcmd) — <strong>sqlopt does not execute changes.</strong>
+        Run this in your SQL client (SSMS / sqlcmd) — <strong>dbopt does not execute changes.</strong>
       </p>
     </Section>
   );
@@ -711,7 +711,7 @@ function MarkValidated({
         <span className="mark-validated-when">Validated {fmtDate(validatedAt)}</span>
       )}
       <p className="mark-validated-note">
-        A manual record that you ran the fix in your SQL client and verified it — sqlopt does not
+        A manual record that you ran the fix in your SQL client and verified it — dbopt does not
         execute or check anything for you.
       </p>
     </div>

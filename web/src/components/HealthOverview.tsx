@@ -226,7 +226,7 @@ export function HealthOverview({
             <div className="empty-glyph">❤</div>
             <div className="empty-title">No SQL Server connected</div>
             <div className="empty-hint">
-              Point sqlopt at a SQL Server instance and it will read the built-in
+              Point dbopt at a SQL Server instance and it will read the built-in
               performance views, then grade your database in plain English. Nothing
               leaves your machine.
             </div>
@@ -374,7 +374,7 @@ const BASELINE_DAYS = 7;
  * ~N more days", computed from the EARLIEST scanlog snapshot timestamp for this
  * server·db (the first time we ever saw it). Until we have that anchor we can't
  * date the baseline — fall back to the prose-only ETA. Honest: progress is from
- * when sqlopt first scanned, the proxy we actually have for "how long we've been
+ * when dbopt first scanned, the proxy we actually have for "how long we've been
  * watching this database".
  */
 function LearningBanner({ earliestAt }: { earliestAt: string | null }) {
@@ -1091,7 +1091,7 @@ function IssueCard({
 
       {/* A2: persistent post-fix verify breadcrumb — after copying the fix DDL,
           re-scan (read-only) to prove it landed. Always present so the loop is
-          obvious; sqlopt never runs the DDL itself. */}
+          obvious; dbopt never runs the DDL itself. */}
       <div className="verify-breadcrumb" onClick={(e) => e.stopPropagation()}>
         <span className="verify-breadcrumb-lead">Ran the fix in your SQL client?</span>
         <button

@@ -106,7 +106,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   sentinel: {
     term: "Sentinel",
     short:
-      "sqlopt's continuous monitor — it polls your SQL Server on a schedule, stores the signals as a time-series, and rolls them into a weekly pain report. Until it has watched the server for a while, runtime signals read 'not monitored yet' rather than a falsely-reassuring zero.",
+      "dbopt's continuous monitor — it polls your SQL Server on a schedule, stores the signals as a time-series, and rolls them into a weekly pain report. Until it has watched the server for a while, runtime signals read 'not monitored yet' rather than a falsely-reassuring zero.",
     long:
       "The Sentinel is a background poller that periodically samples runtime DMVs (deadlocks, blocking, waits, query regressions), persists them to a local SQLite time-series, and summarises the trend in a weekly report. The HEALTH grade leans on this history: with no Sentinel data the runtime signals are unknown (shown muted as '— not monitored yet') and the grade is provisional; once a workload accumulates, those signals become measured.",
   },
