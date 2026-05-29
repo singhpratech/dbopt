@@ -564,6 +564,7 @@ export function App() {
                 <div className="pane-body">
                   <FindingsList
                     findings={report?.findings ?? []}
+                    sql={ui.draft_sql}
                     onJump={(line, col) => editorHandle.current?.jumpTo(line, col)}
                     onAskAi={(prompt) => {
                       // Pre-fill the AI prompt and jump to the assistant. LlmChat
