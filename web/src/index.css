@@ -196,16 +196,19 @@ body {
 }
 
 .topbar-status {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;            /* allow shrinking below content width */
   display: flex;
   align-items: center;
   padding: 0 16px;
-  gap: 18px;
+  gap: 16px;
   font: 11px var(--f-tech);
   color: var(--text-muted);
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  overflow-x: auto;
+  /* Clip (don't spill) when crowded so status never overlaps the controls.
+     Rightmost groups (dmv, db server-name) drop off first by priority. */
+  overflow: hidden;
 }
 .topbar-status .group {
   display: flex; align-items: center; gap: 8px;
@@ -246,7 +249,9 @@ body {
 .topbar-controls {
   display: flex; align-items: center; gap: 1px;
   border-left: 1px solid var(--line);
+  flex-shrink: 0;          /* controls keep their space; status clips instead */
 }
+.brand { flex-shrink: 0; }
 .topbar-controls .ctl {
   padding: 0 14px;
   height: 100%;
@@ -289,12 +294,20 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 8px 0;
-  gap: 2px;
+  padding: 6px 0;
+  gap: 1px;
+  /* The grouped rail (13 items + 4 captions) can exceed a short viewport, so it
+     MUST scroll-contain within its grid cell — otherwise the bottom items spill
+     onto the status bar. Hidden scrollbar keeps the 52px rail clean. */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
 }
+.rail::-webkit-scrollbar { width: 0; height: 0; }
 .rail-btn {
   width: 100%;
-  height: 44px;
+  height: 40px;
   display: flex;
   flex-direction: column;
   align-items: center;
