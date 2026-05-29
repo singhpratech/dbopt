@@ -113,16 +113,25 @@ function ruleTerm(rule: string): string | undefined {
   return undefined;
 }
 
-function askAiPrompt(g: RuleGroup, section: Section | null): string {
+// The exact source of a section, so a scoped "Ask AI" actually SEES that code
+// (the system prompt only carries the first ~24k of the whole script).
+function sectionCode(sql: string, section: Section, cap = 14000): string {
+  const slice = sql.split("\n").slice(section.startLine - 1, section.endLine).join("\n");
+  return slice.length > cap ? slice.slice(0, cap) + "\n-- …section truncated…" : slice;
+}
+
+function askAiPrompt(g: RuleGroup, section: Section | null, sql?: string): string {
   const sample = g.locations.slice(0, 15).map((l) => `L${l.line}`).join(", ");
+  const code = section && sql ? sectionCode(sql, section) : "";
   return [
-    `Fix this recurring anti-pattern across my T-SQL script.`,
+    `Fix this recurring anti-pattern across my T-SQL${section ? ` (scoped to ${section.name})` : " script"}.`,
     ``,
     `Rule: ${g.rule} (${g.severity})`,
     section ? `Scope: ${section.name} (lines ${section.startLine}-${section.endLine})` : ``,
     `Occurrences: ${g.count}${sample ? ` — e.g. ${sample}${g.locations.length > 15 ? ", …" : ""}` : ""}`,
     `What it is: ${g.message}`,
     g.recommendation ? `Analyzer recommendation: ${g.recommendation}` : ``,
+    code ? `\nHere is that section's code:\n\`\`\`sql\n${code}\n\`\`\`` : ``,
     ``,
     `Write ONE canonical rewrite for this pattern, then a short checklist for applying it to all ${g.count} occurrences safely.`,
   ].filter(Boolean).join("\n");
@@ -174,6 +183,10 @@ export function FindingsList({
 
   const shownFindings = view.reduce((n, g) => n + g.count, 0);
   const filtering = sevFilter.size > 0 || activeSection != null;
+  // Keep small/clean scripts pristine: the controls row only appears when there's
+  // actually something to triage (many patterns/findings, sections present, or an
+  // active filter). A handful of findings → no controls → unchanged clean view.
+  const showControls = filtering || sections.length >= 2 || allGroups.length > 4 || findings.length > 20;
 
   if (findings.length === 0) {
     return (
@@ -245,6 +258,7 @@ export function FindingsList({
             ))}
           </span>
         </div>
+        {showControls && (
         <div className="fs-row controls">
           <label className="fs-ctl">
             sort
@@ -270,6 +284,7 @@ export function FindingsList({
             <button className="fs-clear" onClick={clearFilters} title="Clear filters">clear ✕</button>
           )}
         </div>
+        )}
       </div>
 
       {view.length === 0 ? (
@@ -307,7 +322,7 @@ export function FindingsList({
 
                   <div className="fg-actions">
                     {onAskAi && (
-                      <button className="fg-btn primary" onClick={() => onAskAi(askAiPrompt(g, activeSection))}>
+                      <button className="fg-btn primary" onClick={() => onAskAi(askAiPrompt(g, activeSection, sql))}>
                         Ask AI to fix all {g.count.toLocaleString()}{activeSection ? " here" : ""} →
                       </button>
                     )}
