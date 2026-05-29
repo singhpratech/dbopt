@@ -43,21 +43,35 @@ ORDER BY o.OrderDate DESC;`;
 
 type Workspace = P.UiPrefs["workspace"];
 
-const WORKSPACES: { key: Workspace; glyph: string; label: string }[] = [
-  { key: "health",     glyph: "❤", label: "HEALTH" },
-  { key: "analyze",    glyph: "▤", label: "ANALYZE" },
-  { key: "plan",       glyph: "◫", label: "PLAN" },
-  { key: "indexes",    glyph: "◰", label: "INDEX" },
-  { key: "sizes",      glyph: "◧", label: "SIZE" },
-  { key: "severity",   glyph: "≡", label: "SEV" },
-  { key: "connection", glyph: "⌬", label: "CONN" },
-  { key: "ai",         glyph: "↪", label: "AI" },
-  { key: "logs",       glyph: "⎯", label: "LOGS" },
-  { key: "sentinel",   glyph: "◉", label: "WATCH" },
-  { key: "history",    glyph: "⌖", label: "RUNS" },
-  { key: "advisor",    glyph: "✦", label: "ADVISE" },
-  { key: "settings",   glyph: "⚙", label: "PROV" },
+// Nav information architecture: the 13 workspaces grouped into 4 task-ordered
+// sections so the rail reads as a journey (START → OPERATE → INSPECT → SETUP)
+// rather than a flat 13-item list. Order within the array IS the render order.
+type NavGroup = "START" | "OPERATE" | "INSPECT" | "SETUP";
+
+const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGroup }[] = [
+  // START — get a database in front of you and graded.
+  { key: "health",     glyph: "❤", label: "HEALTH",  group: "START" },
+  { key: "analyze",    glyph: "▤", label: "ANALYZE", group: "START" },
+  { key: "connection", glyph: "⌬", label: "CONN",    group: "START" },
+  // OPERATE — the live, prescriptive, audit surfaces.
+  { key: "sentinel",   glyph: "◉", label: "WATCH",   group: "OPERATE" },
+  { key: "advisor",    glyph: "✦", label: "ADVISE",  group: "OPERATE" },
+  { key: "history",    glyph: "⌖", label: "RUNS",    group: "OPERATE" },
+  { key: "logs",       glyph: "⎯", label: "LOGS",    group: "OPERATE" },
+  // INSPECT — drill into the charts behind the grades.
+  { key: "plan",       glyph: "◫", label: "PLAN",    group: "INSPECT" },
+  { key: "indexes",    glyph: "◰", label: "INDEX",   group: "INSPECT" },
+  { key: "sizes",      glyph: "◧", label: "SIZE",    group: "INSPECT" },
+  { key: "severity",   glyph: "≡", label: "SEV",     group: "INSPECT" },
+  // SETUP — configuration that's set once and left alone.
+  { key: "ai",         glyph: "↪", label: "AI",      group: "SETUP" },
+  { key: "settings",   glyph: "⚙", label: "PROV",    group: "SETUP" },
 ];
+
+// Sections in render order, each holding its workspaces (preserving array order).
+const NAV_SECTIONS: { group: NavGroup; items: typeof WORKSPACES }[] = (
+  ["START", "OPERATE", "INSPECT", "SETUP"] as NavGroup[]
+).map((group) => ({ group, items: WORKSPACES.filter((w) => w.group === group) }));
 
 export function App() {
   // ── Persistent state ────────────────────────────────
@@ -398,16 +412,25 @@ export function App() {
       </header>
 
       <nav className="rail">
-        {WORKSPACES.map((w) => (
-          <button
-            key={w.key}
-            className={`rail-btn ${ui.workspace === w.key ? "on" : ""}`}
-            onClick={() => setUi({ ...ui, workspace: w.key })}
-            title={w.label}
-          >
-            <span className="glyph">{w.glyph}</span>
-            <span>{w.label}</span>
-          </button>
+        {NAV_SECTIONS.map((sec, si) => (
+          <div className="rail-group" key={sec.group}>
+            {/* Thin divider + tiny uppercase caption between groups. The first
+                group leads with just its caption (no divider above it). */}
+            <div className={`rail-group-head${si === 0 ? " first" : ""}`} aria-hidden>
+              <span className="rail-group-cap">{sec.group}</span>
+            </div>
+            {sec.items.map((w) => (
+              <button
+                key={w.key}
+                className={`rail-btn ${ui.workspace === w.key ? "on" : ""}`}
+                onClick={() => setUi({ ...ui, workspace: w.key })}
+                title={`${w.label} · ${sec.group}`}
+              >
+                <span className="glyph">{w.glyph}</span>
+                <span>{w.label}</span>
+              </button>
+            ))}
+          </div>
         ))}
         <div className="rail-spacer" />
       </nav>
@@ -576,7 +599,7 @@ export function App() {
 
         {ui.workspace === "advisor" && (
           <Workspace title="Advisor" subtitle="full ranked recommendation explorer · prescriptive fixes with copy-paste T-SQL">
-            <AdvisorPanel conn={conn} />
+            <AdvisorPanel conn={conn} ui={ui} setUi={setUi} />
           </Workspace>
         )}
 

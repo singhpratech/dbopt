@@ -101,6 +101,13 @@ export type Confidence = "observed" | "estimated" | "heuristic";
 export interface Metric {
   label: string;
   value: string;
+  /**
+   * Provenance of THIS metric — the DMV/origin it was measured from, e.g.
+   * "sys.dm_db_partition_stats" or "system_health XEvents". Optional (serde
+   * default None) so older backends/issues without it still render; the chip
+   * popover surfaces it as "Measured from <source>" when present.
+   */
+  source?: string;
 }
 
 export interface Issue {

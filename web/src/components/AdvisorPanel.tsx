@@ -1,24 +1,42 @@
-import { useState } from "react";
-import type { SqlConnectionConfig } from "../store/persist";
+import { useCallback, useEffect, useState } from "react";
+import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type { Recommendation, RecommendationKind, RecommendationPriority } from "../api/backend";
 import { Term, TermText } from "./Term";
 
 /**
- * The ADVISOR workspace. Connection is configured at SERVER scope (CONN
- * workspace); here we ask the backend for ranked, prescriptive fixes derived
- * from accumulated DMV signals (missing-index, unused-index, scan patterns).
+ * The ADVISOR workspace — the ranked, full-detail view of the fixes summarised
+ * on HEALTH. Connection is configured at SERVER scope (CONN workspace); here we
+ * ask the backend for ranked, prescriptive fixes derived from accumulated DMV
+ * signals (missing-index, unused-index, scan patterns).
+ *
+ * It AUTO-RUNS on entry whenever a connection exists (mirroring HealthOverview's
+ * auto-fetch) so the workspace lands populated rather than as a hollow button +
+ * empty state; a manual "Re-analyze" stays for an explicit refresh. With no
+ * connection it shows the same friendly connect CTA HEALTH uses.
  *
  * Each recommendation carries exact, copy-paste T-SQL — rendered in a <pre>
  * with a Copy button. The list is already ordered high→low server-side, so we
  * render it as-is.
  */
-export function AdvisorPanel({ conn }: { conn: SqlConnectionConfig }) {
+export function AdvisorPanel({
+  conn,
+  ui,
+  setUi,
+}: {
+  conn: SqlConnectionConfig;
+  ui: UiPrefs;
+  setUi: (u: UiPrefs) => void;
+}) {
   const [recs, setRecs] = useState<Recommendation[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function analyze() {
+  // Connected enough to scan = a server AND a database (advise is DB-scoped).
+  const connected = !!conn.server;
+  const ready = connected && !!conn.database;
+
+  const analyze = useCallback(async () => {
     if (!conn.server) {
       setErr("Configure a SQL Server connection first (CONN workspace).");
       return;
@@ -45,6 +63,43 @@ export function AdvisorPanel({ conn }: { conn: SqlConnectionConfig }) {
     } finally {
       setBusy(false);
     }
+    // conn identity fields are the only inputs; deliberately keyed below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn.server, conn.database, conn.user, conn.password, conn.auth_mode, conn.trust_cert]);
+
+  // Auto-run on mount + whenever the active server/database changes, so ADVISE
+  // is never a hollow empty button when HEALTH points users here.
+  useEffect(() => {
+    if (ready) void analyze();
+    else {
+      setRecs(null);
+      setErr(null);
+    }
+  }, [ready, analyze]);
+
+  // Not connected → the same friendly connect CTA pattern HEALTH uses, never a
+  // bare empty card.
+  if (!connected) {
+    return (
+      <div className="advisor form">
+        <div className="empty">
+          <div className="empty-card">
+            <div className="empty-glyph">✦</div>
+            <div className="empty-title">No SQL Server connected</div>
+            <div className="empty-hint">
+              The advisor reads accumulated DMV signals (missing-index scans, unused and
+              duplicate indexes, columnstore candidates) and ranks exact, copy-paste fixes.
+              Connect a SQL Server to populate it — nothing leaves your machine.
+            </div>
+            <div className="empty-action">
+              <button className="btn primary" onClick={() => setUi({ ...ui, workspace: "connection" })}>
+                Connect a SQL Server
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -57,22 +112,38 @@ export function AdvisorPanel({ conn }: { conn: SqlConnectionConfig }) {
             {conn.database ? <> · {conn.database}</> : null}
           </span>
         </h4>
+        {/* Clarify the relationship to HEALTH so the two views don't feel like
+            disconnected silos. */}
+        <p className="advisor-header-note">
+          The ranked, full-detail view of the fixes summarised on HEALTH.
+        </p>
         <div className="form-actions">
-          <button className="btn primary" onClick={analyze} disabled={busy}>
-            {busy ? "Analyzing…" : "Analyze server"}
+          <button className="btn primary" onClick={() => void analyze()} disabled={busy || !ready}>
+            {busy ? "Analyzing…" : recs != null ? "Re-analyze" : "Analyze server"}
           </button>
           {busy && <span className="advisor-spinner" aria-hidden />}
         </div>
         {busy && <div className="form-status">Scanning DMVs…</div>}
+        {/* Connected to a server but no DB chosen — advise is DB-scoped. */}
+        {!ready && !busy && !err && (
+          <div className="form-status">
+            Pick a database in the{" "}
+            <button className="link-inline" onClick={() => setUi({ ...ui, workspace: "connection" })}>
+              CONN
+            </button>{" "}
+            workspace to run the advisor.
+          </div>
+        )}
         {err && <div className="form-status err">{err}</div>}
       </div>
 
       {recs != null && !err && (
         recs.length === 0 ? (
           <div className="form-status">
-            No recommendations right now. They appear after you Analyze the server. If
-            still empty, the workload has not generated actionable DMV signals yet (no
-            missing-index scans or unused indexes detected).
+            No recommendations right now — the workload has not generated actionable DMV
+            signals yet (no missing-index scans, unused or duplicate indexes detected). Re-run
+            after the database has served a representative workload, or after a SQL restart has
+            re-accumulated usage stats.
           </div>
         ) : (
           <div className="advisor-list">

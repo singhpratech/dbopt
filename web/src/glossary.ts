@@ -100,6 +100,15 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     term: "Impact rank",
     short:
       "Our 0–10,000 ranking of how much an issue matters, from the underlying metric (e.g. estimated rows scanned, deadlock count). Higher = fix first.",
+    long:
+      "A single 0–10,000 priority number we derive from the issue's own measured metric — estimated rows scanned for a missing index, deadlock count, regressed-query cost, and so on. It is a RELATIVE sort key, not a unit: a 9,000 isn't '9× worse' than 1,000, it just ranks above it. Read it as 'fix the high numbers first', then trust the per-issue metric chips for the actual measured impact.",
+  },
+  sentinel: {
+    term: "Sentinel",
+    short:
+      "sqlopt's continuous monitor — it polls your SQL Server on a schedule, stores the signals as a time-series, and rolls them into a weekly pain report. Until it has watched the server for a while, runtime signals read 'not monitored yet' rather than a falsely-reassuring zero.",
+    long:
+      "The Sentinel is a background poller that periodically samples runtime DMVs (deadlocks, blocking, waits, query regressions), persists them to a local SQLite time-series, and summarises the trend in a weekly report. The HEALTH grade leans on this history: with no Sentinel data the runtime signals are unknown (shown muted as '— not monitored yet') and the grade is provisional; once a workload accumulates, those signals become measured.",
   },
   query_store: {
     term: "Query Store",

@@ -325,6 +325,43 @@ body {
 }
 .rail-spacer { flex: 1; }
 
+/* ── Nav information architecture: 4 grouped sections ──
+   A thin hairline + a tiny uppercase caption separates each task group
+   (START / OPERATE / INSPECT / SETUP) on the ~52px rail — tasteful, subtle,
+   not cramped. */
+.rail-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.rail-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* hairline divider above the caption */
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 5px;
+  margin-bottom: 2px;
+}
+/* The first group leads with just its caption — no divider above the rail top. */
+.rail-group-head.first {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 2px;
+}
+.rail-group-cap {
+  font: 7px var(--f-tech);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.7;
+  line-height: 1;
+  user-select: none;
+}
+
 /* ── Main area ────────────────────────────────────── */
 .main {
   grid-area: main;
@@ -1298,6 +1335,39 @@ kbd {
   color: var(--text-dim); border-color: var(--line); background: var(--bg-elev);
 }
 
+/* ── Provisional (learning-mode) grade ────────────────
+   The LETTER must read provisional, not just the banner. Gray it out (drop the
+   band color) and append a tiny PROVISIONAL tag; the whole cell dims slightly. */
+.health-grade.provisional { opacity: 0.92; }
+.pill.grade-provisional, .health-grade-chip.grade-provisional .health-score {
+  color: var(--text-dim);
+  border-color: var(--line);
+  background: var(--bg-elev);
+}
+.health-grade-prov {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  /* dashed border so it reads as "not final" vs the solid real grades */
+  border-style: dashed !important;
+  cursor: help;
+}
+.health-grade-prov-tag {
+  font: 7px var(--f-tech);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-left: 1px solid var(--line-strong);
+  padding-left: 6px;
+}
+/* Score denominator ("/100") — quieter than the number it qualifies. */
+.health-score-denom {
+  font-size: 0.5em;
+  color: var(--text-dim);
+  letter-spacing: 0;
+  margin-left: 1px;
+}
+
 .health-head-meta { display: flex; flex-direction: column; gap: 4px; }
 .health-status {
   font: 12px var(--f-tech);
@@ -1339,6 +1409,9 @@ kbd {
 }
 .health-signal:last-child { border-right: 0; }
 .health-signal-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font: 10px var(--f-tech);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1351,6 +1424,42 @@ kbd {
 }
 .health-signal-v.crit { color: var(--crit); }
 .health-signal-v.warn { color: var(--warn); }
+
+/* ── Per-signal provenance ────────────────────────────
+   Measured structural/runtime signals carry a subtle tick; runtime signals with
+   no sentinel history yet read "— not monitored yet" (muted unknown) instead of
+   a falsely-reassuring 0. */
+.health-signal-measured {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ok);
+  opacity: 0.75;
+  cursor: help;
+}
+.health-signal.not-monitored { cursor: help; }
+.health-signal-v.unknown {
+  color: var(--text-dim);
+  font-style: normal;
+}
+.health-signal-note {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+/* P2: signal strip reflow on narrow viewports — let cells wrap evenly and shed
+   the inter-cell borders so the wrapped grid doesn't look ragged. */
+@media (max-width: 900px) {
+  .health-signal {
+    flex: 1 1 44%;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .health-signal:last-child,
+  .health-signal:nth-last-child(2) { border-bottom: 0; }
+}
 
 /* ── Laned issue sections — reliability first, then opportunities ── */
 .health-section { margin-top: 18px; }
@@ -1391,6 +1500,20 @@ kbd {
   margin: 8px 0 0;
   font: 13px/1.5 var(--f-sans);
   color: var(--text);
+}
+
+/* P2: the first 1-2 rationale lines shown inline; the rest collapses. */
+.health-rationale-lead {
+  margin: 8px 0 0;
+  font: 12px/1.55 var(--f-sans);
+  color: var(--text-muted);
+}
+
+/* Header note on ADVISE clarifying its relationship to HEALTH. */
+.advisor-header-note {
+  margin: 4px 0 10px;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--text-muted);
 }
 
 /* ── Ranked issue list — RecCard grid ─────────────── */
@@ -2205,6 +2328,77 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Drillable metric chip + provenance popover (P1-3) ──
+   A chip carrying a `source` becomes hover/click-able and reveals where the
+   number was measured + its confidence tier — table-stakes provenance. */
+.metric-chip-drill {
+  cursor: help;
+  position: relative; /* the popover is position:fixed off this box */
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.metric-chip-drill:hover,
+.metric-chip-drill:focus-visible {
+  border-color: var(--signal-dim);
+  background: var(--signal-faint);
+  outline: none;
+}
+.metric-chip-drill .metric-chip-k {
+  border-bottom: 1px dotted var(--text-muted);
+}
+.metric-chip-drill:hover .metric-chip-k,
+.metric-chip-drill:focus-visible .metric-chip-k {
+  border-bottom-color: var(--signal);
+  color: var(--signal);
+}
+.metric-pop {
+  position: fixed;
+  z-index: 200;
+  width: 280px;
+  max-width: calc(100vw - 20px);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--line-strong);
+  border-top: 2px solid var(--signal);
+  border-radius: 6px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+  cursor: default;
+  white-space: normal;
+  animation: term-pop-in 0.1s ease-out;
+}
+.metric-pop-name {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.metric-pop-val {
+  font: 14px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+.metric-pop-src {
+  font: 11px/1.5 var(--f-sans);
+  color: var(--text-muted);
+}
+.metric-pop-src code {
+  font: 10px var(--f-mono);
+  color: var(--signal);
+  background: var(--signal-faint);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.metric-pop-tier {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.metric-pop-tier.conf-observed { color: var(--signal); }
+.metric-pop-tier.conf-estimated { color: var(--info-sev); }
+.metric-pop-tier.conf-heuristic { color: var(--warn); }
 
 /* ── Confidence badge — provenance of the numbers ─── */
 .confidence-badge {

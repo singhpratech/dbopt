@@ -71,6 +71,11 @@ pub struct SeverityCounts {
 pub struct Metric {
     pub label: String,
     pub value: String,
+    /// DMV / XEvents origin this number was read from (e.g.
+    /// `"sys.dm_db_index_usage_stats"`). Drives the per-chip provenance
+    /// drilldown in the UI. Defaults to `None` for sources with no single DMV.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

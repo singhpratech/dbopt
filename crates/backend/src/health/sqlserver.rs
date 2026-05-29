@@ -80,6 +80,8 @@ impl HealthProvider for SqlServerHealthProvider {
                 metrics: vec![Metric {
                     label: "Severity".to_string(),
                     value: severity.to_string(),
+                    // Provenance of a static finding is the rule that matched.
+                    source: Some(format!("rule:{}", f.rule.0)),
                 }],
                 confidence: "observed".to_string(),
             });
@@ -114,10 +116,12 @@ impl HealthProvider for SqlServerHealthProvider {
                     Metric {
                         label: "Deadlocks (7d)".to_string(),
                         value: commas_i64(pain.deadlock_count),
+                        source: Some("system_health XEvents".to_string()),
                     },
                     Metric {
                         label: "Victims".to_string(),
                         value: "killed & rolled back".to_string(),
+                        source: Some("system_health XEvents".to_string()),
                     },
                 ],
                 // Counted directly from captured deadlock graphs.
@@ -153,6 +157,7 @@ impl HealthProvider for SqlServerHealthProvider {
                 metrics: vec![Metric {
                     label: "Blocking incidents (7d)".to_string(),
                     value: commas_i64(pain.blocking_incidents),
+                    source: Some("sys.dm_exec_requests".to_string()),
                 }],
                 // Counted directly from sentinel blocking samples.
                 confidence: "observed".to_string(),
@@ -185,10 +190,12 @@ impl HealthProvider for SqlServerHealthProvider {
                     Metric {
                         label: "Wait type".to_string(),
                         value: wait_label.clone(),
+                        source: Some("sys.dm_os_wait_stats".to_string()),
                     },
                     Metric {
                         label: "Time waited".to_string(),
                         value: format!("{:.1} s", pain.top_wait_time_ms as f64 / 1000.0),
+                        source: Some("sys.dm_os_wait_stats".to_string()),
                     },
                 ],
                 // Accumulated wait time is read straight from the wait DMV.
@@ -229,6 +236,7 @@ impl HealthProvider for SqlServerHealthProvider {
                     Metric {
                         label: "Slowdown".to_string(),
                         value: format!("+{:.0}%", r.delta_pct),
+                        source: Some("sys.query_store_runtime_stats".to_string()),
                     },
                     Metric {
                         label: "Duration".to_string(),
@@ -236,6 +244,7 @@ impl HealthProvider for SqlServerHealthProvider {
                             "{} → {} ms",
                             r.baseline_duration_ms, r.current_duration_ms
                         ),
+                        source: Some("sys.query_store_runtime_stats".to_string()),
                     },
                 ],
                 // Baseline vs current durations are measured by the sentinel.
@@ -385,17 +394,50 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         rationale: rec.rationale.clone(),
         fix_sql: Some(rec.ddl.clone()),
         fix_action: fix_action.to_string(),
-        // Carry the advisor's grounded chips + provenance straight through.
+        // Carry the advisor's grounded chips + provenance straight through,
+        // tagging each chip with the DMV it was read from.
         metrics: rec
             .metrics
             .iter()
             .map(|(label, value)| Metric {
                 label: label.clone(),
                 value: value.clone(),
+                source: advisor_metric_source(rec.kind, label),
             })
             .collect(),
         confidence: rec.confidence.clone(),
     }
+}
+
+/// DMV origin of an advisor metric chip, keyed on the rec kind + chip label.
+///
+/// Per the Pass 3 spec:
+///   - size / rows / storage  → `sys.dm_db_partition_stats`
+///   - reads / writes / scans → `sys.dm_db_index_usage_stats`
+///   - missing-index estimates → `sys.dm_db_missing_index_details + _group_stats`
+fn advisor_metric_source(kind: RecKind, label: &str) -> Option<String> {
+    let src = match kind {
+        // Every CreateIndex chip is a missing-index DMV projection.
+        RecKind::CreateIndex => "sys.dm_db_missing_index_details + _group_stats",
+        // DropIndex: write/read counters vs reclaimed storage.
+        RecKind::DropIndex => match label {
+            "Storage reclaimed" => "sys.dm_db_partition_stats",
+            // "Writes maintained", "Reads", and anything else are usage counters.
+            _ => "sys.dm_db_index_usage_stats",
+        },
+        // MergeIndex: reclaimed storage vs catalog-derived uniqueness.
+        RecKind::MergeIndex => match label {
+            "Storage" => "sys.dm_db_partition_stats",
+            _ => "sys.dm_db_index_usage_stats",
+        },
+        // ColumnstoreCandidate: size/rows vs scan counters.
+        RecKind::ColumnstoreCandidate => match label {
+            "Scans" => "sys.dm_db_index_usage_stats",
+            // "Rows", "Size", and anything else come from partition stats.
+            _ => "sys.dm_db_partition_stats",
+        },
+    };
+    Some(src.to_string())
 }
 
 /// `impact_rank` per rec kind (clamped to 0..=10000). The raw `impact_score`

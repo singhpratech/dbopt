@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
-import type { Confidence, HealthReport, Issue, IssueSeverity, Metric } from "../api/backend";
+import type { Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
+import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
 
 /** A computed re-scan delta — how the two grades moved between scans. */
@@ -111,6 +112,12 @@ export function HealthOverview({
   const live = connected && !!report && !err;
   const reliabilityGrade = live ? report!.reliability_grade ?? "?" : "?";
   const efficiencyGrade = live ? report!.efficiency_grade ?? "?" : "?";
+  // In learning mode the letters are not trustworthy yet — render them as
+  // PROVISIONAL (see GradeBlock) instead of a confident full-contrast grade.
+  const provisional = live && report!.is_learning === true;
+  // Does the sentinel window actually hold runtime data? If we're learning we
+  // treat runtime signals as "not monitored yet" (no honest 0 to show).
+  const hasRuntimeData = live && !report!.is_learning;
 
   // The selected Issue is DERIVED from the id, never stored separately.
   const selectedIssue = report?.issues.find((i) => i.id === selectedIssueId) ?? null;
@@ -131,6 +138,7 @@ export function HealthOverview({
             sublabel="Are users hitting errors?"
             grade={reliabilityGrade}
             score={live ? report!.reliability_score : null}
+            provisional={provisional}
           />
           <GradeBlock
             label="Efficiency"
@@ -138,6 +146,7 @@ export function HealthOverview({
             sublabel="Speed & cost to reclaim"
             grade={efficiencyGrade}
             score={live ? report!.efficiency_score : null}
+            provisional={provisional}
           />
         </div>
         <div className="health-head-meta">
@@ -243,14 +252,31 @@ export function HealthOverview({
         </div>
       ) : report ? (
         <>
-          {/* ── 2) SIGNAL STRIP ─────────────────────────── */}
+          {/* ── 2) SIGNAL STRIP ─────────────────────────────
+              Structural signals (missing/unused/dup/columnstore) are always
+              DMV-measured → shown as-is. Runtime signals (deadlocks/blocking/
+              top wait/regressions) depend on accumulated sentinel history: when
+              we have it, a subtle "measured" tick; when learning / no data, they
+              read "— not monitored yet" instead of a falsely-reassuring 0. */}
           <div className="health-signals">
-            <Signal label="missing idx" term="missing_index" value={report.signals.missing_indexes} />
-            <Signal label="unused idx" term="unused_index" value={report.signals.unused_indexes} />
-            <Signal label="duplicate idx" term="duplicate_index" value={report.signals.duplicate_indexes} />
-            <Signal label="columnstore" term="columnstore" value={report.signals.columnstore_candidates} />
-            <Signal label="deadlocks" term="deadlock" value={report.signals.deadlock_count} tone="crit" />
-            <Signal label="blocking" term="blocking" value={report.signals.blocking_incidents} tone="warn" />
+            <Signal label="missing idx" term="missing_index" value={report.signals.missing_indexes} measured />
+            <Signal label="unused idx" term="unused_index" value={report.signals.unused_indexes} measured />
+            <Signal label="duplicate idx" term="duplicate_index" value={report.signals.duplicate_indexes} measured />
+            <Signal label="columnstore" term="columnstore" value={report.signals.columnstore_candidates} measured />
+            <Signal
+              label="deadlocks"
+              term="deadlock"
+              value={report.signals.deadlock_count}
+              tone="crit"
+              monitored={hasRuntimeData}
+            />
+            <Signal
+              label="blocking"
+              term="blocking"
+              value={report.signals.blocking_incidents}
+              tone="warn"
+              monitored={hasRuntimeData}
+            />
             <Signal
               label="top wait"
               term="wait_type"
@@ -259,8 +285,15 @@ export function HealthOverview({
                   ? `${report.signals.top_wait_type} · ${fmtMs(report.signals.top_wait_time_ms)}`
                   : "—"
               }
+              monitored={hasRuntimeData}
             />
-            <Signal label="regressions" term="regression" value={report.signals.regressed_queries} tone="warn" />
+            <Signal
+              label="regressions"
+              term="regression"
+              value={report.signals.regressed_queries}
+              tone="warn"
+              monitored={hasRuntimeData}
+            />
           </div>
 
           {/* ── 3) START HERE — the 1-3 issues to fix first ─ */}
@@ -304,13 +337,21 @@ export function HealthOverview({
   );
 }
 
-/** One headline grade cell: big grade chip + score, with a plain-English sublabel. */
+/**
+ * One headline grade cell: big grade chip + score, with a plain-English sublabel.
+ *
+ * In `provisional` (learning) mode the LETTER itself must not read as a confident
+ * grade — we gray it out and label it PROVISIONAL (with a tooltip), because the
+ * dismissible learning banner alone is too easy to miss. We always show score
+ * CONTEXT next to the grade ("C · 71/100") so the number is interpretable.
+ */
 function GradeBlock({
   label,
   term,
   sublabel,
   grade,
   score,
+  provisional,
 }: {
   label: string;
   /** Glossary slug — wraps the label so hovering explains the grade. */
@@ -318,19 +359,54 @@ function GradeBlock({
   sublabel: string;
   grade: string;
   score: number | null;
+  /** Learning mode → the grade is not trustworthy yet; show it as provisional. */
+  provisional?: boolean;
 }) {
-  const gradeClass = gradeChipClass(grade);
+  // When provisional we drop the band color (gray-out) so an A/F doesn't read as
+  // confident; the chip carries the band only when the grade is real.
+  const gradeClass = provisional ? "grade-provisional" : gradeChipClass(grade);
+  const provisionalTip =
+    "Provisional — not observed long enough yet (DMV stats reset on restart). The letter firms up once a workload accumulates.";
   return (
-    <div className="health-grade" title={`${label} grade`}>
+    <div
+      className={`health-grade${provisional ? " provisional" : ""}`}
+      title={provisional ? provisionalTip : `${label} grade`}
+    >
       <div className={`health-grade-chip ${gradeClass}`}>
-        <span className={`pill ${gradeClass}`}>{grade}</span>
-        <span className="health-score">{score != null ? score : "—"}</span>
+        {provisional ? (
+          <span
+            className="pill grade-provisional health-grade-prov"
+            title={provisionalTip}
+          >
+            {grade !== "?" ? grade : "—"}
+            <span className="health-grade-prov-tag">PROVISIONAL</span>
+          </span>
+        ) : (
+          <span className={`pill ${gradeClass}`}>{grade}</span>
+        )}
+        {/* Score context: "71/100" so the number is interpretable, not bare. */}
+        <span className="health-score">
+          {score != null ? (
+            <>
+              {score}
+              <span className="health-score-denom">/100</span>
+            </>
+          ) : (
+            "—"
+          )}
+        </span>
       </div>
       <div className="health-grade-meta">
         <div className="health-grade-label">
           <Term k={term}>{label}</Term>
         </div>
-        <div className="health-grade-sub">{sublabel}</div>
+        <div className="health-grade-sub">
+          {provisional ? (
+            <Term k="learning_mode">provisional · still learning</Term>
+          ) : (
+            sublabel
+          )}
+        </div>
       </div>
     </div>
   );
@@ -373,19 +449,6 @@ function IssueSection({
         </div>
       )}
     </section>
-  );
-}
-
-/**
- * One evidence chip — a grounded label/value pair (e.g. "Writes maintained
- * 412/wk"). Pre-formatted server-side; rendered verbatim. Reuses .pill geometry.
- */
-function MetricChip({ metric }: { metric: Metric }) {
-  return (
-    <span className="metric-chip" title={`${metric.label}: ${metric.value}`}>
-      <span className="metric-chip-k">{metric.label}</span>
-      <span className="metric-chip-v">{metric.value}</span>
-    </span>
   );
 }
 
@@ -493,18 +556,47 @@ function Signal({
   term,
   value,
   tone,
+  measured,
+  monitored,
 }: {
   label: string;
   /** Glossary slug — wraps the counter label so hovering explains it. */
   term?: string;
   value: number | string;
   tone?: "crit" | "warn";
+  /** Structural signals are always DMV-measured → show a subtle measured tick. */
+  measured?: boolean;
+  /**
+   * Runtime signals only: true when sentinel history exists (→ measured tick),
+   * false when learning / no data (→ "— not monitored yet", a muted unknown
+   * instead of a falsely-reassuring 0). Undefined = not a runtime signal.
+   */
+  monitored?: boolean;
 }) {
+  // A runtime signal with no sentinel history yet: don't imply healthy-zero.
+  if (monitored === false) {
+    return (
+      <div className="health-signal not-monitored" title="No sentinel history yet — start WATCH to monitor this">
+        <span className="health-signal-k">
+          {term ? <Term k={term}>{label}</Term> : label}
+        </span>
+        <span className="health-signal-v unknown">
+          — <span className="health-signal-note">not monitored yet</span>
+        </span>
+      </div>
+    );
+  }
+  const isMeasured = measured || monitored === true;
   const hot = typeof value === "number" && value > 0 && tone;
   return (
     <div className="health-signal">
       <span className="health-signal-k">
         {term ? <Term k={term}>{label}</Term> : label}
+        {isMeasured && (
+          <span className="health-signal-measured" title="Measured directly from live DMV / sentinel data" aria-label="measured">
+            ✓
+          </span>
+        )}
       </span>
       <span className={`health-signal-v${hot ? ` ${tone}` : ""}`}>
         {typeof value === "number" ? value.toLocaleString() : value}
@@ -575,7 +667,7 @@ function IssueCard({
       {(iss.metrics?.length > 0 || iss.confidence) && (
         <div className="metric-row">
           {(iss.metrics ?? []).slice(0, 3).map((m, i) => (
-            <MetricChip key={i} metric={m} />
+            <MetricChip key={i} metric={m} confidence={iss.confidence} />
           ))}
           <ConfidenceBadge confidence={iss.confidence} />
         </div>
@@ -583,20 +675,30 @@ function IssueCard({
 
       {iss.consequence && <p className="health-consequence">{iss.consequence}</p>}
 
-      {iss.rationale && (
-        <>
-          <button
-            className="health-toggle"
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen((o) => !o);
-            }}
-          >
-            {open ? "▾ rationale" : "▸ rationale"}
-          </button>
-          {open && <div className="advisor-rationale">{iss.rationale}</div>}
-        </>
-      )}
+      {iss.rationale && (() => {
+        // P2: inline the first 1-2 lines of rationale; collapse the rest behind
+        // the existing toggle so the gist is visible without a click.
+        const { lead, rest } = splitRationale(iss.rationale);
+        return (
+          <>
+            <p className="health-rationale-lead">{lead}</p>
+            {rest && (
+              <>
+                <button
+                  className="health-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpen((o) => !o);
+                  }}
+                >
+                  {open ? "▾ less" : "▸ more rationale"}
+                </button>
+                {open && <div className="advisor-rationale">{rest}</div>}
+              </>
+            )}
+          </>
+        );
+      })()}
 
       <div className="health-issue-foot">
         <span className="health-issue-cta" aria-hidden>
@@ -730,6 +832,21 @@ function gradeChipClass(grade: string): string {
 
 function kindLabel(k: string): string {
   return k.replace(/_/g, " ").toUpperCase();
+}
+
+/**
+ * Split a rationale into a visible lead (first 1-2 sentences) and the collapsed
+ * remainder. Sentence-aware: splits on ". " boundaries, keeping up to two
+ * sentences inline. Returns `rest: ""` when there's nothing more to hide.
+ */
+function splitRationale(text: string): { lead: string; rest: string } {
+  const trimmed = text.trim();
+  // Split into sentences, preserving their terminators.
+  const sentences = trimmed.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g);
+  if (!sentences || sentences.length <= 2) return { lead: trimmed, rest: "" };
+  const lead = sentences.slice(0, 2).join("").trim();
+  const rest = sentences.slice(2).join("").trim();
+  return { lead, rest };
 }
 
 function fmtTime(iso: string): string {

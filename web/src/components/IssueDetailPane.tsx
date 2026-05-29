@@ -5,12 +5,12 @@ import type {
   Confidence,
   Issue,
   IssueSeverity,
-  Metric,
   Remediation,
   RemediationStep,
   RiskLevel,
   SolutionOption,
 } from "../api/backend";
+import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
 
 /**
@@ -146,7 +146,7 @@ export function IssueDetailPane({
         {((issue.metrics?.length ?? 0) > 0 || issue.confidence) && (
           <div className="metric-row issue-detail-metrics">
             {(issue.metrics ?? []).map((m, i) => (
-              <MetricChip key={i} metric={m} />
+              <MetricChip key={i} metric={m} confidence={issue.confidence} />
             ))}
             <ConfidenceBadge confidence={issue.confidence} />
           </div>
@@ -440,19 +440,6 @@ function procKey(p?: DeadlockProcess | string | number): string {
 function truncate(s: string, n: number): string {
   const t = s.trim();
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
-}
-
-/**
- * One evidence chip — a grounded label/value pair, pre-formatted server-side.
- * Mirrors HealthOverview's MetricChip (kept file-local on both sides).
- */
-function MetricChip({ metric }: { metric: Metric }) {
-  return (
-    <span className="metric-chip" title={`${metric.label}: ${metric.value}`}>
-      <span className="metric-chip-k">{metric.label}</span>
-      <span className="metric-chip-v">{metric.value}</span>
-    </span>
-  );
 }
 
 /** Provenance badge with a <Term> tooltip — observed / estimated / heuristic. */
