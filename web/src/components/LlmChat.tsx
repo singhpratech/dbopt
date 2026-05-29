@@ -16,6 +16,26 @@ interface ColumnState {
   endedAt?: number;
 }
 
+// One exchange in the conversation: the user's prompt and each targeted
+// provider's response to it. The thread is the ordered list of these.
+interface Turn {
+  id: number;
+  prompt: string;
+  cols: ColumnState[];
+}
+
+function sanitizeThread(turns: Turn[]): Turn[] {
+  // A turn saved mid-stream (e.g. tab closed) would still say "streaming"; settle it.
+  return (turns ?? []).map((t) => ({
+    ...t,
+    cols: (t.cols ?? []).map((c) =>
+      c.state === "streaming"
+        ? { ...c, state: c.body ? "done" : "err", error: c.body ? undefined : "interrupted", endedAt: c.endedAt ?? c.startedAt }
+        : c,
+    ),
+  }));
+}
+
 export function LlmChat({
   sql,
   report,
@@ -25,41 +45,41 @@ export function LlmChat({
   report: AnalysisReport | null;
   providers: Record<ProviderKey, ProviderConfig>;
 }) {
-  // All of these persist (localStorage) so the conversation, prompt, and target
-  // survive switching workspaces AND a full reload — nothing is lost on tab change.
+  // Everything persists (localStorage) so the conversation thread, prompt, and
+  // target survive switching workspaces AND a full reload — the thread and its
+  // memory remain until you hit Clear.
   const [input, setInput] = useState(() => P.load<string>("chat_input", "Explain the three worst issues and rewrite the SQL."));
   const [fanout, setFanout] = useState(() => P.load<boolean>("chat_fanout", true));
-  // Coerce any "streaming" state from a prior session (e.g. closed mid-stream) to a settled state.
-  const [cols, setCols] = useState<ColumnState[]>(() =>
-    P.load<ColumnState[]>("chat_cols", []).map((c) =>
-      c.state === "streaming" ? { ...c, state: c.body ? "done" : "err", error: c.body ? undefined : "interrupted", endedAt: c.endedAt ?? c.startedAt } : c,
-    ),
-  );
   const [activeSingle, setActiveSingle] = useState<ProviderKey>(() => P.load<ProviderKey>("chat_single", "ollama"));
+  const [thread, setThread] = useState<Turn[]>(() => sanitizeThread(P.load<Turn[]>("chat_thread", [])));
   const [webllmProgress, setWebllmProgress] = useState("");
   const handlesRef = useRef<{ cancelAll: () => void } | null>(null);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  const isRunning = thread.some((t) => t.cols.some((c) => c.state === "streaming"));
 
   useEffect(() => webllm.onProgress(setWebllmProgress), []);
 
-  // Persist prompt / target / fanout immediately; persist results only once they
-  // settle (not on every streamed token).
+  // Pick a sensible default single-target if the current one is disabled.
+  useEffect(() => {
+    const enabledKeys = (Object.values(providers) as ProviderConfig[]).filter((p) => p.enabled).map((p) => p.key);
+    if (!enabledKeys.includes(activeSingle) && enabledKeys.length > 0) setActiveSingle(enabledKeys[0]);
+  }, [providers, activeSingle]);
+
+  // Persist prompt / target / fanout immediately; persist the thread only once it
+  // settles (not on every streamed token).
   useEffect(() => { P.save("chat_input", input); }, [input]);
   useEffect(() => { P.save("chat_fanout", fanout); }, [fanout]);
   useEffect(() => { P.save("chat_single", activeSingle); }, [activeSingle]);
   useEffect(() => {
-    if (!cols.some((c) => c.state === "streaming")) P.save("chat_cols", cols);
-  }, [cols]);
+    if (!thread.some((t) => t.cols.some((c) => c.state === "streaming"))) P.save("chat_thread", thread);
+  }, [thread]);
+
+  // Keep the latest turn in view as it streams / on new turns.
+  useEffect(() => { resultsRef.current?.scrollTo({ top: resultsRef.current.scrollHeight }); }, [thread]);
 
   // Cancel any in-flight stream if the component unmounts (workspace switch).
   useEffect(() => () => handlesRef.current?.cancelAll(), []);
-
-  // Pick a sensible default single-target if the current one is disabled
-  useEffect(() => {
-    const enabledKeys = (Object.values(providers) as ProviderConfig[]).filter((p) => p.enabled).map((p) => p.key);
-    if (!enabledKeys.includes(activeSingle) && enabledKeys.length > 0) {
-      setActiveSingle(enabledKeys[0]);
-    }
-  }, [providers, activeSingle]);
 
   const enabledFanout = useMemo(
     () => (Object.values(providers) as ProviderConfig[]).filter((p) => p.enabled && p.in_fanout),
@@ -72,59 +92,68 @@ export function LlmChat({
       "When proposing rewrites, prefer set-based, schema-qualified, SARGable T-SQL.",
       "Do not invent table or column names. If something is unclear, say so.",
       "When relevant, mention which SQL Server version the suggested construct requires.",
+      "This is an ongoing conversation — use the earlier turns as context.",
     ];
     if (report) {
-      const slim = report.findings.map((f) => ({
-        rule: f.rule,
-        sev: f.severity,
-        line: f.location?.line,
-        msg: f.message,
-      }));
+      const slim = report.findings.map((f) => ({ rule: f.rule, sev: f.severity, line: f.location?.line, msg: f.message }));
       lines.push("Static analyzer findings (JSON):", JSON.stringify(slim));
     }
-    if (sql) {
-      lines.push("Current SQL:", "```sql\n" + sql.slice(0, 8000) + "\n```");
-    }
+    if (sql) lines.push("Current SQL:", "```sql\n" + sql.slice(0, 8000) + "\n```");
     return lines.join("\n\n");
   }
 
   function ask() {
+    if (isRunning) return;
+    const promptText = input.trim();
+    if (!promptText) return;
     handlesRef.current?.cancelAll();
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt() },
-      { role: "user", content: input },
-    ];
+
     const targets: ProviderConfig[] = fanout
       ? enabledFanout
       : [providers[activeSingle]].filter((p) => p.enabled);
 
     if (targets.length === 0) {
-      setCols([{ key: "ollama", model: "—", body: "", state: "err", error: "No providers enabled. Open Settings to configure one." }]);
+      setThread((prev) => [
+        ...prev,
+        { id: Date.now(), prompt: promptText, cols: [{ key: "ollama", model: "—", body: "", state: "err", error: "No providers enabled. Open Config to set one up." }] },
+      ]);
+      setInput("");
       return;
     }
 
-    const initial: ColumnState[] = targets.map((p) => ({
-      key: p.key,
-      model: p.model,
-      body: "",
-      state: "streaming",
-      startedAt: Date.now(),
-    }));
-    setCols(initial);
+    const turnId = Date.now();
+    const priorThread = thread; // capture BEFORE appending — this is the memory.
+    const initialCols: ColumnState[] = targets.map((p) => ({ key: p.key, model: p.model, body: "", state: "streaming", startedAt: Date.now() }));
+    setThread((prev) => [...prev, { id: turnId, prompt: promptText, cols: initialCols }]);
+    setInput("");
 
-    handlesRef.current = router.chatFanout(
-      targets,
-      messages,
-      (key, tok) => {
-        setCols((prev) => prev.map((c) => c.key === key ? { ...c, body: c.body + tok } : c));
-      },
-      (key, e) => {
-        setCols((prev) => prev.map((c) => c.key === key ? { ...c, state: "err", error: e, endedAt: Date.now() } : c));
-      },
-      (key) => {
-        setCols((prev) => prev.map((c) => c.key === key && c.state === "streaming" ? { ...c, state: "done", endedAt: Date.now() } : c));
-      },
-    );
+    const sys = systemPrompt();
+    const updateCol = (key: ProviderKey, fn: (c: ColumnState) => ColumnState) =>
+      setThread((prev) => prev.map((t) => (t.id === turnId ? { ...t, cols: t.cols.map((c) => (c.key === key ? fn(c) : c)) } : t)));
+
+    const cancels: (() => void)[] = [];
+    for (const p of targets) {
+      // Per-provider memory: prior user prompts paired with THIS provider's own
+      // prior answers, so each model continues its own conversation coherently.
+      const history: ChatMessage[] = [];
+      for (const t of priorThread) {
+        const ans = t.cols.find((c) => c.key === p.key && c.state === "done" && c.body);
+        if (ans) {
+          history.push({ role: "user", content: t.prompt });
+          history.push({ role: "assistant", content: ans.body });
+        }
+      }
+      const messages: ChatMessage[] = [{ role: "system", content: sys }, ...history, { role: "user", content: promptText }];
+      const h = router.chat(
+        p,
+        messages,
+        (tok) => updateCol(p.key, (c) => ({ ...c, body: c.body + tok })),
+        (e) => updateCol(p.key, (c) => ({ ...c, state: "err", error: e, endedAt: Date.now() })),
+      );
+      h.done.finally(() => updateCol(p.key, (c) => (c.state === "streaming" ? { ...c, state: "done", endedAt: Date.now() } : c)));
+      cancels.push(h.cancel);
+    }
+    handlesRef.current = { cancelAll: () => cancels.forEach((c) => c()) };
   }
 
   function stop() {
@@ -133,8 +162,8 @@ export function LlmChat({
 
   function clearChat() {
     handlesRef.current?.cancelAll();
-    setCols([]);
-    P.save("chat_cols", []);
+    setThread([]);
+    P.save("chat_thread", []);
   }
 
   function onKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -143,8 +172,6 @@ export function LlmChat({
       ask();
     }
   }
-
-  const isRunning = cols.some((c) => c.state === "streaming");
 
   return (
     <div className="ai-pane">
@@ -167,35 +194,23 @@ export function LlmChat({
             ))}
           </select>
         )}
-        {webllmProgress && <span className="right" style={{ font: "10px var(--f-mono)", color: "var(--info-sev)" }}>{webllmProgress}</span>}
+        {thread.length > 0 && (
+          <span className="right" style={{ font: "10px var(--f-mono)", color: "var(--text-dim)" }}>
+            {thread.length} turn{thread.length === 1 ? "" : "s"} · remembered until Clear
+          </span>
+        )}
+        {webllmProgress && <span style={{ font: "10px var(--f-mono)", color: "var(--info-sev)", marginLeft: thread.length ? 12 : "auto" }}>{webllmProgress}</span>}
       </div>
 
-      <div className="ai-input">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKey}
-          placeholder="Ask the model. ⌘/Ctrl+Enter to send."
-          rows={3}
-        />
-        {isRunning ? (
-          <button className="stop" onClick={stop}>Stop</button>
-        ) : (
-          <button className="send" onClick={ask}>Send ⌘↵</button>
-        )}
-        {cols.length > 0 && !isRunning && (
-          <button className="clear" onClick={clearChat} title="Clear the conversation">Clear</button>
-        )}
-      </div>
-
-      <div className="ai-results">
-        {cols.length === 0 ? (
+      <div className="ai-results ai-thread" ref={resultsRef}>
+        {thread.length === 0 ? (
           <div className="empty">
             <div className="empty-card">
               <div className="empty-glyph">↪</div>
               <div className="empty-title">Ask the analyzer</div>
               <div className="empty-hint">
-                The system prompt automatically includes your SQL and the static findings.
+                The system prompt automatically includes your SQL and the static findings, and the
+                conversation is remembered across turns (and across tabs/reloads) until you Clear it.
                 {fanout
                   ? ` Currently fanning out to ${enabledFanout.length} provider${enabledFanout.length === 1 ? "" : "s"}.`
                   : ` Currently sending to a single provider.`}
@@ -203,25 +218,50 @@ export function LlmChat({
             </div>
           </div>
         ) : (
-          cols.map((c) => (
-            <div className="ai-col" key={c.key}>
-              <div className={`ai-col-head ${c.state}`}>
-                <span className="pdot" />
-                <span className="who">{router.PROVIDER_LABEL[c.key]}</span>
-                <span>· {c.model}</span>
-                <span className="meta">
-                  {c.startedAt && c.endedAt
-                    ? `${((c.endedAt - c.startedAt) / 1000).toFixed(2)}s`
-                    : c.startedAt
-                    ? `${((Date.now() - c.startedAt) / 1000).toFixed(1)}s …`
-                    : ""}
-                </span>
-              </div>
-              <div className="ai-col-body">
-                {c.state === "err" ? <span style={{ color: "var(--crit)" }}>{c.error}</span> : c.body || "…"}
+          thread.map((turn) => (
+            <div className="ai-turn" key={turn.id}>
+              <div className="ai-turn-prompt"><span className="who">You</span>{turn.prompt}</div>
+              <div className="ai-turn-cols">
+                {turn.cols.map((c) => (
+                  <div className="ai-col" key={c.key}>
+                    <div className={`ai-col-head ${c.state}`}>
+                      <span className="pdot" />
+                      <span className="who">{router.PROVIDER_LABEL[c.key]}</span>
+                      <span>· {c.model}</span>
+                      <span className="meta">
+                        {c.startedAt && c.endedAt
+                          ? `${((c.endedAt - c.startedAt) / 1000).toFixed(2)}s`
+                          : c.state === "streaming"
+                          ? "…"
+                          : ""}
+                      </span>
+                    </div>
+                    <div className="ai-col-body">
+                      {c.state === "err" ? <span style={{ color: "var(--crit)" }}>{c.error}</span> : c.body || "…"}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))
+        )}
+      </div>
+
+      <div className="ai-input">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKey}
+          placeholder="Ask a follow-up — the thread is remembered. ⌘/Ctrl+Enter to send."
+          rows={3}
+        />
+        {isRunning ? (
+          <button className="stop" onClick={stop}>Stop</button>
+        ) : (
+          <button className="send" onClick={ask}>Send ⌘↵</button>
+        )}
+        {thread.length > 0 && !isRunning && (
+          <button className="clear" onClick={clearChat} title="Reset the conversation (clears memory)">Clear</button>
         )}
       </div>
     </div>

@@ -1241,6 +1241,28 @@ body {
   font: 12px var(--f-mono);
 }
 
+/* Conversation thread: turns stack vertically (the thread is what scrolls);
+   within a turn the per-provider columns sit side by side. */
+.ai-results.ai-thread { flex-direction: column; align-items: stretch; overflow-y: auto; }
+.ai-turn { border-bottom: 1px solid var(--line); }
+.ai-turn:last-child { border-bottom: 0; }
+.ai-turn-prompt {
+  padding: 10px 16px;
+  font: 12px/1.5 var(--f-mono);
+  color: var(--text);
+  background: var(--bg-elev);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-turn-prompt .who {
+  color: var(--signal); font-weight: 600; margin-right: 10px;
+  font: 10px var(--f-tech); letter-spacing: 0.12em; text-transform: uppercase;
+}
+.ai-turn-cols { display: flex; align-items: stretch; overflow-x: auto; }
+/* In the thread, answer bodies size to their content and the whole thread
+   scrolls (override the fill-height/inner-scroll used by the legacy layout). */
+.ai-thread .ai-col-body { flex: none; overflow: visible; }
+
 /* ============================================================
    AI logger
    ============================================================ */
