@@ -1056,32 +1056,76 @@ body {
 }
 .pd-result.ok  { color: var(--ok); }
 .pd-result.bad { color: var(--crit); }
-.pd-picker { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.pd-filter {
-  width: 100%;
-  font: 12px var(--f-mono);
-  padding: 7px 10px;
-  background: var(--bg-panel);
-  color: var(--text);
-  border: 1px solid var(--line-strong, var(--line));
-  border-radius: 5px;
-}
-.pd-filter:focus { outline: none; border-color: var(--signal); }
-.pd-filter::placeholder { color: var(--text-dim); }
-.pd-select {
-  width: 100%;
-  font: 12px var(--f-mono);
-  padding: 7px 10px;
-  background: var(--bg-panel);
-  color: var(--text);
+/* API-key field: masked via CSS instead of type=password, so the browser
+   doesn't detect a login form and pop "Manage Passwords" over the combobox. */
+.key-field { display: flex; gap: 8px; align-items: stretch; }
+.key-field input { flex: 1; min-width: 0; }
+.key-masked { -webkit-text-security: disc; text-security: disc; }
+.key-toggle {
+  flex-shrink: 0;
+  font: 10px var(--f-tech);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 12px;
+  background: var(--bg-elev);
+  color: var(--text-muted);
   border: 1px solid var(--line-strong, var(--line));
   border-radius: 5px;
   cursor: pointer;
 }
-.pd-select:focus { outline: none; border-color: var(--signal); }
-.pd-select option { background: var(--bg-panel); color: var(--text); }
+.key-toggle:hover { color: var(--signal); border-color: var(--signal); }
+
+/* Custom model combobox — a styled dropdown we render ourselves (the native
+   <datalist> got covered by the browser's password-manager popup). */
+.pd-model-row { position: relative; }
+.pd-combo {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--signal);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.pd-combo-opt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.pd-combo-opt:hover { background: var(--signal-faint, var(--bg-elev)); }
+.pd-combo-opt.on { background: var(--bg-elev); }
+.pd-combo-id {
+  font: 12px var(--f-mono);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pd-combo-opt.on .pd-combo-id { color: var(--signal); }
+.pd-combo-meta {
+  font: 10px var(--f-mono);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pd-combo-empty {
+  padding: 8px 9px;
+  font: 11px var(--f-mono);
+  color: var(--text-dim);
+}
 .pd-selected {
-  margin: 0;
+  margin: 12px 0 0;
   font: 11px var(--f-mono);
   color: var(--text-muted);
 }

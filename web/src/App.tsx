@@ -65,7 +65,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGrou
   { key: "severity",   glyph: "≡", label: "SEV",     group: "INSPECT" },
   // SETUP — configuration that's set once and left alone.
   { key: "ai",         glyph: "↪", label: "AI",      group: "SETUP" },
-  { key: "settings",   glyph: "⚙", label: "PROV",    group: "SETUP" },
+  { key: "settings",   glyph: "⚙", label: "Config",   group: "SETUP" },
 ];
 
 // Sections in render order, each holding its workspaces (preserving array order).

@@ -6,6 +6,17 @@ import { listCloudModels, testCloudKey, DISCOVERY_PROVIDERS, type CloudModel } f
 
 const ORDER: ProviderKey[] = ["ollama", "webllm", "openai", "anthropic", "openrouter", "azure", "bedrock"];
 
+/** "$in/out per M · 128k ctx" — the price/context annotation shown per model. */
+function fmtModel(m: CloudModel): string {
+  const price = m.free
+    ? "free"
+    : m.price_in != null
+    ? `$${m.price_in.toFixed(2)}/${(m.price_out ?? 0).toFixed(2)} per M`
+    : "";
+  const ctx = m.context ? `${Math.round(m.context / 1000)}k ctx` : "";
+  return [price, ctx].filter(Boolean).join(" · ");
+}
+
 const HINTS: Record<ProviderKey, string> = {
   ollama: "Local. Default for plug-and-play. Model tag e.g. gemma4:e4b, qwen3.6:27b.",
   webllm: "In-browser via WebGPU. First call downloads ~2 GB. No network after that.",
@@ -31,6 +42,8 @@ export function ProvidersPanel({
   const [models, setModels] = useState<Partial<Record<ProviderKey, CloudModel[]>>>({});
   const [busy, setBusy] = useState<Partial<Record<ProviderKey, "test" | "models">>>({});
   const [testMsg, setTestMsg] = useState<Partial<Record<ProviderKey, { ok: boolean; text: string }>>>({});
+  const [comboOpen, setComboOpen] = useState<ProviderKey | null>(null);
+  const [showKey, setShowKey] = useState<Partial<Record<ProviderKey, boolean>>>({});
 
   const supportsDiscovery = (k: ProviderKey) => (DISCOVERY_PROVIDERS as readonly string[]).includes(k);
 
@@ -134,25 +147,85 @@ export function ProvidersPanel({
                   {HINTS[k]}
                 </p>
                 <div className="form-grid">
-                  <div className="form-row full">
+                  <div className="form-row full pd-model-row">
                     <label>Model</label>
                     <input
                       value={p.model}
-                      onChange={(e) => patch(k, { model: e.target.value })}
+                      onChange={(e) => {
+                        patch(k, { model: e.target.value });
+                        if (supportsDiscovery(k) && models[k]) setComboOpen(k);
+                      }}
+                      onFocus={() => { if (supportsDiscovery(k) && models[k]) setComboOpen(k); }}
+                      onBlur={() => setTimeout(() => setComboOpen((o) => (o === k ? null : o)), 150)}
                       spellCheck={false}
-                      list={supportsDiscovery(k) && models[k] ? `dbopt-models-${k}` : undefined}
-                      placeholder={supportsDiscovery(k) && models[k] ? "type to search models, or pick from the list" : undefined}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      name={`dbopt-model-${k}`}
+                      placeholder={supportsDiscovery(k) && models[k] ? "type to search models, or click to browse" : undefined}
                     />
+                    {supportsDiscovery(k) && models[k] && comboOpen === k && (() => {
+                      const all = models[k]!;
+                      const q = (p.model ?? "").toLowerCase().trim();
+                      const exact = all.some((m) => m.id === p.model);
+                      const matches = all.filter(
+                        (m) => !q || exact || m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q),
+                      );
+                      const CAP = 200;
+                      return (
+                        <ul className="pd-combo" role="listbox">
+                          {matches.length === 0 && (
+                            <li className="pd-combo-empty">no models match “{p.model}”</li>
+                          )}
+                          {matches.slice(0, CAP).map((m) => (
+                            <li
+                              key={m.id}
+                              className={`pd-combo-opt ${m.id === p.model ? "on" : ""}`}
+                              role="option"
+                              aria-selected={m.id === p.model}
+                              // onMouseDown (not onClick) fires before the input's blur,
+                              // and preventDefault keeps focus so the pick registers.
+                              onMouseDown={(e) => { e.preventDefault(); patch(k, { model: m.id }); setComboOpen(null); }}
+                            >
+                              <span className="pd-combo-id">{m.id}</span>
+                              <span className="pd-combo-meta">{fmtModel(m)}</span>
+                            </li>
+                          ))}
+                          {matches.length > CAP && (
+                            <li className="pd-combo-empty">+{matches.length - CAP} more — keep typing to narrow</li>
+                          )}
+                        </ul>
+                      );
+                    })()}
                   </div>
                   {k !== "ollama" && k !== "webllm" && k !== "bedrock" && (
                     <div className="form-row full">
                       <label>API key</label>
-                      <input
-                        type="password"
-                        value={p.api_key ?? ""}
-                        onChange={(e) => patch(k, { api_key: e.target.value })}
-                        placeholder={`${PROVIDER_LABEL[k]} key`}
-                      />
+                      <div className="key-field">
+                        {/* Masked via CSS (-webkit-text-security), NOT type=password —
+                            a real password field makes the browser treat this as a login
+                            form and pop "Manage Passwords" over the model combobox. */}
+                        <input
+                          type="text"
+                          className={showKey[k] ? "" : "key-masked"}
+                          value={p.api_key ?? ""}
+                          onChange={(e) => patch(k, { api_key: e.target.value })}
+                          placeholder={`${PROVIDER_LABEL[k]} key`}
+                          autoComplete="off"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
+                          name={`dbopt-key-${k}`}
+                        />
+                        <button
+                          type="button"
+                          className="key-toggle"
+                          onClick={() => setShowKey((s) => ({ ...s, [k]: !s[k] }))}
+                          title={showKey[k] ? "Hide key" : "Show key"}
+                        >
+                          {showKey[k] ? "hide" : "show"}
+                        </button>
+                      </div>
                     </div>
                   )}
                   {(k === "openai" || k === "openrouter") && (
@@ -268,34 +341,17 @@ export function ProvidersPanel({
 
                     {models[k] && (() => {
                       const list = models[k]!;
-                      const fmt = (m: CloudModel) =>
-                        (m.free
-                          ? "free"
-                          : m.price_in != null
-                          ? `$${m.price_in.toFixed(2)}/${(m.price_out ?? 0).toFixed(2)} per M`
-                          : "") + (m.context ? `${m.price_in != null || m.free ? " · " : ""}${Math.round(m.context / 1000)}k ctx` : "");
                       const sel = list.find((m) => m.id === p.model);
-                      // Typeable combobox: the datalist feeds the Model field above
-                      // (type to filter, or open to pick). Already sorted by vendor group.
                       return (
-                        <div className="pd-picker">
-                          <datalist id={`dbopt-models-${k}`}>
-                            {list.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {fmt(m)}
-                              </option>
-                            ))}
-                          </datalist>
-                          <p className="pd-selected">
-                            <strong>{list.length}</strong> models loaded — type in <em>Model</em> above to search, or open the list.
-                            {sel && (
-                              <>
-                                {" "}Active: <code>{sel.id}</code>
-                                {fmt(sel) ? ` · ${fmt(sel)}` : ""}
-                              </>
-                            )}
-                          </p>
-                        </div>
+                        <p className="pd-selected">
+                          <strong>{list.length}</strong> models loaded — click the <em>Model</em> field above to search/browse.
+                          {sel && (
+                            <>
+                              {" "}Active: <code>{sel.id}</code>
+                              {fmtModel(sel) ? ` · ${fmtModel(sel)}` : ""}
+                            </>
+                          )}
+                        </p>
                       );
                     })()}
                   </div>
