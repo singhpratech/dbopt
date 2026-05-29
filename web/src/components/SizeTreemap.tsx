@@ -7,18 +7,24 @@ export function SizeTreemap({
   data,
   theme,
   action,
+  loading,
+  error,
 }: {
   data: SizeNode[];
   theme?: string;
   action?: { label: string; onClick: () => void };
+  loading?: boolean;
+  error?: string | null;
 }) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
         glyph="◧"
         title="No storage telemetry"
-        hint="Run 'Pull DMVs & analyze' against a live server to read sys.partitions + allocation_units and break down storage by schema → table → index."
+        hint="Pull live DMVs to read sys.partitions + allocation_units and break down storage by schema → table → index, in place."
         action={action}
+        loading={loading}
+        error={error}
       />
     );
   }

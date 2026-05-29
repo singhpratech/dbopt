@@ -19,10 +19,17 @@ import { confGlyph, confTitle, confTier } from "../confidence";
 export function MetricChip({
   metric,
   confidence,
+  hideGlyph,
 }: {
   metric: Metric;
   /** The owning issue's confidence band — folded into the popover's tier line. */
   confidence?: Confidence;
+  /**
+   * B2: suppress the per-chip leading tier glyph (the card now carries ONE
+   * per-card confidence indicator instead of N micro-glyphs). The chip keeps its
+   * drill popover + tier line on click; only the inline glyph is hidden.
+   */
+  hideGlyph?: boolean;
 }) {
   const id = useId();
   const triggerRef = useRef<HTMLSpanElement>(null);
@@ -57,7 +64,7 @@ export function MetricChip({
   // A1: glanceable per-chip confidence glyph (✓ observed / ○ estimated / ⚡
   // heuristic) using the ONE shared vocabulary. Derived from the owning issue's
   // confidence band; omitted when no band is known (older payloads).
-  const tier = confidence ? confTier(confidence) : null;
+  const tier = confidence && !hideGlyph ? confTier(confidence) : null;
   const glyph = tier ? (
     <span
       className={`metric-chip-tier conf-${tier}`}

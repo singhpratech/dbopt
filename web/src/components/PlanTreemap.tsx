@@ -7,10 +7,14 @@ export function PlanTreemap({
   data,
   theme,
   action,
+  loading,
+  error,
 }: {
   data: TreemapNode[];
   theme?: string;
   action?: { label: string; onClick: () => void };
+  loading?: boolean;
+  error?: string | null;
 }) {
   if (!data || data.length === 0) {
     return (
@@ -19,6 +23,8 @@ export function PlanTreemap({
         title="No execution plan"
         hint="Drop a SQL Server .sqlplan XML file (from SSMS → 'Save Execution Plan As') to visualize per-operator estimated cost."
         action={action}
+        loading={loading}
+        error={error}
       />
     );
   }

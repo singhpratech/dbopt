@@ -5,9 +5,10 @@ import type { Confidence, HealthReport, Issue, IssueSeverity } from "../api/back
 import { IssueDetailPane } from "./IssueDetailPane";
 import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
-import { CONF_GLYPH, confGlyph, confTitle } from "../confidence";
+import { CONF_GLYPH, CONF_LABEL, confGlyph, confTitle } from "../confidence";
 import * as scanlog from "../store/scanlog";
 import type { ScanDiff, ScanSnapshot } from "../store/scanlog";
+import * as fixlog from "../store/fixlog";
 
 /**
  * The HEALTH workspace — the one-screen front-door (default landing).
@@ -127,6 +128,15 @@ export function HealthOverview({
     [],
   );
 
+  // A2: post-fix verify loop. The "Next: Re-scan to verify →" breadcrumb on
+  // issue cards + the detail pane re-runs the HEALTH scan (read-only, NO DDL) so
+  // the user can prove the fix landed without leaving. Navigate to HEALTH first
+  // (a no-op when already here) so the breadcrumb works from any context.
+  const verifyRescan = useCallback(() => {
+    if (ui.workspace !== "health") setUi({ ...ui, workspace: "health" });
+    void scan();
+  }, [ui, setUi, scan]);
+
   return (
     <div className="advisor form">
       {/* ── 1) DUAL-GRADE HEADER ──────────────────────── */}
@@ -204,13 +214,7 @@ export function HealthOverview({
       </p>
 
       {report?.is_learning && !err && (
-        <div className="health-learning">
-          Learning mode — DMV signal counters look freshly reset (post-restart). Absence of
-          signal is not proof of health; the grade is provisional until a workload accumulates.
-          <span className="health-learning-eta">
-            Baseline builds as the server runs; grades firm up after ~7 days of monitoring.
-          </span>
-        </div>
+        <LearningBanner earliestAt={scanlog.earliestAt(conn.server, conn.database || undefined)} />
       )}
 
       {/* ── State machine ─────────────────────────────── */}
@@ -311,18 +315,24 @@ export function HealthOverview({
             heading="RELIABILITY — affecting users"
             emptyLine="No reliability issues — users are unaffected."
             issues={report.issues.filter((i) => i.lane === "reliability")}
+            conn={conn}
             ui={ui}
             setUi={setUi}
             onOpen={openIssue}
+            onVerify={verifyRescan}
+            verifying={busy}
           />
           <IssueSection
             tone="opportunity"
             heading="OPPORTUNITIES — performance & cost wins"
             emptyLine="Fully optimized — no opportunities found."
             issues={report.issues.filter((i) => i.lane === "opportunity")}
+            conn={conn}
             ui={ui}
             setUi={setUi}
             onOpen={openIssue}
+            onVerify={verifyRescan}
+            verifying={busy}
           />
 
           {/* ── 5) SCAN HISTORY — durable trend / proof fixes moved the needle ── */}
@@ -344,10 +354,62 @@ export function HealthOverview({
               ui={ui}
               setUi={setUi}
               onClose={() => setSelectedIssueId(null)}
+              onVerifyRescan={verifyRescan}
+              verifying={busy}
             />
           )}
         </>
       ) : null}
+    </div>
+  );
+}
+
+/** The baseline-monitoring window (days) after which learning grades firm up. */
+const BASELINE_DAYS = 7;
+
+/**
+ * B3: the learning-mode banner with a concrete PROGRESS BAR + "grades firm up in
+ * ~N more days", computed from the EARLIEST scanlog snapshot timestamp for this
+ * server·db (the first time we ever saw it). Until we have that anchor we can't
+ * date the baseline — fall back to the prose-only ETA. Honest: progress is from
+ * when sqlopt first scanned, the proxy we actually have for "how long we've been
+ * watching this database".
+ */
+function LearningBanner({ earliestAt }: { earliestAt: string | null }) {
+  const days = daysSince(earliestAt);
+  // Progress toward the ~7-day baseline, clamped to [0,1].
+  const pct = days != null ? Math.max(0, Math.min(1, days / BASELINE_DAYS)) : null;
+  const remaining = days != null ? Math.max(0, Math.ceil(BASELINE_DAYS - days)) : null;
+
+  return (
+    <div className="health-learning">
+      Learning mode — DMV signal counters look freshly reset (post-restart). Absence of
+      signal is not proof of health; the grade is provisional until a workload accumulates.
+      {pct != null ? (
+        <div className="health-learning-progress">
+          <div
+            className="health-learning-bar"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={BASELINE_DAYS}
+            aria-valuenow={Math.round((days ?? 0) * 10) / 10}
+            aria-label="Baseline monitoring progress"
+          >
+            <span className="health-learning-bar-fill" style={{ width: `${pct * 100}%` }} />
+          </div>
+          <span className="health-learning-eta">
+            {remaining && remaining > 0
+              ? `Baseline building — grades firm up in ~${remaining} more ${
+                  remaining === 1 ? "day" : "days"
+                } of monitoring.`
+              : "Baseline window reached — grades will firm up on the next scans as a workload accumulates."}
+          </span>
+        </div>
+      ) : (
+        <span className="health-learning-eta">
+          Baseline builds as the server runs; grades firm up after ~{BASELINE_DAYS} days of monitoring.
+        </span>
+      )}
     </div>
   );
 }
@@ -433,17 +495,26 @@ function IssueSection({
   heading,
   emptyLine,
   issues,
+  conn,
   ui,
   setUi,
   onOpen,
+  onVerify,
+  verifying,
 }: {
   tone: "reliability" | "opportunity";
   heading: string;
   emptyLine: string;
   issues: Issue[];
+  /** Active connection — server·db scopes the per-issue fixlog (validated badge). */
+  conn: SqlConnectionConfig;
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
   onOpen: (id: string) => void;
+  /** A2: trigger the HEALTH re-scan to verify a fix landed (read-only). */
+  onVerify: () => void;
+  /** True while a re-scan is in flight — disables the verify breadcrumb. */
+  verifying: boolean;
 }) {
   return (
     <section className={`health-section health-section-${tone}`}>
@@ -459,7 +530,16 @@ function IssueSection({
       ) : (
         <div className="health-issue-list">
           {issues.map((iss) => (
-            <IssueCard key={iss.id} iss={iss} ui={ui} setUi={setUi} onOpen={onOpen} />
+            <IssueCard
+              key={iss.id}
+              iss={iss}
+              conn={conn}
+              ui={ui}
+              setUi={setUi}
+              onOpen={onOpen}
+              onVerify={onVerify}
+              verifying={verifying}
+            />
           ))}
         </div>
       )}
@@ -468,19 +548,20 @@ function IssueSection({
 }
 
 /**
- * Small provenance badge — observed / estimated / heuristic — with a <Term>
- * tooltip explaining the difference so we never imply fake precision. The
- * leading glyph (✓ / ○ / ⚡) is the SAME glanceable vocabulary as the metric
- * chips and the signal strip.
+ * B2: the ONE per-card confidence indicator. Collapses the former N per-chip
+ * tier glyphs into a single head-level badge — observed / estimated / heuristic
+ * — with the SAME glanceable glyph vocabulary (✓ / ○ / ⚡) and a <Term> tooltip.
+ * The per-metric source popover still lives on each chip; this is the single
+ * trust signal for the card as a whole.
  */
-function ConfidenceBadge({ confidence }: { confidence?: Confidence }) {
+function CardConfidence({ confidence }: { confidence?: Confidence }) {
   const c = confidence ?? "observed";
   return (
-    <Term k="confidence" className={`confidence-badge conf-${c}`}>
+    <Term k="confidence" className={`confidence-badge card-confidence conf-${c}`}>
       <span className="confidence-badge-glyph" aria-hidden>
         {CONF_GLYPH[c]}
       </span>
-      {c}
+      {CONF_LABEL[c]}
     </Term>
   );
 }
@@ -533,25 +614,88 @@ function SinceLastScan({ diff, onDismiss }: { diff: ScanDiff; onDismiss: () => v
   // The "headline" tone: net improvement (more resolved than new) reads up.
   const net = resolved.length - added.length;
   const tone = net > 0 ? "up" : net < 0 ? "down" : "flat";
+  // A2: the most prominent score delta across the two axes (drives the headline
+  // chip). Honest framing — this is the realized move "since last scan", not a
+  // fabricated live latency. Pick the axis that moved the most (abs delta).
+  const relD = reliability.toScore - reliability.fromScore;
+  const effD = efficiency.toScore - efficiency.fromScore;
+  const lead = Math.abs(effD) >= Math.abs(relD)
+    ? { label: "Efficiency", d: effD, leg: efficiency }
+    : { label: "Reliability", d: relD, leg: reliability };
   return (
     <div className={`since-scan tone-${tone}`} role="status">
       <div className="since-scan-row">
         <span className="since-scan-tag">Since last scan</span>
         <span className="since-scan-when">{relTime(diff.prevAt)}</span>
+        {/* A2: prominent score delta — the realized move, framed honestly. */}
+        <span
+          className={`since-scan-delta dir-${lead.d > 0 ? "up" : lead.d < 0 ? "down" : "flat"}`}
+          title={`${lead.label} moved ${lead.leg.fromScore} → ${lead.leg.toScore} since last scan`}
+        >
+          <span className="since-scan-delta-axis">{lead.label}</span>
+          <span className="since-scan-delta-num">
+            {lead.d > 0 ? "+" : ""}
+            {lead.d}
+          </span>
+          <span className="since-scan-delta-grade">
+            {lead.leg.fromGrade}
+            <span className="since-scan-arrow" aria-hidden>→</span>
+            {lead.leg.toGrade}
+          </span>
+        </span>
         <button className="since-scan-x" onClick={onDismiss} title="Dismiss" aria-label="Dismiss">
           ✕
         </button>
       </div>
       <div className="since-scan-body">
-        {/* Issue-level — the headline. */}
+        {/* Issue-level — the headline, with each resolved issue's realized win. */}
         <IssueDiffLeg kind="resolved" issues={resolved} />
         <span className="since-scan-sep" aria-hidden>·</span>
         <IssueDiffLeg kind="added" issues={added} />
         <span className="since-scan-sep" aria-hidden>·</span>
-        {/* Grade moves — the aggregate context. */}
-        <GradeLeg label="Reliability" leg={reliability} />
-        <GradeLeg label="Efficiency" leg={efficiency} />
+        {/* Grade moves — the aggregate context. B3: carry the provisional tier
+            forward so a move between two learning scans reads "provisional". */}
+        <GradeLeg
+          label="Reliability"
+          leg={reliability}
+          fromLearning={diff.fromLearning}
+          toLearning={diff.toLearning}
+        />
+        <GradeLeg
+          label="Efficiency"
+          leg={efficiency}
+          fromLearning={diff.fromLearning}
+          toLearning={diff.toLearning}
+        />
       </div>
+
+      {/* A2: per-resolved realized wins — the headline metric each fix banked,
+          pulled from that issue's PRIOR-snapshot metrics (the live report no
+          longer carries it). Honest "resolved since last scan", not live latency. */}
+      {resolved.length > 0 && (
+        <ul className="since-scan-wins">
+          {resolved.slice(0, 4).map((iss) => {
+            const win = scanlog.realizedWin(iss);
+            return (
+              <li key={iss.id} className="since-scan-win">
+                <span className="since-scan-win-check" aria-hidden>✓</span>
+                <span className="since-scan-win-title">{iss.title}</span>
+                {win && (
+                  <span className="since-scan-win-metric" title="Realized since last scan">
+                    {win}
+                  </span>
+                )}
+                <span className="since-scan-win-tag">resolved since last scan</span>
+              </li>
+            );
+          })}
+          {resolved.length > 4 && (
+            <li className="since-scan-win since-scan-win-more">
+              +{resolved.length - 4} more resolved
+            </li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }
@@ -586,19 +730,34 @@ function IssueDiffLeg({
 function GradeLeg({
   label,
   leg,
+  fromLearning,
+  toLearning,
 }: {
   label: string;
   leg: ScanDiff["reliability"];
+  /** B3: prior scan was in learning mode → its grade was provisional. */
+  fromLearning?: boolean;
+  /** B3: current scan is in learning mode → its grade is provisional. */
+  toLearning?: boolean;
 }) {
   const dir = deltaDir(leg.fromScore, leg.toScore);
   const gradeMoved = leg.fromGrade !== leg.toGrade;
+  // B3: when learning, the letter isn't trustworthy yet — render it as
+  // "provisional" so a move between two learning scans reads "provisional →
+  // provisional" instead of implying a firm grade change.
+  const fromLabel = fromLearning ? "provisional" : leg.fromGrade;
+  const toLabel = toLearning ? "provisional" : leg.toGrade;
+  const anyProvisional = fromLearning || toLearning;
   return (
-    <span className={`since-scan-grade dir-${dir}`}>
+    <span className={`since-scan-grade dir-${dir}${anyProvisional ? " provisional" : ""}`}>
       <span className="since-scan-grade-label">{label}</span>{" "}
-      <span className="since-scan-grade-val">
-        {leg.fromGrade}
+      <span
+        className="since-scan-grade-val"
+        title={anyProvisional ? "Grade is provisional while the server is still in learning mode" : undefined}
+      >
+        {fromLabel}
         <span className="since-scan-arrow" aria-hidden>→</span>
-        {leg.toGrade}
+        {toLabel}
       </span>{" "}
       <span className="since-scan-grade-detail">
         {gradeMoved
@@ -707,14 +866,22 @@ function Signal({
   monitored?: boolean;
 }) {
   // A runtime signal with no sentinel history yet: don't imply healthy-zero.
+  // B2: an unmistakable amber treatment + icon (not a muted gray "–") so this
+  // reads as "unknown, action needed", not "fine".
   if (monitored === false) {
     return (
-      <div className="health-signal not-monitored" title="No sentinel history yet — start WATCH to monitor this">
+      <div
+        className="health-signal not-monitored"
+        title="No sentinel history yet — start WATCH (continuous monitoring) to track this"
+      >
         <span className="health-signal-k">
           {term ? <Term k={term}>{label}</Term> : label}
         </span>
         <span className="health-signal-v unknown">
-          — <span className="health-signal-note">not monitored yet</span>
+          <span className="health-signal-eye" aria-hidden>
+            ◎
+          </span>
+          <span className="health-signal-note">not monitored yet</span>
         </span>
       </div>
     );
@@ -744,20 +911,36 @@ function Signal({
 
 function IssueCard({
   iss,
+  conn,
   ui,
   setUi,
   onOpen,
+  onVerify,
+  verifying,
 }: {
   iss: Issue;
+  /** Active connection — server·db scopes the per-issue fixlog (validated badge). */
+  conn: SqlConnectionConfig;
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
   onOpen: (id: string) => void;
+  /** A2: trigger a HEALTH re-scan to verify a fix landed (read-only, no DDL). */
+  onVerify: () => void;
+  verifying: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   // B2: ONE disclosure now gates the lower-density detail (consequence +
   // rationale remainder + DDL) so the resting card is just title · chips ·
   // rationale lead. Reduces the 5-6 stacked sections to a tight 3.
   const [showDetails, setShowDetails] = useState(false);
+
+  // B1: surface the user's manual "Validated ✓ (date)" assertion for this issue
+  // (tracked in IssueDetailPane, persisted per server·db·issue). Live so the
+  // badge appears the moment the user flips the toggle in the pane.
+  const fix = useSyncExternalStore(
+    fixlog.subscribe,
+    () => fixlog.get(conn.server, conn.database || undefined, iss.id),
+  );
 
   async function copy(e: React.MouseEvent) {
     e.stopPropagation(); // don't also open the detail pane
@@ -800,6 +983,26 @@ function IssueCard({
         <span className={`pill ${sevGutter}`}>{iss.severity}</span>
         <span className="advisor-kind">{kindLabel(iss.kind)}</span>
         <span className="advisor-title">{iss.title}</span>
+        {/* B2: ONE per-card confidence indicator in the head (replaces the
+            per-chip glyph density below). The per-chip source popover survives
+            on the chips themselves. */}
+        {iss.confidence && <CardConfidence confidence={iss.confidence} />}
+        {/* B1: user-asserted "Validated ✓ (date)" badge once they mark it. */}
+        {fix.validated && (
+          <span
+            className="health-validated-badge"
+            title={
+              fix.validatedAt
+                ? `You marked this fix validated on ${fmtTime(fix.validatedAt)}`
+                : "You marked this fix validated"
+            }
+          >
+            ✓ Validated
+            {fix.validatedAt && (
+              <span className="health-validated-when"> · {fmtDateShort(fix.validatedAt)}</span>
+            )}
+          </span>
+        )}
         <span className="advisor-score" title="impact rank">
           {iss.impact_rank.toLocaleString()}
         </span>
@@ -808,15 +1011,20 @@ function IssueCard({
         <code>{iss.affected_object}</code>
       </div>
 
-      {/* Evidence: first 2-3 grounded metric chips + a provenance badge. */}
-      {(iss.metrics?.length > 0 || iss.confidence) && (
+      {/* Evidence: first 2-3 grounded metric chips. B2: the per-chip tier glyph
+          is suppressed (hideGlyph) — the ONE per-card confidence indicator lives
+          in the head — but each chip keeps its source popover on click/hover. */}
+      {iss.metrics?.length > 0 && (
         <div className="metric-row">
           {(iss.metrics ?? []).slice(0, 3).map((m, i) => (
-            <MetricChip key={i} metric={m} confidence={iss.confidence} />
+            <MetricChip key={i} metric={m} confidence={iss.confidence} hideGlyph />
           ))}
-          <ConfidenceBadge confidence={iss.confidence} />
         </div>
       )}
+
+      {/* A3: heuristic-caveat parity — the SAME "⚡ Heuristic — verify/benchmark
+          before applying" note AdvisorPanel shows, on the card's View-fix path. */}
+      {iss.confidence === "heuristic" && <HeuristicNote />}
 
       {/* The inline rationale lead — the only prose at rest. */}
       {lead && <p className="health-rationale-lead">{lead}</p>}
@@ -878,7 +1086,42 @@ function IssueCard({
           </button>
         ))}
       </div>
+
+      {/* A2: persistent post-fix verify breadcrumb — after copying the fix DDL,
+          re-scan (read-only) to prove it landed. Always present so the loop is
+          obvious; sqlopt never runs the DDL itself. */}
+      <div className="verify-breadcrumb" onClick={(e) => e.stopPropagation()}>
+        <span className="verify-breadcrumb-lead">Ran the fix in your SQL client?</span>
+        <button
+          className="verify-breadcrumb-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onVerify();
+          }}
+          disabled={verifying}
+          title="Re-run the read-only HEALTH scan to confirm this issue is resolved"
+        >
+          {verifying ? "Re-scanning…" : "Next: Re-scan to verify →"}
+        </button>
+      </div>
     </div>
+  );
+}
+
+/**
+ * A3: the shared heuristic caveat — IDENTICAL wording + glyph to AdvisorPanel's
+ * `.advisor-heuristic-note`, so the ⚡ glyph carries the same meaning everywhere
+ * (columnstore recs are rule-of-thumb; verify/benchmark before applying).
+ */
+function HeuristicNote() {
+  return (
+    <p className="advisor-heuristic-note">
+      <span className="advisor-heuristic-glyph" aria-hidden>
+        {CONF_GLYPH.heuristic}
+      </span>
+      Heuristic — based on rule-of-thumb ratios, not a measured outcome. Benchmark a
+      representative query before applying.
+    </p>
   );
 }
 
@@ -985,6 +1228,23 @@ function splitRationale(text: string): { lead: string; rest: string } {
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/** Compact local date ("5/29/2026") for the inline "Validated ✓ · <date>" badge. */
+function fmtDateShort(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString();
+}
+
+/**
+ * Fractional days elapsed since an ISO timestamp (null on missing/invalid), used
+ * by the learning-mode progress bar to date the baseline from the earliest scan.
+ */
+function daysSince(iso: string | null): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, (Date.now() - t) / 86_400_000);
 }
 
 /**

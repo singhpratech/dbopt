@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
 import type {
   Confidence,
   Issue,
   IssueSeverity,
+  Metric,
   Remediation,
   RemediationStep,
   RiskLevel,
@@ -13,6 +14,7 @@ import type {
 import { MetricChip } from "./MetricChip";
 import { Term, TermText } from "./Term";
 import { CONF_GLYPH } from "../confidence";
+import * as fixlog from "../store/fixlog";
 
 /**
  * Issue Detail + Remediation — a right-side SLIDE-OVER pane (not a route, not a
@@ -43,12 +45,18 @@ export function IssueDetailPane({
   ui,
   setUi,
   onClose,
+  onVerifyRescan,
+  verifying,
 }: {
   issue: Issue;
   conn: SqlConnectionConfig;
   ui: UiPrefs;
   setUi: (u: UiPrefs) => void;
   onClose: () => void;
+  /** A2: re-run the read-only HEALTH scan to verify the fix landed (no DDL). */
+  onVerifyRescan?: () => void;
+  /** True while that re-scan is in flight — disables the verify breadcrumb. */
+  verifying?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [rem, setRem] = useState<Remediation | null>(null);
@@ -152,6 +160,19 @@ export function IssueDetailPane({
             <ConfidenceBadge confidence={issue.confidence} />
           </div>
         )}
+
+        {/* A3: heuristic-caveat parity — the SAME "⚡ Heuristic — verify/benchmark
+            before applying" note AdvisorPanel uses, so the ⚡ glyph means the same
+            thing on the View-fix path (columnstore candidates). */}
+        {issue.confidence === "heuristic" && (
+          <p className="advisor-heuristic-note">
+            <span className="advisor-heuristic-glyph" aria-hidden>
+              {CONF_GLYPH.heuristic}
+            </span>
+            Heuristic — based on rule-of-thumb ratios, not a measured outcome. Benchmark a
+            representative query before applying.
+          </p>
+        )}
       </div>
 
       {/* ── Body ───────────────────────────────────────── */}
@@ -164,9 +185,25 @@ export function IssueDetailPane({
         ) : err ? (
           <div className="form-status err issue-detail-err">{err}</div>
         ) : rem ? (
-          <RemediationView rem={rem} />
+          <RemediationView rem={rem} issue={issue} conn={conn} />
         ) : null}
       </div>
+
+      {/* A2: persistent post-fix verify breadcrumb — after copying the fix DDL,
+          re-scan (read-only) to prove it landed. sqlopt never runs the DDL. */}
+      {onVerifyRescan && (
+        <div className="verify-breadcrumb issue-detail-verify">
+          <span className="verify-breadcrumb-lead">Ran the fix in your SQL client?</span>
+          <button
+            className="verify-breadcrumb-btn"
+            onClick={onVerifyRescan}
+            disabled={verifying}
+            title="Re-run the read-only HEALTH scan to confirm this issue is resolved"
+          >
+            {verifying ? "Re-scanning…" : "Next: Re-scan to verify →"}
+          </button>
+        </div>
+      )}
 
       {/* ── Action footer ──────────────────────────────── */}
       <div className="issue-detail-footer">
@@ -186,9 +223,33 @@ export function IssueDetailPane({
   );
 }
 
-/** The body sections rendered in because-before-fix order. */
-function RemediationView({ rem }: { rem: Remediation }) {
+/**
+ * The body sections rendered in because-before-fix order.
+ *
+ * B1 threads `issue` + `conn` through so the Solution steps become an
+ * EXECUTION-FREE interactive checklist (ticks persisted per server·db·issue in
+ * the fixlog store), the Pre-flight PREVIEW can summarize the DDL + cost chips +
+ * rollback, and a manual "Mark validated" toggle records the user's own "I ran
+ * + verified this" assertion. None of this runs anything against the database.
+ */
+function RemediationView({
+  rem,
+  issue,
+  conn,
+}: {
+  rem: Remediation;
+  issue: Issue;
+  conn: SqlConnectionConfig;
+}) {
   const hasLadder = !!rem.solutions && rem.solutions.length > 0;
+  const db = conn.database || undefined;
+
+  // Live fixlog entry for this issue (re-renders on tick / validate / reset).
+  const fix = useSyncExternalStore(
+    fixlog.subscribe,
+    () => fixlog.get(conn.server, db, issue.id),
+  );
+
   return (
     <>
       <Section title="Diagnosis" tone="diagnosis">
@@ -198,10 +259,19 @@ function RemediationView({ rem }: { rem: Remediation }) {
       </Section>
 
       <Section title="Solution" tone="solution">
+        {/* B1: solution steps as a PERSISTED checklist — the user ticks each off
+            as they work it in their own SQL client. No execution; pure tracking. */}
         {rem.solution_steps.length > 0 && (
-          <ol className="issue-steps">
+          <ol className="issue-steps issue-steps-checklist">
             {rem.solution_steps.map((s, i) => (
-              <StepItem key={i} step={s} />
+              <StepItem
+                key={i}
+                step={s}
+                index={i}
+                done={fix.stepsDone.includes(i)}
+                onToggle={() => fixlog.toggleStep(conn.server, db, issue.id, i)}
+                trackable={!!conn.server}
+              />
             ))}
           </ol>
         )}
@@ -227,6 +297,11 @@ function RemediationView({ rem }: { rem: Remediation }) {
         )}
       </Section>
 
+      {/* B1: PRE-FLIGHT PREVIEW — what the fix DDL will do, its cost chips, and
+          the rollback, with the explicit "you run this — sqlopt does not execute"
+          line. Purely informational; renders only when there's DDL to preview. */}
+      {rem.fix_sql && <PreflightPreview rem={rem} issue={issue} />}
+
       <Section title="Apply safely" tone="apply">
         <Checklist items={rem.apply_safely} />
         {/* Honest about the safety boundary (playbook §7): copy-and-run means
@@ -235,6 +310,18 @@ function RemediationView({ rem }: { rem: Remediation }) {
           You run these yourself. sqlopt ships the script + validation steps — it does NOT auto-apply
           or auto-revert in v1, so you own monitoring the change.
         </p>
+      </Section>
+
+      {/* B1: MARK VALIDATED — a manual, persisted "I ran the fix + verified it"
+          assertion. NOT an executed check; it just records the user's own state
+          and surfaces a "Validated ✓ (date)" badge back on the HEALTH card. */}
+      <Section title="Mark validated" tone="validated">
+        <MarkValidated
+          validated={fix.validated}
+          validatedAt={fix.validatedAt}
+          disabled={!conn.server}
+          onToggle={(v) => fixlog.setValidated(conn.server, db, issue.id, v)}
+        />
       </Section>
 
       <Section title="Validate" tone="validate">
@@ -481,12 +568,41 @@ function Section({
   );
 }
 
-function StepItem({ step }: { step: RemediationStep }) {
+/**
+ * One solution step. B1: now an EXECUTION-FREE checklist item — a checkbox the
+ * user ticks as they work the step in their own SQL client. The done state is
+ * persisted (fixlog) per server·db·issue. When `trackable` is false (no active
+ * server) the checkbox is omitted — there's nothing to key the persistence to.
+ */
+function StepItem({
+  step,
+  index,
+  done,
+  onToggle,
+  trackable,
+}: {
+  step: RemediationStep;
+  index: number;
+  done: boolean;
+  onToggle: () => void;
+  trackable: boolean;
+}) {
   return (
-    <li className="issue-step">
-      <span className="issue-step-title">
-        <TermText>{step.title}</TermText>
-      </span>
+    <li className={`issue-step${done ? " step-done" : ""}`}>
+      <label className="issue-step-check">
+        {trackable && (
+          <input
+            type="checkbox"
+            className="issue-step-box"
+            checked={done}
+            onChange={onToggle}
+            aria-label={`Mark step ${index + 1} done`}
+          />
+        )}
+        <span className="issue-step-title">
+          <TermText>{step.title}</TermText>
+        </span>
+      </label>
       {step.detail && (
         <span className="issue-step-detail">
           <TermText>{step.detail}</TermText>
@@ -500,6 +616,126 @@ function StepItem({ step }: { step: RemediationStep }) {
       )}
     </li>
   );
+}
+
+/**
+ * B1: PRE-FLIGHT PREVIEW — a small, purely-informational section that previews
+ * exactly what the fix DDL will do BEFORE the user runs it themselves. It shows:
+ *   • the fix DDL (copyable),
+ *   • cost chips derived from the issue's existing metrics (index size / tempdb /
+ *     write overhead) — no new measurement, just the grounded chips we already
+ *     hold, framed as the COST of applying,
+ *   • the rollback (so the undo path is visible before committing), and
+ *   • an explicit "Run this in your SQL client — sqlopt does not execute changes"
+ *     line so the execution boundary is unmistakable.
+ * sqlopt executes nothing here — this is a read-only preview.
+ */
+function PreflightPreview({ rem, issue }: { rem: Remediation; issue: Issue }) {
+  const costs = costChips(issue);
+  return (
+    <Section title="Pre-flight — preview before you run it" tone="preflight">
+      <p className="preflight-lead">
+        This is exactly what the fix will do. sqlopt does not run it — you apply it yourself.
+      </p>
+
+      {rem.fix_sql && (
+        <div className="preflight-block">
+          <div className="preflight-block-h">DDL to run</div>
+          <div className="ddl-wrap">
+            <CopyButton sql={rem.fix_sql} label="Copy" />
+            <pre className="ddl">{rem.fix_sql}</pre>
+          </div>
+        </div>
+      )}
+
+      {costs.length > 0 && (
+        <div className="preflight-block">
+          <div className="preflight-block-h">Cost of applying</div>
+          <div className="metric-row preflight-costs">
+            {costs.map((m, i) => (
+              <MetricChip key={i} metric={m} confidence={issue.confidence} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {rem.rollback.length > 0 && (
+        <div className="preflight-block">
+          <div className="preflight-block-h">Rollback if needed</div>
+          <Checklist items={rem.rollback} />
+        </div>
+      )}
+
+      <p className="preflight-boundary">
+        <span className="preflight-boundary-glyph" aria-hidden>
+          ⌘
+        </span>
+        Run this in your SQL client (SSMS / sqlcmd) — <strong>sqlopt does not execute changes.</strong>
+      </p>
+    </Section>
+  );
+}
+
+/**
+ * B1: MARK VALIDATED — the manual, execution-free "I ran + verified this fix"
+ * toggle. Persisted per server·db·issue (fixlog). When ON it shows a
+ * "Validated ✓ (date)" line (the same badge surfaces on the HEALTH issue card).
+ * This asserts nothing about the database — it's the user's own bookkeeping.
+ */
+function MarkValidated({
+  validated,
+  validatedAt,
+  disabled,
+  onToggle,
+}: {
+  validated: boolean;
+  validatedAt: string | null;
+  disabled: boolean;
+  onToggle: (v: boolean) => void;
+}) {
+  return (
+    <div className="mark-validated">
+      <label className={`mark-validated-toggle${validated ? " on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={validated}
+          disabled={disabled}
+          onChange={(e) => onToggle(e.target.checked)}
+          aria-label="Mark this fix as validated"
+        />
+        <span className="mark-validated-label">
+          {validated ? "Validated ✓" : "Mark validated"}
+        </span>
+      </label>
+      {validated && validatedAt && (
+        <span className="mark-validated-when">Validated {fmtDate(validatedAt)}</span>
+      )}
+      <p className="mark-validated-note">
+        A manual record that you ran the fix in your SQL client and verified it — sqlopt does not
+        execute or check anything for you.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Derive the "cost of applying" chips from the issue's existing metrics — never
+ * a new measurement. Prefers chips whose label signals a COST (size / tempdb /
+ * write / overhead / maintenance); falls back to the first couple of grounded
+ * metrics so the preview is never empty when evidence exists.
+ */
+function costChips(issue: Issue): Metric[] {
+  const metrics = issue.metrics ?? [];
+  if (metrics.length === 0) return [];
+  const COST = /\b(size|kb|mb|gb|tb|tempdb|write|writes|overhead|maintenance|fragment|rebuild)\b/i;
+  const costy = metrics.filter((m) => COST.test(m.label) || COST.test(m.value));
+  return (costy.length > 0 ? costy : metrics).slice(0, 3);
+}
+
+/** Friendly absolute date for the "Validated ✓ (date)" line. */
+function fmtDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString();
 }
 
 /** One rung of the ranked ladder — benefit (estimated_impact) beside cost (notes). */

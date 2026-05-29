@@ -73,6 +73,11 @@ const NAV_SECTIONS: { group: NavGroup; items: typeof WORKSPACES }[] = (
   ["START", "OPERATE", "INSPECT", "SETUP"] as NavGroup[]
 ).map((group) => ({ group, items: WORKSPACES.filter((w) => w.group === group) }));
 
+// Pass 5 A1: the chart workspaces whose empty state pulls a live DMV bundle in
+// place (vs. routing to CONN). Entering one with a connection + null dmv triggers
+// an auto-pull. PLAN/SEV are SQL/plan-driven, not DMV-driven, so they're absent.
+const DMV_CHART_WORKSPACES: Workspace[] = ["indexes", "sizes"];
+
 export function App() {
   // ── Persistent state ────────────────────────────────
   const [ui, setUi] = useState<P.UiPrefs>(() => ({
@@ -114,6 +119,13 @@ export function App() {
 
   // ── Runtime state ───────────────────────────────────
   const [dmv, setDmv] = useState<unknown>(null);
+  // Pass 5 A1: in-workspace DMV pull. The chart workspaces (PLAN/INDEX/SIZE/SEV)
+  // used to bounce the user to CONN; instead they pull the DMV bundle IN PLACE.
+  // `dmvLoading` drives the empty-state "Pulling DMVs…" spinner; `dmvErr` shows
+  // an inline retry (NOT a redirect). pullDmvInline() sets the bundle and the
+  // existing analyzer effect (keyed on `dmv`) regenerates report.charts.
+  const [dmvLoading, setDmvLoading] = useState(false);
+  const [dmvErr, setDmvErr] = useState<string | null>(null);
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
@@ -151,6 +163,15 @@ export function App() {
     if (!conn.remember_password) toStore.password = "";
     P.save("conn", toStore);
   }, [conn]);
+
+  // A new server·db is a new DMV scope: drop any prior bundle + inline error so
+  // a chart never shows another server's telemetry and the auto-pull can re-fire.
+  useEffect(() => {
+    setDmv(null);
+    setDmvErr(null);
+    // Only on identity change of the active server/database.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn.server, conn.database]);
 
   // Reflect edits to the active connection back into its saved profile, and
   // persist the profile list. Keeps the active server in sync as it's tweaked.
@@ -284,6 +305,51 @@ export function App() {
     reader.readAsText(file);
   }
 
+  // ── In-workspace DMV pull (Pass 5 A1) ───────────────
+  // Pull the DMV bundle IN PLACE from a chart workspace. Mirrors the CONN-path
+  // pull but keeps the user where they are: on success setDmv(bundle) → the
+  // analyzer effect (keyed on dmv) rebuilds report.charts; on failure we surface
+  // an inline error so the chart's empty state can offer Retry. Returns nothing;
+  // callers just trigger it. A live `dmvLoading` guard prevents double-pulls.
+  async function pullDmvInline() {
+    if (!conn.server || dmvLoading) return;
+    setDmvLoading(true);
+    setDmvErr(null);
+    try {
+      const info = {
+        server: conn.server,
+        database: conn.database || undefined,
+        user: conn.auth_mode === "sql" ? conn.user : undefined,
+        password: conn.auth_mode === "sql" ? conn.password : undefined,
+        trust_cert: conn.trust_cert,
+      };
+      const bundle = await backend.pullDmv(info as any);
+      setDmv(bundle);
+    } catch (e: any) {
+      setDmvErr(e?.message ?? String(e));
+    } finally {
+      setDmvLoading(false);
+    }
+  }
+
+  // Auto-pull on first entry to a chart workspace when connected and dmv is null.
+  // Keyed on the workspace + connection + whether dmv exists; the dmvLoading /
+  // dmvErr guards (inside pullDmvInline and here) stop it from looping or
+  // hammering after a failure (the user retries explicitly via the inline button).
+  useEffect(() => {
+    if (
+      DMV_CHART_WORKSPACES.includes(ui.workspace) &&
+      !!conn.server &&
+      dmv == null &&
+      !dmvLoading &&
+      !dmvErr
+    ) {
+      void pullDmvInline();
+    }
+    // pullDmvInline is stable enough for this guard set; deps are the real inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ui.workspace, conn.server, dmv, dmvLoading, dmvErr]);
+
   const [explainBusy, setExplainBusy] = useState(false);
   const [explainErr, setExplainErr] = useState<string | null>(null);
 
@@ -365,7 +431,13 @@ export function App() {
               </span>
             )}
           </div>
-          {dmv ? (
+          {dmvLoading ? (
+            <div className="group">
+              <span className="dot busy" />
+              <span className="k">dmv</span>
+              <span className="v">PULLING…</span>
+            </div>
+          ) : dmv ? (
             <div className="group">
               <span className="dot ok" />
               <span className="k">dmv</span>
@@ -515,6 +587,8 @@ export function App() {
                 data={report?.charts.plan_treemap ?? []}
                 theme={ui.theme}
                 action={{ label: "Generate from SQL", onClick: () => setUi({ ...ui, workspace: "analyze" }) }}
+                loading={dmvLoading}
+                error={dmvErr}
               />
             </ChartContainer>
           </Workspace>
@@ -526,7 +600,13 @@ export function App() {
               <IndexHeatmap
                 data={report?.charts.index_heatmap ?? []}
                 theme={ui.theme}
-                action={{ label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }}
+                action={
+                  conn.server
+                    ? { label: "Pull now", onClick: () => void pullDmvInline() }
+                    : { label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }
+                }
+                loading={dmvLoading}
+                error={dmvErr}
               />
             </ChartContainer>
           </Workspace>
@@ -538,7 +618,13 @@ export function App() {
               <SizeTreemap
                 data={report?.charts.size_treemap ?? []}
                 theme={ui.theme}
-                action={{ label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }}
+                action={
+                  conn.server
+                    ? { label: "Pull now", onClick: () => void pullDmvInline() }
+                    : { label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }
+                }
+                loading={dmvLoading}
+                error={dmvErr}
               />
             </ChartContainer>
           </Workspace>
@@ -551,6 +637,8 @@ export function App() {
                 data={report?.charts.severity_timeline ?? []}
                 theme={ui.theme}
                 action={{ label: "Paste T-SQL to analyze", onClick: () => setUi({ ...ui, workspace: "analyze" }) }}
+                loading={dmvLoading}
+                error={dmvErr}
               />
             </ChartContainer>
           </Workspace>

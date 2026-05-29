@@ -1648,6 +1648,51 @@ kbd {
   border-color: var(--line-strong);
 }
 
+/* ── A2: post-fix verify breadcrumb — the "did the fix work?" loop ──
+   A persistent strip on each issue card (and the detail pane) that re-runs the
+   READ-ONLY HEALTH scan. sqlopt never executes the fix DDL itself, so the lead
+   text frames it as "ran it yourself?". Signal-tinted so it reads as the
+   recommended next step without shouting like a primary CTA. */
+.verify-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+.verify-breadcrumb-lead {
+  font: 11px var(--f-sans);
+  color: var(--text-muted);
+}
+.verify-breadcrumb-btn {
+  padding: 5px 12px;
+  background: var(--signal-faint);
+  border: 1px solid var(--signal-dim);
+  border-radius: 4px;
+  color: var(--signal);
+  font: 600 11px var(--f-tech);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.verify-breadcrumb-btn:hover:not(:disabled) {
+  background: var(--signal-glow);
+  border-color: var(--signal);
+}
+.verify-breadcrumb-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* In the slide-over the breadcrumb sits above the action footer; give it a
+   matching horizontal pad so it lines up with the footer buttons. */
+.issue-detail-verify {
+  flex: 0 0 auto;
+  padding: 10px 20px 0;
+  margin-top: 0;
+  background: var(--bg-elev);
+}
+
 /* ============================================================
    Issue Detail + Remediation — right-side SLIDE-OVER pane.
    Renders ONE Remediation uniformly (advisor templated or
@@ -2369,6 +2414,32 @@ kbd {
   color: var(--text-muted);
 }
 
+/* ── A1: in-place DMV pull — loading + inline error states ──────── */
+.empty-card.empty-loading {
+  border-style: solid;
+  border-color: var(--line-strong);
+}
+.empty-spinner {
+  width: 26px;
+  height: 26px;
+  margin: 0 auto 16px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--signal);
+  border-radius: 50%;
+  animation: advisor-spin 0.7s linear infinite;
+}
+/* Inline pull failure — keeps the user in place; the action becomes "Retry". */
+.empty-error {
+  margin-top: 12px;
+  padding: 7px 10px;
+  font: 11px/1.5 var(--f-mono);
+  color: var(--crit);
+  background: var(--crit-glow);
+  border-left: 2px solid var(--crit);
+  text-align: left;
+  word-break: break-word;
+}
+
 /* Inline text-button (looks like a link, sits in prose). */
 .link-inline {
   background: none;
@@ -2777,6 +2848,79 @@ kbd {
 .since-scan-grade.dir-down .since-scan-grade-val,
 .since-scan-grade.dir-down .since-scan-grade-detail { color: var(--crit); }
 
+/* ── A2: prominent score delta in the "Since last scan" head row ──── */
+.since-scan-delta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: 4px;
+  padding: 2px 9px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-void);
+  font-variant-numeric: tabular-nums;
+}
+.since-scan-delta-axis {
+  font: 600 9px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.since-scan-delta-num {
+  font: 700 14px var(--f-mono);
+  color: var(--text-strong);
+}
+.since-scan-delta-grade {
+  font: 11px var(--f-mono);
+  color: var(--text-muted);
+}
+.since-scan-delta.dir-up   { border-color: var(--ok);   background: rgba(58, 210, 159, 0.10); }
+.since-scan-delta.dir-up   .since-scan-delta-num { color: var(--ok); }
+.since-scan-delta.dir-down { border-color: var(--crit); background: rgba(255, 58, 74, 0.09); }
+.since-scan-delta.dir-down .since-scan-delta-num { color: var(--crit); }
+
+/* ── A2: per-resolved "realized win" list under the diff strip ───── */
+.since-scan-wins {
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.since-scan-win {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font: 12px var(--f-sans);
+}
+.since-scan-win-check {
+  flex: none;
+  color: var(--ok);
+  font: 12px var(--f-mono);
+}
+.since-scan-win-title { color: var(--text); }
+.since-scan-win-metric {
+  font: 600 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ok);
+  background: rgba(58, 210, 159, 0.10);
+  padding: 1px 7px;
+  border-radius: 3px;
+}
+.since-scan-win-tag {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.since-scan-win-more {
+  font: 11px var(--f-sans);
+  color: var(--text-muted);
+}
+
 /* ── Scan history — collapsible trend table (durable proof) ────────── */
 .scan-history {
   margin-top: 22px;
@@ -2947,3 +3091,251 @@ kbd {
 @media (max-width: 768px) {
   .help-panel { width: 100vw; }
 }
+
+/* ============================================================
+   PASS 5 PHASE B — interactive (execution-free) fix workflow
+   + clarity polish.
+     B1 step checklist + Mark-validated + Pre-flight preview + card badge
+     B2 thick severity gutter · amber "not monitored" · single per-card conf
+     B3 learning progress bar · provisional carry-forward · Sentinel help
+   ============================================================ */
+
+/* ── B1: solution-step CHECKLIST (IssueDetailPane) ──────────
+   The remediation's solution steps become an execution-FREE checklist the user
+   ticks as they work the fix in their own SQL client. Drops the <ol> marker
+   (the checkbox is the leading affordance) and strikes a completed step. */
+.issue-steps-checklist { padding-left: 2px; list-style: none; }
+.issue-step-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+.issue-step-box {
+  flex: none;
+  margin-top: 2px;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--signal);
+  cursor: pointer;
+}
+.issue-step.step-done .issue-step-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dim);
+}
+.issue-step.step-done .issue-step-detail { opacity: 0.7; }
+
+/* ── B1: PRE-FLIGHT preview section (IssueDetailPane) ────────
+   Read-only preview of exactly what the fix DDL will do + cost chips + rollback
+   + the explicit "sqlopt does not execute changes" boundary. */
+.issue-section-preflight .issue-section-h { border-left-color: var(--info-sev); }
+.preflight-lead {
+  margin: 0 0 12px;
+  font: 12px/1.55 var(--f-sans);
+  color: var(--text-muted);
+}
+.preflight-block { margin-top: 14px; }
+.preflight-block:first-of-type { margin-top: 0; }
+.preflight-block-h {
+  font: 9px var(--f-tech);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 7px;
+}
+.preflight-block .ddl-wrap { margin-top: 0; }
+.preflight-costs { margin-top: 0; }
+.preflight-boundary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.08);
+  border: 1px solid rgba(255, 209, 102, 0.4);
+  border-left: 2px solid var(--warn);
+}
+.preflight-boundary strong { color: var(--warn); }
+.preflight-boundary-glyph {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--warn);
+}
+
+/* ── B1: MARK VALIDATED toggle (IssueDetailPane) ────────────
+   A manual user assertion (no execution). The label flips to "Validated ✓" and
+   the section shows the date; the same state surfaces as a card badge. */
+.issue-section-validated .issue-section-h { border-left-color: var(--ok); }
+.mark-validated { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.mark-validated-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--bg-elev);
+  cursor: pointer;
+  font: 12px var(--f-sans);
+  color: var(--text);
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.mark-validated-toggle:hover { border-color: var(--ok); }
+.mark-validated-toggle input { accent-color: var(--ok); cursor: pointer; }
+.mark-validated-toggle.on {
+  border-color: var(--ok);
+  background: rgba(58, 210, 159, 0.1);
+  color: var(--ok);
+}
+.mark-validated-label { font-weight: 600; }
+.mark-validated-when {
+  font: 11px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ok);
+}
+.mark-validated-note {
+  flex: 1 1 100%;
+  margin: 2px 0 0;
+  font: 11px/1.5 var(--f-sans);
+  color: var(--text-muted);
+}
+
+/* ── B1: "Validated ✓ (date)" badge on the HEALTH issue card head ── */
+.health-validated-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid rgba(58, 210, 159, 0.5);
+  border-radius: 999px;
+  background: rgba(58, 210, 159, 0.12);
+  color: var(--ok);
+  font: 600 10px var(--f-tech);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.health-validated-when {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ok);
+  opacity: 0.85;
+}
+
+/* ── B2: thicker, edge-prominent severity LEFT gutter on HEALTH cards ──
+   A solid ~4px full-height severity rail (Linear/Datadog feel) — replaces the
+   faint 3px tint with full-strength severity color. */
+.health-issue-gutter {
+  border-left-width: 4px;
+  position: relative;
+}
+.health-issue.gutter-crit { border-left-color: var(--crit); }
+.health-issue.gutter-warn { border-left-color: var(--warn); }
+.health-issue.gutter-dim  { border-left-color: var(--info-sev); }
+/* Keep the focus/hover signal accent winning over the resting gutter color. */
+.health-issue-gutter:hover,
+.health-issue-gutter:focus-visible { border-left-color: var(--signal); }
+
+/* ── B2: single per-card confidence indicator in the card head ──
+   The former N per-chip glyphs collapse to ONE badge; nudge it left of the
+   impact-rank score so the head reads severity · kind · title · conf · rank. */
+.card-confidence { margin-left: auto; }
+.card-confidence + .advisor-score,
+.health-validated-badge + .advisor-score { margin-left: 8px; }
+.advisor-card-head .health-validated-badge { margin-left: 8px; }
+
+/* ── B2: "not monitored yet" — amber + icon (not a muted gray "–") ──
+   Reads as "unknown, action needed", never as a reassuring zero. */
+.health-signal.not-monitored {
+  cursor: help;
+  background: rgba(255, 209, 102, 0.07);
+}
+.health-signal-v.unknown {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--warn);
+  font-style: normal;
+}
+.health-signal-eye {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--warn);
+}
+.health-signal.not-monitored .health-signal-note {
+  color: var(--warn);
+  opacity: 0.95;
+}
+
+/* ── B3: learning-mode PROGRESS BAR ─────────────────────────
+   A concrete "grades firm up in ~N more days" gauge, dated from the earliest
+   scanlog snapshot for this server·db. Sits inside the amber learning banner. */
+.health-learning-progress {
+  display: block;
+  margin-top: 9px;
+}
+.health-learning-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 209, 102, 0.18);
+  overflow: hidden;
+}
+.health-learning-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--warn);
+  transition: width 0.3s ease;
+}
+.health-learning-progress .health-learning-eta { margin-top: 6px; }
+
+/* ── B3: provisional carry-forward on the since-last-scan grade line ──
+   When either side of the diff was in learning mode, the grade text reads
+   "provisional → provisional" in the warn tone rather than a firm A→B. */
+.since-scan-grade.provisional .since-scan-grade-val {
+  color: var(--warn);
+  font-style: italic;
+}
+
+/* ── B3: HelpPanel — Continuous monitoring (Sentinel) section ── */
+.help-sentinel {
+  margin-bottom: 26px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--info-sev);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+.help-sentinel .help-section-title { margin-bottom: 8px; }
+.help-sentinel-lead {
+  margin: 0 0 10px;
+  font: 12px/1.6 var(--f-sans);
+  color: var(--text);
+}
+.help-sentinel-lead:last-of-type { margin-bottom: 0; }
+.help-sentinel code {
+  font: 11px var(--f-mono);
+  color: var(--text-strong);
+  background: var(--bg-void);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.help-sentinel-why {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  font: 11px/1.6 var(--f-sans);
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.08);
+  border-left: 2px solid var(--warn);
+  border-radius: 3px;
+}
+.help-sentinel-why strong { color: var(--warn); }
+.help-sentinel-why .health-signal-eye { flex: none; }

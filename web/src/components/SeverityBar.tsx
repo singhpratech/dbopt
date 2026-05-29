@@ -7,13 +7,17 @@ export function SeverityBar({
   data,
   theme,
   action,
+  loading,
+  error,
 }: {
   data: SeverityBucket[];
   theme?: string;
   action?: { label: string; onClick: () => void };
+  loading?: boolean;
+  error?: string | null;
 }) {
   if (!data || data.length === 0) {
-    return <EmptyChart glyph="≡" title="No SQL to evaluate" hint="Paste T-SQL into the editor to see per-line severity distribution." action={action} />;
+    return <EmptyChart glyph="≡" title="No SQL to evaluate" hint="Paste T-SQL into the editor to see per-line severity distribution." action={action} loading={loading} error={error} />;
   }
   const c = chartPalette(theme);
   const lines = data.map((d) => `${d.line}`);

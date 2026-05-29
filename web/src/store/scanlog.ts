@@ -15,17 +15,31 @@
  */
 
 import { load, save } from "./persist";
-import type { HealthReport } from "../api/backend";
+import type { HealthReport, Metric } from "../api/backend";
 
 /** How many snapshots we retain per server·db. Oldest beyond this is dropped. */
 const MAX_SNAPSHOTS = 10;
 
 const KEY = "scanlog";
 
-/** A single issue distilled to what a diff needs (id for identity, title for prose). */
+/**
+ * A single issue distilled to what a diff needs. Beyond id+title (identity +
+ * prose), Pass 5 A2 captures the headline EVIDENCE so a RESOLVED issue can show
+ * its realized win ("~53.9 GB now compressible / reclaimed") from the PRIOR
+ * snapshot's metrics — the live report no longer carries the gone issue.
+ *
+ * `metrics` / `kind` / `affected_object` are OPTIONAL so snapshots persisted by
+ * earlier builds (id+title only) still parse + diff. Phase B's fixlog should key
+ * the same way (server·db·issue-id) and may reuse these captured metrics.
+ */
 export interface SnapshotIssue {
   id: string;
   title: string;
+  /** Issue.kind at capture time — lets the diff pick the right "realized win" metric. */
+  kind?: string;
+  /** Grounded evidence chips at capture time (reclaimable GB/MB, writes, …). */
+  metrics?: Metric[];
+  affected_object?: string;
 }
 
 /** One captured HEALTH scan, trimmed to the fields the audit trail needs. */
@@ -108,6 +122,17 @@ export function latest(server: string, database?: string): ScanSnapshot | null {
   return history(server, database)[0] ?? null;
 }
 
+/**
+ * ISO timestamp of the EARLIEST retained snapshot for a server·db (history is
+ * newest-first, so this is the last element), or null if there's no trail yet.
+ * Phase B's learning-mode progress bar ("grades firm up in ~N more days") is
+ * computed from how long ago we first saw this database.
+ */
+export function earliestAt(server: string, database?: string): string | null {
+  const h = history(server, database);
+  return h.length > 0 ? h[h.length - 1].at : null;
+}
+
 /** Distill a live HealthReport into the trimmed snapshot we persist. */
 function toSnapshot(report: HealthReport): ScanSnapshot {
   return {
@@ -117,7 +142,15 @@ function toSnapshot(report: HealthReport): ScanSnapshot {
     efficiency_score: report.efficiency_score,
     efficiency_grade: report.efficiency_grade ?? "?",
     is_learning: report.is_learning === true,
-    issues: (report.issues ?? []).map((i) => ({ id: i.id, title: i.title })),
+    issues: (report.issues ?? []).map((i) => ({
+      id: i.id,
+      title: i.title,
+      kind: i.kind,
+      affected_object: i.affected_object,
+      // Capture the evidence chips so a future scan can show the realized win of
+      // an issue that's since been RESOLVED (it won't be in the live report then).
+      metrics: i.metrics ?? [],
+    })),
   };
 }
 
@@ -170,6 +203,14 @@ export interface ScanDiff {
   efficiency: AxisDiff;
   /** ISO timestamp of the prior scan we diffed against (for "since <time>"). */
   prevAt: string;
+  /**
+   * B3: was the PRIOR scan still in learning mode? Lets the "since last scan"
+   * grade line carry the provisional tier forward ("provisional → provisional")
+   * so a grade move between two learning scans isn't read as a firm change.
+   */
+  fromLearning: boolean;
+  /** B3: is the CURRENT scan still in learning mode? */
+  toLearning: boolean;
 }
 
 /**
@@ -204,5 +245,42 @@ export function diff(prev: ScanSnapshot, report: HealthReport): ScanDiff {
       toScore: now.efficiency_score,
     },
     prevAt: prev.at,
+    fromLearning: prev.is_learning === true,
+    toLearning: now.is_learning === true,
   };
+}
+
+/**
+ * The realized-win headline for a RESOLVED issue, drawn from the metrics we
+ * captured in the PRIOR snapshot (the live report no longer carries it). Picks
+ * the most outcome-shaped chip — a storage figure (GB/MB reclaimed/compressible)
+ * for columnstore/unused/duplicate, else the first grounded metric — and frames
+ * it as a banked result, NOT a fabricated live measurement.
+ *
+ * Returns null when the resolved issue carried no captured metrics (older
+ * snapshots, or issues with no evidence), so callers can fall back to the title.
+ */
+export function realizedWin(iss: SnapshotIssue): string | null {
+  const metrics = iss.metrics ?? [];
+  if (metrics.length === 0) return null;
+
+  // Prefer a storage-shaped metric (the most legible "reclaimed" win).
+  const storage = metrics.find((m) => /\b(GB|MB|TB|KB)\b/i.test(m.value));
+  const headline = storage ?? metrics[0];
+  const v = headline.value.trim();
+
+  const kind = iss.kind ?? "";
+  if (kind === "columnstore_candidate" && storage) {
+    return `~${stripLeadingTilde(v)} now compressible / reclaimable`;
+  }
+  if ((kind === "unused_index" || kind === "duplicate_index") && storage) {
+    return `~${stripLeadingTilde(v)} reclaimed`;
+  }
+  // Generic: surface the captured chip verbatim (label: value) — honest, no spin.
+  return `${headline.label}: ${v}`;
+}
+
+/** Avoid "~~53.9 GB" when a captured value already starts with a tilde. */
+function stripLeadingTilde(s: string): string {
+  return s.replace(/^~\s*/, "");
 }

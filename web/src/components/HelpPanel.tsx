@@ -177,6 +177,34 @@ export function HelpPanel({
             </p>
           </section>
 
+          {/* B3: Continuous monitoring (Sentinel) — explains WATCH/Sentinel and
+              why the runtime signals read "not monitored yet" until it's run. */}
+          <section className="help-sentinel" aria-label="Continuous monitoring (Sentinel)">
+            <h3 className="help-section-title">Continuous monitoring (Sentinel)</h3>
+            <p className="help-sentinel-lead">
+              A one-off scan reads SQL Server's <strong>current</strong> DMV counters — great for
+              structural issues (missing / unused / duplicate indexes, columnstore candidates),
+              which are always measurable on the spot. But <strong>runtime</strong> problems —
+              deadlocks, blocking, harmful waits, query regressions — only show up over TIME. A
+              single snapshot can't see a deadlock that happened last Tuesday at 2am.
+            </p>
+            <p className="help-sentinel-lead">
+              <strong>Sentinel</strong> (started with <code>WATCH</code>) is sqlopt's continuous
+              poller. It samples those views on an interval and keeps a local time-series in{" "}
+              <code>~/.sqlopt/sentinel.db</code>, so runtime pain accumulates into real history you
+              can grade against — and into the weekly pain report.
+            </p>
+            <p className="help-sentinel-why">
+              <span className="health-signal-eye" aria-hidden>
+                ◎
+              </span>
+              That's why runtime signals say <em>“not monitored yet”</em> instead of a reassuring{" "}
+              <strong>0</strong>: with no Sentinel history, the absence of a deadlock isn't proof
+              there were none — we just haven't been watching. Start Sentinel and let it run; the
+              learning-mode banner shows how long until grades firm up (~7 days of baseline).
+            </p>
+          </section>
+
           <section className="help-glossary">
             <div className="help-glossary-head">
               <h3 className="help-section-title">Glossary</h3>

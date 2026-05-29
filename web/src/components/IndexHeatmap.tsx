@@ -7,18 +7,24 @@ export function IndexHeatmap({
   data,
   theme,
   action,
+  loading,
+  error,
 }: {
   data: HeatmapCell[];
   theme?: string;
   action?: { label: string; onClick: () => void };
+  loading?: boolean;
+  error?: string | null;
 }) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
         glyph="◰"
         title="No index telemetry"
-        hint="Connect to a SQL Server instance from the Connection workspace and run 'Pull DMVs & analyze' to populate sys.dm_db_index_usage_stats."
+        hint="Pull live DMVs to populate sys.dm_db_index_usage_stats — reads vs writes per index, in place."
         action={action}
+        loading={loading}
+        error={error}
       />
     );
   }
@@ -36,6 +42,8 @@ export function IndexHeatmap({
         title="No index usage yet"
         hint="All usage counters are zero. sys.dm_db_index_usage_stats resets on SQL Server restart or index rebuild — let the workload run, then re-pull DMVs."
         action={action}
+        loading={loading}
+        error={error}
       />
     );
   }
