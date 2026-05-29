@@ -62,20 +62,16 @@ export function AdvisorPanel({ conn }: { conn: SqlConnectionConfig }) {
           </button>
           {busy && <span className="advisor-spinner" aria-hidden />}
         </div>
+        {busy && <div className="form-status">Scanning DMVs…</div>}
         {err && <div className="form-status err">{err}</div>}
       </div>
 
       {recs != null && !err && (
         recs.length === 0 ? (
-          <div className="empty">
-            <div className="empty-card">
-              <div className="empty-glyph">✦</div>
-              <div className="empty-title">No recommendations</div>
-              <div className="empty-hint">
-                The server has no accumulated DMV signals yet (missing-index, unused-index,
-                scan patterns). Recommendations appear as the workload runs.
-              </div>
-            </div>
+          <div className="form-status">
+            No recommendations right now. They appear after you Analyze the server. If
+            still empty, the workload has not generated actionable DMV signals yet (no
+            missing-index scans or unused indexes detected).
           </div>
         ) : (
           <div className="advisor-list">

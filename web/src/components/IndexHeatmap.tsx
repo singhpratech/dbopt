@@ -14,18 +14,40 @@ export function IndexHeatmap({ data, theme }: { data: HeatmapCell[]; theme?: str
     );
   }
   const c = chartPalette(theme);
-  const rows = Array.from(new Set(data.map((d) => d.row))).sort();
-  const cols = Array.from(new Set(data.map((d) => d.col))).sort();
-  const series = data.map((d) => [cols.indexOf(d.col), rows.indexOf(d.row), d.score, d]);
-  const max = Math.max(1, ...data.map((d) => Math.abs(d.score)));
+  const rows = data
+    .map((d) => ({ ...d, reads: d.seeks + d.scans + d.lookups, writes: d.updates }))
+    .sort((a, b) => b.reads + b.writes - (a.reads + a.writes) || b.score - a.score);
+  const labels = rows.map((d) => `${d.row} · ${d.col}`);
+
+  const total = rows.reduce((s, d) => s + d.reads + d.writes, 0);
+  if (total === 0) {
+    return (
+      <EmptyChart
+        glyph="◰"
+        title="No index usage yet"
+        hint="All usage counters are zero. sys.dm_db_index_usage_stats resets on SQL Server restart or index rebuild — let the workload run, then re-pull DMVs."
+      />
+    );
+  }
+
   const option = {
     backgroundColor: "transparent",
-    textStyle: { fontFamily: "IBM Plex Mono, monospace" },
+    legend: {
+      data: ["READS", "WRITES"],
+      top: 8,
+      right: 16,
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 },
+    },
     tooltip: {
-      backgroundColor: c.panel, borderColor: c.lineStrong, borderWidth: 1,
+      trigger: "item",
+      backgroundColor: c.panel,
+      borderColor: c.lineStrong,
+      borderWidth: 1,
       textStyle: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
       formatter: (p: any) => {
-        const [, , , d] = p.value;
+        const d = rows[p.dataIndex];
         return `<b style="color:${c.signal}">${d.row} · ${d.col}</b><br/>
                 <span style="color:${c.textMuted}">seeks &nbsp; </span>${d.seeks.toLocaleString()}<br/>
                 <span style="color:${c.textMuted}">scans &nbsp; </span>${d.scans.toLocaleString()}<br/>
@@ -34,48 +56,78 @@ export function IndexHeatmap({ data, theme }: { data: HeatmapCell[]; theme?: str
                 <span style="color:${c.textMuted}">score &nbsp; </span>${d.score.toLocaleString()}`;
       },
     },
-    grid: { left: 240, right: 40, top: 24, bottom: 110 },
+    grid: { left: 240, right: 48, top: 36, bottom: 40 },
     xAxis: {
-      type: "category", data: cols,
-      axisLabel: { color: c.textMuted, rotate: 60, fontSize: 10, fontFamily: "Departure Mono, monospace" },
+      type: "value",
+      name: "← writes   reads →",
+      nameLocation: "middle",
+      nameGap: 26,
+      nameTextStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 },
+      axisLabel: {
+        color: c.text,
+        fontFamily: "Departure Mono, monospace",
+        fontSize: 10,
+        formatter: (v: number) => Math.abs(v).toLocaleString(),
+      },
       axisLine: { lineStyle: { color: c.lineStrong } },
-      axisTick: { show: false },
-      splitArea: { show: false },
+      splitLine: { lineStyle: { color: c.lineSoft } },
     },
     yAxis: {
-      type: "category", data: rows,
-      axisLabel: { color: c.textMuted, fontSize: 11, fontFamily: "IBM Plex Mono, monospace" },
+      type: "category",
+      data: labels,
+      inverse: true,
+      axisLabel: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
       axisLine: { lineStyle: { color: c.lineStrong } },
       axisTick: { show: false },
-      splitArea: { show: false },
-    },
-    visualMap: {
-      min: -max,
-      max,
-      calculable: true,
-      orient: "horizontal",
-      left: "center",
-      bottom: 18,
-      itemHeight: 100,
-      itemWidth: 12,
-      textStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 },
-      // diverging: heavy writes (red) → neutral → heavy reads (signal). The
-      // neutral mid uses the elevated surface so near-zero cells still read as
-      // filled boxes rather than vanishing into the background.
-      inRange: { color: [c.crit, c.cell, c.signal] },
     },
     series: [
       {
-        type: "heatmap",
-        data: series,
-        label: { show: false },
-        // Visible hairline border on every cell so the grid is legible in BOTH
-        // themes even when most cells are neutral (the old #06080c border was
-        // darker than the dark background — the grid disappeared).
-        itemStyle: { borderColor: c.lineStrong, borderWidth: 1 },
-        emphasis: { itemStyle: { borderColor: c.signal, shadowBlur: 8, shadowColor: c.signal } },
+        name: "WRITES",
+        type: "bar",
+        stack: "io",
+        itemStyle: { color: c.crit },
+        emphasis: { focus: "series" },
+        barMaxWidth: 16,
+        data: rows.map((d) => -d.writes),
+      },
+      {
+        name: "READS",
+        type: "bar",
+        stack: "io",
+        itemStyle: { color: c.signal },
+        emphasis: { focus: "series" },
+        barMaxWidth: 16,
+        data: rows.map((d) => ({
+          value: d.reads,
+          label:
+            d.reads === 0 && d.writes > 0
+              ? {
+                  show: true,
+                  position: "right",
+                  color: c.warn,
+                  fontFamily: "Departure Mono, monospace",
+                  fontSize: 9,
+                  formatter: "DROP?",
+                }
+              : { show: false },
+        })),
       },
     ],
+    dataZoom:
+      rows.length > 30
+        ? [
+            {
+              type: "slider",
+              yAxisIndex: 0,
+              right: 8,
+              width: 12,
+              start: 0,
+              end: Math.min(100, (30 / rows.length) * 100),
+              brushSelect: false,
+            },
+            { type: "inside", yAxisIndex: 0 },
+          ]
+        : undefined,
   };
   return <ReactECharts key={theme} option={option} notMerge style={{ height: "100%", width: "100%" }} />;
 }

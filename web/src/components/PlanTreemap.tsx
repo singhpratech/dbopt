@@ -36,7 +36,7 @@ export function PlanTreemap({ data, theme }: { data: TreemapNode[]; theme?: stri
         roam: false,
         breadcrumb: {
           show: true, height: 22, top: 6, left: 12,
-          itemStyle: { color: c.cell, borderColor: c.lineStrong, textStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 } },
+          itemStyle: { color: c.cell, borderColor: c.signal, textStyle: { color: c.text, fontFamily: "Departure Mono, monospace", fontSize: 10 } },
           emphasis: { itemStyle: { color: c.panel, textStyle: { color: c.signal } } },
         },
         upperLabel: {

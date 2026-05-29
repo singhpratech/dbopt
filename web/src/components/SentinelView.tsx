@@ -339,15 +339,15 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   return (
     <div
       style={{
-        border: "1px solid var(--line)",
-        padding: "10px 12px",
-        background: "var(--bg-elev, transparent)",
+        border: "1px solid var(--line-strong)",
+        padding: "12px 14px",
+        background: "var(--bg-elev)",
       }}
     >
       <div
         style={{
           font: "10px var(--f-mono, ui-monospace, Menlo, monospace)",
-          color: "var(--text-dim)",
+          color: "var(--text-muted)",
           letterSpacing: "0.1em",
         }}
       >

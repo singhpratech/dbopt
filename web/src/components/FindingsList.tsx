@@ -66,10 +66,28 @@ export function FindingsList({
                 <span className="rule">{f.rule}</span>
               </div>
               <div className="msg">{f.message}</div>
-              {isOpen && f.recommendation && <div className="rec">{f.recommendation}</div>}
+              {isOpen && f.recommendation && (
+                <div className="rec">
+                  <div className="rec-label">Recommended fix</div>
+                  <div className="rec-body">{f.recommendation}</div>
+                </div>
+              )}
             </div>
-            <button className="toggle" onClick={() => toggle(i)} aria-label={isOpen ? "collapse" : "expand"}>
-              {f.recommendation ? (isOpen ? "−" : "+") : ""}
+            <button
+              className={`toggle ${f.recommendation ? "expandable" : "disabled"}`}
+              onClick={() => f.recommendation && toggle(i)}
+              disabled={!f.recommendation}
+              aria-expanded={f.recommendation ? isOpen : undefined}
+              aria-label={
+                f.recommendation
+                  ? isOpen
+                    ? "Collapse recommendation"
+                    : "Show recommendation"
+                  : "No recommendation"
+              }
+              title={f.recommendation ? (isOpen ? "Hide fix" : "Show fix") : "No recommendation"}
+            >
+              {f.recommendation ? (isOpen ? "−" : "＋") : "–"}
             </button>
           </div>
         );

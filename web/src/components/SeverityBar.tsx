@@ -30,7 +30,7 @@ export function SeverityBar({ data, theme }: { data: SeverityBucket[]; theme?: s
       backgroundColor: c.panel, borderColor: c.lineStrong, borderWidth: 1,
       textStyle: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
     },
-    grid: { left: 48, right: 20, top: 36, bottom: 28 },
+    grid: { left: 48, right: 20, top: 36, bottom: 38 },
     xAxis: {
       type: "category", data: lines,
       axisLine: { lineStyle: { color: c.lineStrong } },

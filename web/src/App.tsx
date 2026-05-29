@@ -326,7 +326,7 @@ export function App() {
                   </div>
                 </div>
                 {explainErr && (
-                  <div style={{ padding: "8px 14px", background: "rgba(255,58,74,0.08)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
+                  <div style={{ padding: "8px 14px", background: "var(--crit-glow)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
                     {explainErr}
                   </div>
                 )}
