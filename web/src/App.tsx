@@ -62,7 +62,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGrou
   { key: "plan",       glyph: "◫", label: "PLAN",    group: "INSPECT" },
   { key: "indexes",    glyph: "◰", label: "INDEX",   group: "INSPECT" },
   { key: "sizes",      glyph: "◧", label: "SIZE",    group: "INSPECT" },
-  { key: "severity",   glyph: "≡", label: "SEV",     group: "INSPECT" },
+  { key: "severity",   glyph: "≡", label: "Severity", group: "INSPECT" },
   // SETUP — configuration that's set once and left alone.
   { key: "ai",         glyph: "↪", label: "AI",      group: "SETUP" },
   { key: "settings",   glyph: "⚙", label: "Config",   group: "SETUP" },

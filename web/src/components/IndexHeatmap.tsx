@@ -74,7 +74,7 @@ export function IndexHeatmap({
                 <span style="color:${c.textMuted}">score &nbsp; </span>${d.score.toLocaleString()}`;
       },
     },
-    grid: { left: 240, right: 48, top: 36, bottom: 40 },
+    grid: { left: 312, right: 48, top: 36, bottom: 40 },
     xAxis: {
       type: "value",
       name: "← writes   reads →",
@@ -94,7 +94,10 @@ export function IndexHeatmap({
       type: "category",
       data: labels,
       inverse: true,
-      axisLabel: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
+      // Wider grid.left + a label width so long "table · index" names fit; if one
+      // still overruns it truncates with an ellipsis at the END (table name stays
+      // visible) instead of clipping the start off the left edge. Full name on hover.
+      axisLabel: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11, width: 300, overflow: "truncate" },
       axisLine: { lineStyle: { color: c.lineStrong } },
       axisTick: { show: false },
     },
