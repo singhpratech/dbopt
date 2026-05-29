@@ -52,7 +52,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGrou
   // START — get a database in front of you and graded.
   { key: "health",     glyph: "❤", label: "HEALTH",  group: "START" },
   { key: "analyze",    glyph: "▤", label: "ANALYZE", group: "START" },
-  { key: "connection", glyph: "⌬", label: "CONN",    group: "START" },
+  { key: "connection", glyph: "⌬", label: "Connection", group: "START" },
   // OPERATE — the live, prescriptive, audit surfaces.
   { key: "sentinel",   glyph: "◉", label: "WATCH",   group: "OPERATE" },
   { key: "advisor",    glyph: "✦", label: "ADVISE",  group: "OPERATE" },
