@@ -359,7 +359,7 @@ export function App() {
         {ui.workspace === "plan" && (
           <Workspace title="Plan cost" subtitle="execution plan operator breakdown">
             <ChartContainer>
-              <PlanTreemap data={report?.charts.plan_treemap ?? []} />
+              <PlanTreemap data={report?.charts.plan_treemap ?? []} theme={ui.theme} />
             </ChartContainer>
           </Workspace>
         )}
@@ -367,7 +367,7 @@ export function App() {
         {ui.workspace === "indexes" && (
           <Workspace title="Index usage" subtitle="per-index reads vs writes since last stats reset">
             <ChartContainer>
-              <IndexHeatmap data={report?.charts.index_heatmap ?? []} />
+              <IndexHeatmap data={report?.charts.index_heatmap ?? []} theme={ui.theme} />
             </ChartContainer>
           </Workspace>
         )}
@@ -375,7 +375,7 @@ export function App() {
         {ui.workspace === "sizes" && (
           <Workspace title="Storage" subtitle="reserved KB per schema → table → index">
             <ChartContainer>
-              <SizeTreemap data={report?.charts.size_treemap ?? []} />
+              <SizeTreemap data={report?.charts.size_treemap ?? []} theme={ui.theme} />
             </ChartContainer>
           </Workspace>
         )}
@@ -383,7 +383,7 @@ export function App() {
         {ui.workspace === "severity" && (
           <Workspace title="Severity timeline" subtitle="findings distributed by source line">
             <ChartContainer>
-              <SeverityBar data={report?.charts.severity_timeline ?? []} />
+              <SeverityBar data={report?.charts.severity_timeline ?? []} theme={ui.theme} />
             </ChartContainer>
           </Workspace>
         )}

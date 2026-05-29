@@ -1,8 +1,9 @@
 import ReactECharts from "echarts-for-react";
 import type { SizeNode } from "../types";
 import { EmptyChart } from "./EmptyChart";
+import { chartPalette } from "../chartTheme";
 
-export function SizeTreemap({ data }: { data: SizeNode[] }) {
+export function SizeTreemap({ data, theme }: { data: SizeNode[]; theme?: string }) {
   if (!data || data.length === 0) {
     return (
       <EmptyChart
@@ -29,19 +30,20 @@ export function SizeTreemap({ data }: { data: SizeNode[] }) {
     name: schema,
     children: [...sch.entries()].map(([table, indexes]) => ({ name: table, children: indexes })),
   }));
+  const c = chartPalette(theme);
   const option = {
     backgroundColor: "transparent",
     tooltip: {
-      backgroundColor: "#0e1219", borderColor: "#2a3142", borderWidth: 1,
-      textStyle: { color: "#d6dbe5", fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
+      backgroundColor: c.panel, borderColor: c.lineStrong, borderWidth: 1,
+      textStyle: { color: c.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
       formatter: (p: any) => {
         const r: SizeNode | undefined = p.data?.raw;
         if (!r) return `<b>${p.name}</b>`;
-        return `<b style="color:#d4ff4e">${r.schema}.${r.table} · ${r.index}</b><br/>
-                <span style="color:#6b748a">reserved </span>${(r.reserved_kb / 1024).toFixed(1)} MB<br/>
-                <span style="color:#6b748a">used &nbsp; &nbsp;</span>${(r.used_kb / 1024).toFixed(1)} MB<br/>
-                <span style="color:#6b748a">data &nbsp; &nbsp;</span>${(r.data_kb / 1024).toFixed(1)} MB<br/>
-                <span style="color:#6b748a">rows &nbsp; &nbsp;</span>${r.row_count.toLocaleString()}`;
+        return `<b style="color:${c.signal}">${r.schema}.${r.table} · ${r.index}</b><br/>
+                <span style="color:${c.textMuted}">reserved </span>${(r.reserved_kb / 1024).toFixed(1)} MB<br/>
+                <span style="color:${c.textMuted}">used &nbsp; &nbsp;</span>${(r.used_kb / 1024).toFixed(1)} MB<br/>
+                <span style="color:${c.textMuted}">data &nbsp; &nbsp;</span>${(r.data_kb / 1024).toFixed(1)} MB<br/>
+                <span style="color:${c.textMuted}">rows &nbsp; &nbsp;</span>${r.row_count.toLocaleString()}`;
       },
     },
     series: [
@@ -50,16 +52,16 @@ export function SizeTreemap({ data }: { data: SizeNode[] }) {
         data: root,
         leafDepth: 3,
         roam: false,
-        breadcrumb: { show: true, height: 22, top: 6, left: 12, itemStyle: { color: "#1a2030", borderColor: "#2a3142", textStyle: { color: "#6b748a" } } },
-        upperLabel: { show: true, height: 22, color: "#d6dbe5", fontFamily: "IBM Plex Sans, sans-serif", fontSize: 11, fontWeight: 500 },
-        label: { show: true, color: "#f0f2f7", fontFamily: "IBM Plex Sans, sans-serif", fontSize: 11 },
+        breadcrumb: { show: true, height: 22, top: 6, left: 12, itemStyle: { color: c.cell, borderColor: c.lineStrong, textStyle: { color: c.textMuted } } },
+        upperLabel: { show: true, height: 22, color: c.text, fontFamily: "IBM Plex Sans, sans-serif", fontSize: 11, fontWeight: 500 },
+        label: { show: true, color: c.textStrong, fontFamily: "IBM Plex Sans, sans-serif", fontSize: 11 },
         levels: [
-          { itemStyle: { gapWidth: 3, borderColor: "#06080c" } },
-          { itemStyle: { gapWidth: 3, borderColor: "#06080c" }, colorSaturation: [0.32, 0.58] },
-          { itemStyle: { gapWidth: 1, borderColor: "#06080c" }, colorSaturation: [0.32, 0.6] },
+          { itemStyle: { gapWidth: 3, borderColor: c.bgBase } },
+          { itemStyle: { gapWidth: 3, borderColor: c.bgBase }, colorSaturation: [0.32, 0.58] },
+          { itemStyle: { gapWidth: 1, borderColor: c.bgBase }, colorSaturation: [0.32, 0.6] },
         ],
       },
     ],
   };
-  return <ReactECharts option={option} style={{ height: "100%", width: "100%" }} />;
+  return <ReactECharts key={theme} option={option} notMerge style={{ height: "100%", width: "100%" }} />;
 }
