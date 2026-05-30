@@ -165,6 +165,47 @@ pub async fn estimated_plan(req: &ConnectReq, sql: &str) -> anyhow::Result<Strin
     Ok(out)
 }
 
+/// One T-SQL syntax diagnostic from the real engine parser. `number` is the
+/// SQL Server error number (e.g. 102 "Incorrect syntax near …"), `line` is the
+/// 1-based line within the submitted batch.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParseDiagnostic {
+    pub number: u32,
+    pub line: u32,
+    pub message: String,
+}
+
+/// Validate a T-SQL batch against the REAL SQL Server parser via `SET PARSEONLY
+/// ON` — the same check SSMS's "Parse" (Ctrl+F5) runs. This verifies syntax and
+/// keyword correctness for the connected server's exact version WITHOUT
+/// executing anything and WITHOUT binding object names (so a missing table does
+/// NOT fail here — only genuine syntax/keyword errors do). An empty Vec means
+/// the batch parses cleanly. We open a fresh connection and drop it after, so
+/// the lingering PARSEONLY state (which can't turn itself off while ON) is moot.
+pub async fn parse_check(req: &ConnectReq, sql: &str) -> anyhow::Result<Vec<ParseDiagnostic>> {
+    let mut client = open(req).await?;
+    // PARSEONLY lives in its own batch; SET options persist for the session.
+    let _ = client.simple_query("SET PARSEONLY ON").await;
+    let result: Result<(), tiberius::error::Error> = async {
+        let stream = client.simple_query(sql).await?;
+        // Drain so the server flushes every token — a syntax error surfaces here.
+        stream.into_results().await?;
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => Ok(Vec::new()),
+        Err(tiberius::error::Error::Server(e)) => Ok(vec![ParseDiagnostic {
+            number: e.code(),
+            line: e.line(),
+            message: e.message().to_string(),
+        }]),
+        // A transport/protocol failure is a real error, not a syntax verdict.
+        Err(other) => Err(anyhow::anyhow!(other.to_string())),
+    }
+}
+
 /// Operational-health facts for the connected instance + database. Every field
 /// is `Option` because each is gathered best-effort: a feature may not exist on
 /// the target version (e.g. `sys.dm_db_log_info` is 2016+), or the login may

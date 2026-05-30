@@ -3934,3 +3934,17 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;
 }
 .watch-actions .ops { display: flex; gap: 7px; flex: none; flex-wrap: wrap; }
+
+/* T-SQL syntax check (CHECK SYNTAX) result banner in the analyze editor. */
+.syntax-banner {
+  padding: 8px 14px; border-bottom: 1px solid var(--line);
+  font: 11px var(--f-mono); display: flex; flex-direction: column; gap: 4px;
+}
+.syntax-banner.ok  { color: var(--ok);  background: var(--ok-glow); }
+.syntax-banner.err { color: var(--crit); background: var(--crit-glow); }
+.syntax-diag {
+  text-align: left; background: transparent; border: 0; color: inherit;
+  font: 11px var(--f-mono); cursor: pointer; padding: 0; text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.syntax-diag:hover { color: var(--text); }

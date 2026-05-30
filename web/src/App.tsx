@@ -372,6 +372,39 @@ export function App() {
   const [explainBusy, setExplainBusy] = useState(false);
   const [explainErr, setExplainErr] = useState<string | null>(null);
 
+  // SSMS-style T-SQL "Parse" (SET PARSEONLY ON via the real engine).
+  const [validateBusy, setValidateBusy] = useState(false);
+  const [validateResult, setValidateResult] = useState<backend.ValidateResult | null>(null);
+  const [validateErr, setValidateErr] = useState<string | null>(null);
+
+  async function validateSyntax() {
+    if (!ui.draft_sql.trim()) { setValidateErr("paste some SQL first"); return; }
+    setValidateBusy(true);
+    setValidateErr(null);
+    setValidateResult(null);
+    try {
+      const payload = {
+        server: conn.server,
+        database: conn.database || undefined,
+        user: conn.auth_mode === "sql" ? conn.user : undefined,
+        password: conn.auth_mode === "sql" ? conn.password : undefined,
+        trust_cert: conn.trust_cert,
+      };
+      const res = await backend.validateSql(payload as any, ui.draft_sql);
+      setValidateResult(res);
+      // Jump the editor caret to the first syntax error so it's easy to fix.
+      const first = res.diagnostics[0];
+      if (first) editorHandle.current?.jumpTo(first.line, 1);
+    } catch (e: any) {
+      setValidateErr(e.message ?? String(e));
+    } finally {
+      setValidateBusy(false);
+    }
+  }
+
+  // Any edit invalidates a previous parse verdict so it can't read stale.
+  useEffect(() => { setValidateResult(null); setValidateErr(null); }, [ui.draft_sql]);
+
   async function generatePlan() {
     if (!ui.draft_sql.trim()) { setExplainErr("paste some SQL first"); return; }
     setExplainBusy(true);
@@ -560,6 +593,13 @@ export function App() {
                   <div className="label"><b>EDITOR</b> {ui.draft_plan ? "T-SQL · plan" : "T-SQL"}</div>
                   <div className="ops">
                     <button
+                      onClick={validateSyntax}
+                      disabled={validateBusy || !conn.server}
+                      title={conn.server ? "Check T-SQL syntax against the connected server (SET PARSEONLY ON — parses every keyword for this version, runs nothing)" : "Configure a SQL Server connection first"}
+                    >
+                      {validateBusy ? "CHECKING…" : "CHECK SYNTAX"}
+                    </button>
+                    <button
                       onClick={generatePlan}
                       disabled={explainBusy || !conn.server}
                       title={conn.server ? "Run SET SHOWPLAN_XML ON against the configured server and pull the estimated plan" : "Configure a SQL Server connection first"}
@@ -579,6 +619,31 @@ export function App() {
                   <div style={{ padding: "8px 14px", background: "var(--crit-glow)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
                     {explainErr}
                   </div>
+                )}
+                {validateErr && (
+                  <div style={{ padding: "8px 14px", background: "var(--crit-glow)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
+                    {validateErr}
+                  </div>
+                )}
+                {validateResult && (
+                  validateResult.ok ? (
+                    <div className="syntax-banner ok">
+                      ✓ Syntax valid — parses cleanly on SQL Server {ui.server_version} (every keyword recognized; nothing was executed).
+                    </div>
+                  ) : (
+                    <div className="syntax-banner err">
+                      {validateResult.diagnostics.map((d, i) => (
+                        <button
+                          key={i}
+                          className="syntax-diag"
+                          onClick={() => editorHandle.current?.jumpTo(d.line, 1)}
+                          title="Jump to this line"
+                        >
+                          ✗ Line {d.line} · Msg {d.number}: {d.message}
+                        </button>
+                      ))}
+                    </div>
+                  )
                 )}
                 {!ui.draft_sql.trim() && (
                   <div className="editor-hint-bar">

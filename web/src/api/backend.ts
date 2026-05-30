@@ -260,6 +260,23 @@ export async function explain(info: ConnectionInfo, sql: string): Promise<string
   return (json as any).plan_xml as string;
 }
 
+export type ParseDiagnostic = { number: number; line: number; message: string };
+export type ValidateResult = { ok: boolean; diagnostics: ParseDiagnostic[] };
+
+/** SSMS-style "Parse" of a T-SQL batch against the real engine (SET PARSEONLY
+ *  ON). Verifies syntax + keywords for the connected server's version without
+ *  executing or binding object names. `ok:true` + empty diagnostics = clean. */
+export async function validateSql(info: ConnectionInfo, sql: string): Promise<ValidateResult> {
+  const r = await fetch(`${BASE}/validate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...info, sql }),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((json as any).error ?? `validate failed (${r.status})`);
+  return json as ValidateResult;
+}
+
 export async function listOllamaModels(): Promise<{ models?: { name: string }[] } | null> {
   try {
     const r = await fetch(`${BASE}/llm/models`);

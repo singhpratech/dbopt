@@ -23,6 +23,7 @@ pub fn router() -> Router {
         .route("/dmv", post(dmv))
         .route("/monitor/live", post(monitor_live))
         .route("/explain", post(explain))
+        .route("/validate", post(validate))
         .route("/llm/models", get(llm_models))
         .route("/llm/chat", post(llm_chat))
         .route("/llm/cloud/:provider", post(llm_cloud))
@@ -151,6 +152,21 @@ pub struct ExplainReq {
 async fn explain(Json(req): Json<ExplainReq>) -> impl IntoResponse {
     match sqlserver::estimated_plan(&req.conn, &req.sql).await {
         Ok(plan) => (StatusCode::OK, Json(serde_json::json!({ "plan_xml": plan }))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// POST /api/validate — SSMS-style "Parse" of a T-SQL batch against the real
+/// engine (SET PARSEONLY ON). Returns `{ ok, diagnostics: [{number,line,message}] }`.
+/// `ok:true` with empty diagnostics = clean parse. A connection/transport
+/// failure (not a syntax verdict) returns 502.
+async fn validate(Json(req): Json<ExplainReq>) -> impl IntoResponse {
+    match sqlserver::parse_check(&req.conn, &req.sql).await {
+        Ok(diags) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": diags.is_empty(), "diagnostics": diags })),
+        )
+            .into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
