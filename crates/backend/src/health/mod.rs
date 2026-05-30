@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::routes::ConnectReq;
 
 pub mod enrichment;
+pub mod operational;
 pub mod sqlserver;
 
 // ===========================================================================
@@ -44,6 +45,9 @@ pub struct HealthReport {
     /// Efficiency lane (100 = fully optimized; lower = more wins available).
     pub efficiency_score: u8,
     pub efficiency_grade: char,
+    /// Operational lane (backups, config best-practices, log VLFs). 100 = clean.
+    pub operational_score: u8,
+    pub operational_grade: char,
     pub is_learning: bool,
     /// Seconds of sentinel telemetry backing the runtime signals (None when the
     /// monitor hasn't captured anything yet). Lets the UI say "monitoring for 2h"
@@ -236,6 +240,9 @@ pub struct LaneScores {
     pub status: String,
     pub efficiency_score: u8,
     pub efficiency_grade: char,
+    /// Operational-health lane (backups, config best-practices, log VLFs).
+    pub operational_score: u8,
+    pub operational_grade: char,
     pub is_learning: bool,
 }
 
@@ -258,19 +265,31 @@ pub fn score_report(
 ) -> LaneScores {
     let mut reliability_penalty: u32 = 0;
     let mut opportunity_penalty: u32 = 0;
+    let mut operational_penalty: u32 = 0;
     let mut reliability_count: u32 = 0;
     let mut opportunity_count: u32 = 0;
+    let mut operational_count: u32 = 0;
     for issue in issues {
         let pts = bucket_points(&issue.severity);
-        if issue.lane == "opportunity" {
-            opportunity_penalty += pts;
-            opportunity_count += 1;
-        } else {
+        match issue.lane.as_str() {
+            "opportunity" => {
+                opportunity_penalty += pts;
+                opportunity_count += 1;
+            }
+            "operational" => {
+                operational_penalty += pts;
+                operational_count += 1;
+            }
             // Default unknown/empty lanes to reliability (conservative).
-            reliability_penalty += pts;
-            reliability_count += 1;
+            _ => {
+                reliability_penalty += pts;
+                reliability_count += 1;
+            }
         }
     }
+    let operational_penalty = operational_penalty.min(80);
+    let operational_score = (100i32 - operational_penalty as i32).clamp(0, 100) as u8;
+    let (operational_grade, _) = band(operational_score);
 
     // Minimum monitoring history before we'll treat "no signals" as proof of
     // health rather than "we haven't watched long enough."
@@ -278,6 +297,7 @@ pub fn score_report(
 
     let no_signal = reliability_count == 0
         && opportunity_count == 0
+        && operational_count == 0
         && signals.deadlock_count == 0
         && signals.blocking_incidents == 0
         && signals.top_wait_time_ms < 1000;
@@ -294,6 +314,8 @@ pub fn score_report(
                 status: status.to_string(),
                 efficiency_score: 98,
                 efficiency_grade: grade,
+                operational_score: 98,
+                operational_grade: grade,
                 is_learning: false,
             };
         }
@@ -307,6 +329,8 @@ pub fn score_report(
             status: "learning".to_string(),
             efficiency_score: 95,
             efficiency_grade: 'A',
+            operational_score: 95,
+            operational_grade: 'A',
             is_learning: true,
         };
     }
@@ -327,6 +351,8 @@ pub fn score_report(
         status: status.to_string(),
         efficiency_score,
         efficiency_grade,
+        operational_score,
+        operational_grade,
         is_learning: false,
     }
 }

@@ -256,6 +256,44 @@ impl HealthProvider for SqlServerHealthProvider {
         // sentinel rows would dedup-collide on the same id and lose the DDL.
         // Advisor wins.
 
+        // --- operational best-practices -> Issue (lane "operational") -----
+        // Live server/DB config + log + backup facts → community best-practice scripts-style checks.
+        // Best-effort: if the probe fails (no access / unsupported), we add
+        // nothing — never a fabricated finding. Each check carries its MEASURED
+        // value and a copy-paste fix the operator reviews before running.
+        if let Ok(facts) = ss::pull_operational(req).await {
+            let db = req.database.clone().unwrap_or_default();
+            for c in super::operational::evaluate(&facts, &db) {
+                let impact_rank = match c.severity {
+                    "critical" => 9000,
+                    "error" => 7000,
+                    "warning" => 4000,
+                    _ => 1000,
+                };
+                issues.push(Issue {
+                    id: format!("operational:{}:{}", c.kind, c.id),
+                    source: "operational".to_string(),
+                    kind: c.kind.to_string(),
+                    severity: c.severity.to_string(),
+                    lane: "operational".to_string(),
+                    consequence: c.consequence,
+                    impact_rank,
+                    title: c.title,
+                    affected_object: if db.is_empty() { "server".to_string() } else { db.clone() },
+                    rationale: c.recommendation,
+                    fix_sql: c.fix_sql,
+                    fix_action: "review".to_string(),
+                    metrics: vec![Metric {
+                        label: c.metric_label,
+                        value: c.metric_value,
+                        source: Some("sys.configurations / sys.databases / msdb".to_string()),
+                    }],
+                    // The setting itself is directly measured from the server.
+                    confidence: "observed".to_string(),
+                });
+            }
+        }
+
         // f. Dedup by id (advisor > sentinel > static, keep max impact_rank).
         let mut issues = dedup(issues);
 
@@ -303,6 +341,8 @@ impl HealthProvider for SqlServerHealthProvider {
             reliability_grade: scores.reliability_grade,
             efficiency_score: scores.efficiency_score,
             efficiency_grade: scores.efficiency_grade,
+            operational_score: scores.operational_score,
+            operational_grade: scores.operational_grade,
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
             counts,

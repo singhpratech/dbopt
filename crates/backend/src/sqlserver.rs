@@ -165,6 +165,110 @@ pub async fn estimated_plan(req: &ConnectReq, sql: &str) -> anyhow::Result<Strin
     Ok(out)
 }
 
+/// Operational-health facts for the connected instance + database. Every field
+/// is `Option` because each is gathered best-effort: a feature may not exist on
+/// the target version (e.g. `sys.dm_db_log_info` is 2016+), or the login may
+/// lack access (e.g. msdb for backup history, or on Azure SQL DB where msdb
+/// isn't exposed). A missing fact simply yields no check, never an error.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct OperationalFacts {
+    pub cpu_count: Option<i64>,
+    pub maxdop: Option<i64>,
+    pub cost_threshold: Option<i64>,
+    pub optimize_for_adhoc: Option<bool>,
+    pub recovery_model: Option<String>,
+    pub auto_shrink: Option<bool>,
+    pub auto_close: Option<bool>,
+    pub page_verify: Option<String>,
+    pub auto_create_stats: Option<bool>,
+    pub auto_update_stats: Option<bool>,
+    pub vlf_count: Option<i64>,
+    /// True only when the msdb backup history query actually succeeded. This is
+    /// the honesty guard: a `None` age with `backups_readable == false` means
+    /// "we couldn't read msdb" (no access / Azure SQL DB) — NOT "no backup
+    /// exists". We only ever warn about a missing backup when this is `true`.
+    pub backups_readable: bool,
+    pub last_full_backup_age_hours: Option<i64>,
+    pub last_log_backup_age_hours: Option<i64>,
+}
+
+/// Gather operational-health facts (server config, current-DB settings, log VLF
+/// count, backup ages). Each probe is independent and best-effort so one
+/// unsupported/denied query never sinks the rest.
+pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFacts> {
+    let mut client = open(req).await?;
+    let mut f = OperationalFacts::default();
+
+    // Server scheduler count (for MAXDOP advice). int -> bigint.
+    if let Ok(s) = client.simple_query("SELECT CAST(cpu_count AS BIGINT) FROM sys.dm_os_sys_info").await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.cpu_count = rows.first().and_then(|r| r.get::<i64, _>(0));
+        }
+    }
+
+    // Parallelism + plan-cache config, pivoted by name. value_in_use is
+    // sql_variant, so CAST to BIGINT for a stable type.
+    let q_cfg = "SELECT \
+        MAX(CASE WHEN name='max degree of parallelism' THEN CAST(value_in_use AS BIGINT) END), \
+        MAX(CASE WHEN name='cost threshold for parallelism' THEN CAST(value_in_use AS BIGINT) END), \
+        MAX(CASE WHEN name='optimize for ad hoc workloads' THEN CAST(value_in_use AS BIGINT) END) \
+        FROM sys.configurations";
+    if let Ok(s) = client.simple_query(q_cfg).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.first() {
+                f.maxdop = r.get::<i64, _>(0);
+                f.cost_threshold = r.get::<i64, _>(1);
+                f.optimize_for_adhoc = r.get::<i64, _>(2).map(|v| v != 0);
+            }
+        }
+    }
+
+    // Current-database settings.
+    let q_db = "SELECT recovery_model_desc, \
+        CAST(is_auto_shrink_on AS BIT), CAST(is_auto_close_on AS BIT), \
+        page_verify_option_desc, \
+        CAST(is_auto_create_stats_on AS BIT), CAST(is_auto_update_stats_on AS BIT) \
+        FROM sys.databases WHERE database_id = DB_ID()";
+    if let Ok(s) = client.simple_query(q_db).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.first() {
+                f.recovery_model = r.get::<&str, _>(0).map(|s| s.to_string());
+                f.auto_shrink = r.get::<bool, _>(1);
+                f.auto_close = r.get::<bool, _>(2);
+                f.page_verify = r.get::<&str, _>(3).map(|s| s.to_string());
+                f.auto_create_stats = r.get::<bool, _>(4);
+                f.auto_update_stats = r.get::<bool, _>(5);
+            }
+        }
+    }
+
+    // Transaction-log VLF count (sys.dm_db_log_info is 2016+).
+    if let Ok(s) = client.simple_query("SELECT CAST(COUNT(*) AS BIGINT) FROM sys.dm_db_log_info(DB_ID())").await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.vlf_count = rows.first().and_then(|r| r.get::<i64, _>(0));
+        }
+    }
+
+    // Backup ages from msdb (best-effort; absent on Azure SQL DB / restricted logins).
+    let q_bak = "SELECT \
+        CAST(DATEDIFF(HOUR, MAX(CASE WHEN type='D' THEN backup_finish_date END), GETDATE()) AS BIGINT), \
+        CAST(DATEDIFF(HOUR, MAX(CASE WHEN type='L' THEN backup_finish_date END), GETDATE()) AS BIGINT) \
+        FROM msdb.dbo.backupset WHERE database_name = DB_NAME()";
+    if let Ok(s) = client.simple_query(q_bak).await {
+        if let Ok(rows) = s.into_first_result().await {
+            // The query ran → backup history is genuinely readable. A NULL age
+            // now honestly means "no such backup", not "couldn't look".
+            f.backups_readable = true;
+            if let Some(r) = rows.first() {
+                f.last_full_backup_age_hours = r.get::<i64, _>(0);
+                f.last_log_backup_age_hours = r.get::<i64, _>(1);
+            }
+        }
+    }
+
+    Ok(f)
+}
+
 pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
     let mut client = open(req).await?;
 
