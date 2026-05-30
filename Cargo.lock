@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-core",
  "anyhow",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "once_cell",
  "quick-xml",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-core",
  "console_error_panic_hook",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-core",
  "anyhow",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "eval"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-core",
  "anyhow",
@@ -2744,7 +2744,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sentinel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
