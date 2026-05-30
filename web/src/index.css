@@ -3835,7 +3835,10 @@ kbd {
 }
 .live-tabs button + button { border-left: 1px solid var(--line-strong); }
 .live-tabs button:hover { color: var(--text); }
-.live-tabs button.active { background: var(--accent); color: #0a0e07; }
+.live-tabs button.active { background: var(--accent); color: var(--bg-void); }
+/* Light theme's accent is a DARK green, so near-black text is unreadable on it —
+   use white, matching the .fg-btn.primary / .ai-input .send convention. */
+:root[data-theme="light"] .live-tabs button.active { color: #ffffff; }
 
 .live-mon { display: flex; flex-direction: column; min-height: 0; }
 
@@ -3969,7 +3972,8 @@ kbd {
   font: 11px var(--f-mono); padding: 3px 12px; border: 1px solid var(--line-strong);
   background: var(--bg-elev); color: var(--text); border-radius: 3px; cursor: pointer;
 }
-.qstore-confirm-ops button.primary { background: var(--accent); color: #0a0e07; border-color: var(--accent); }
+.qstore-confirm-ops button.primary { background: var(--accent); color: var(--bg-void); border-color: var(--accent); }
+:root[data-theme="light"] .qstore-confirm-ops button.primary { color: #ffffff; }
 .qstore-confirm-ops button:disabled { opacity: .5; cursor: default; }
 .qstore-perm { padding: 0 16px 9px; font: 10.5px var(--f-mono); color: var(--text-muted); line-height: 1.5; }
 .qstore-perm code { font: 10.5px var(--f-mono); color: var(--text-dim); }
