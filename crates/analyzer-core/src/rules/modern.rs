@@ -119,7 +119,11 @@ pub fn string_agg_replaces_for_xml(ctx: &RuleCtx) -> Vec<Finding> {
         if !(n3.kind == TokKind::Punct && n3.text == "(") { continue; }
         let Some(n4) = tokens.get(i + 4) else { continue };
         if !(n4.kind == TokKind::String && n4.text == "''") { continue; }
-        let _ = ctx.server_version.unwrap_or(0);
+        // STRING_AGG is SQL Server 2017+. Only suppress when we KNOW the target
+        // is older (a known 2014/2016 instance) — recommending it there would
+        // hand the user code that won't compile. Unknown version still fires
+        // (the app defaults targets to 2025).
+        if matches!(ctx.server_version, Some(v) if v < 2017) { continue; }
         out.push(finding(
             "modern.string_agg_replaces_for_xml",
             Severity::Info,
@@ -352,9 +356,9 @@ pub fn json_native_type_opportunity(ctx: &RuleCtx) -> Vec<Finding> {
                     out.push(finding(
                         "modern.json_native_type_opportunity",
                         Severity::Info,
-                        "nvarchar(max) + CHECK(ISJSON(...)) detected. The native `json` type (2025+) stores parsed binary.",
+                        "nvarchar(max) + CHECK(ISJSON(...)) detected. SQL Server 2025 adds a native `json` type that stores parsed binary — note it is in PREVIEW on the box product.",
                         Some(make_loc(loc_tok)),
-                        Some("On 2025+, the native `json` type stores parsed binary: faster reads, in-place `.modify()`, better compression. `ALTER COLUMN <col> json NOT NULL;` (non-reversible — test in non-prod first).".into()),
+                        Some("The native `json` type stores parsed binary (faster reads, in-place `.modify()`, better compression). It is GA on Azure SQL, but in PREVIEW on SQL Server 2025 — validate before production. The migration is non-reversible: `ALTER COLUMN <col> json NOT NULL;` — test in non-prod first.".into()),
                     ));
                     saw_nvarchar_max = false;
                     saw_nvarchar_max_loc = None;

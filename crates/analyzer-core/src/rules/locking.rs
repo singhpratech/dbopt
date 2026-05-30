@@ -288,10 +288,10 @@ pub fn optimized_locking_needs_adr(ctx: &RuleCtx) -> Vec<Finding> {
                         if m < tokens.len() && is_word(&tokens[m], "ON") {
                             out.push(finding(
                                 "maintenance.adr_required_for_optimized_locking",
-                                Severity::Info,
+                                Severity::Warning,
                                 "OPTIMIZED_LOCKING = ON without ACCELERATED_DATABASE_RECOVERY = ON in the same script.",
                                 Some(make_loc(tk)),
-                                Some("OPTIMIZED_LOCKING (2025+) requires Accelerated Database Recovery to deliver its full benefit. Enable both: `ALTER DATABASE [x] SET ACCELERATED_DATABASE_RECOVERY = ON;` then `... SET OPTIMIZED_LOCKING = ON;`.".into()),
+                                Some("Accelerated Database Recovery is a HARD prerequisite — `SET OPTIMIZED_LOCKING = ON` fails unless ADR is already enabled. Turn ADR on first: `ALTER DATABASE [x] SET ACCELERATED_DATABASE_RECOVERY = ON;` then `... SET OPTIMIZED_LOCKING = ON;`. (Lock-after-qualification additionally needs RCSI.)".into()),
                             ));
                         }
                     }

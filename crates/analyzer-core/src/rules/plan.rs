@@ -373,7 +373,7 @@ pub fn optimize_for_unknown(ctx: &RuleCtx) -> Vec<Finding> {
     let v2022plus = ctx.server_version.unwrap_or(0) >= 2022;
 
     let rec = if v2022plus {
-        "Remove the hint — PSP (2022+) and OPPO (2025+) usually do better."
+        "Remove the hint — Parameter Sensitive Plan optimization (2022+, expanded at compat 170 in 2025) usually does better."
     } else {
         "Consider OPTIMIZE FOR (@p = literal) if you know the dominant value."
     };
@@ -443,9 +443,9 @@ pub fn merge_join_hint_pinned(ctx: &RuleCtx) -> Vec<Finding> {
         out.push(finding(
             "plan.merge_join_hint_pinned",
             Severity::Warning,
-            format!("{} {} JOIN hint pins the physical join algorithm — disables adaptive joins and overrides PSP/OPPO.", t.text, n1.text),
+            format!("{} {} JOIN hint pins the physical join algorithm — disables adaptive joins and overrides Parameter Sensitive Plan optimization (2022+).", t.text, n1.text),
             Some(make_loc(n1)),
-            Some("Pinning the join algorithm disables adaptive joins (2017+ batch mode) and overrides PSP/OPPO. Remove the hint; if a specific plan is required, force it via Query Store plan forcing.".into()),
+            Some("Pinning the join algorithm disables adaptive joins (2017+ batch mode) and overrides Parameter Sensitive Plan optimization (2022+). Remove the hint; if a specific plan is required, force it via Query Store plan forcing.".into()),
         ));
     }
 
@@ -468,7 +468,7 @@ pub fn merge_join_hint_pinned(ctx: &RuleCtx) -> Vec<Finding> {
                     Severity::Warning,
                     format!("OPTION ({} JOIN) pins the physical join algorithm globally for the statement.", a.text),
                     Some(make_loc(a)),
-                    Some("Pinning the join algorithm disables adaptive joins (2017+ batch mode) and overrides PSP/OPPO. Remove the hint; if a specific plan is required, force it via Query Store plan forcing.".into()),
+                    Some("Pinning the join algorithm disables adaptive joins (2017+ batch mode) and overrides Parameter Sensitive Plan optimization (2022+). Remove the hint; if a specific plan is required, force it via Query Store plan forcing.".into()),
                 ));
                 k += 2;
                 continue;

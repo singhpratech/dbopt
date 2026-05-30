@@ -137,7 +137,7 @@ pub fn set_rowcount(ctx: &RuleCtx) -> Vec<Finding> {
                 out.push(finding(
                     "deprecated.set_rowcount_dml",
                     Severity::Warning,
-                    "SET ROWCOUNT no longer affects INSERT/UPDATE/DELETE in supported SQL Server versions. Behavior will be removed entirely in a future release.",
+                    "Using SET ROWCOUNT to limit INSERT/UPDATE/DELETE is deprecated. It still works today, but Microsoft will stop honoring it for DML in a future release — don't rely on it for new code.",
                     Some(make_loc(t)),
                     Some("Use TOP (n) on the DML statement instead — `DELETE TOP (1000) FROM …`.".into()),
                 ));

@@ -58,7 +58,7 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
                 kind: "config",
                 title: format!("Cost Threshold for Parallelism is {ct} (legacy default)"),
                 consequence: "Trivial queries go parallel needlessly, adding scheduling overhead and CXPACKET waits.".into(),
-                recommendation: "Raise it (commonly ~50) so only genuinely expensive queries parallelize.".into(),
+                recommendation: "Raise it incrementally so only genuinely expensive queries parallelize — Microsoft's own example uses 20; many practitioners target ~50. Increase in small steps and validate over a full business cycle.".into(),
                 metric_label: "cost threshold for parallelism".into(),
                 metric_value: ct.to_string(),
                 fix_sql: Some("EXEC sys.sp_configure 'show advanced options', 1; RECONFIGURE;\nEXEC sys.sp_configure 'cost threshold for parallelism', 50; RECONFIGURE;".into()),
@@ -151,7 +151,10 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
 
     // --- Transaction log VLFs ----------------------------------------------
     if let Some(vlf) = f.vlf_count {
-        if vlf > 1000 {
+        // Threshold aligned with the engine's own MSSQLSERVER_9017 warning, which
+        // fires at >10,000 VLFs on SQL Server 2012+ (the legacy >1,000 trigger was
+        // SQL Server 2008 R2 only). >1,000 would false-positive on healthy busy logs.
+        if vlf > 10_000 {
             out.push(OperationalCheck {
                 id: "log.high_vlf_count",
                 severity: "warning",
