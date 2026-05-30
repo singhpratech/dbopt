@@ -91,6 +91,18 @@ function fmtTs(s: string): string {
   }
 }
 
+// Filesystem-safe local timestamp `YYYY-MM-DD_HHMMSS` so each download is a
+// distinct file (no browser "(1)", "(2)" suffixes) and sorts chronologically.
+// No colons — keeps it valid on Windows.
+function fileStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  );
+}
+
 function downloadBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -184,13 +196,13 @@ export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig
   async function downloadHtml() {
     const r = await fetch(`${BASE}/sentinel/report.html?days=${DAYS}&sort=${querySort}`);
     const blob = await r.blob();
-    downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.html`);
+    downloadBlob(blob, `dbopt-sentinel-${fileStamp()}.html`);
   }
 
   async function downloadJson() {
     const r = await fetch(`${BASE}/sentinel/report?days=${DAYS}&sort=${querySort}`);
     const blob = await r.blob();
-    downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadBlob(blob, `dbopt-sentinel-${fileStamp()}.json`);
   }
 
   const running = status?.running ?? false;
