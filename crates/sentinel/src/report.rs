@@ -262,29 +262,197 @@ pub fn render_markdown(r: &WeeklyReport) -> String {
     s
 }
 
-/// Render the report as a self-contained HTML document. Reuses the markdown
-/// content inside a minimal styled shell so it can be opened in any browser
-/// without a markdown engine.
+/// Minimal HTML entity escaping for untrusted text (SQL bodies, object names).
+/// Keeps the report XSS-safe and prevents a stray `<` from breaking the markup.
+fn esc(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            _ => o.push(c),
+        }
+    }
+    o
+}
+
+/// Collapse a captured SQL body to a single whitespace-normalized line (em-dash
+/// when absent). Caller is responsible for HTML-escaping the result.
+fn one_line(t: Option<&str>) -> String {
+    match t {
+        Some(t) if !t.trim().is_empty() => t.split_whitespace().collect::<Vec<_>>().join(" "),
+        _ => "—".to_string(),
+    }
+}
+
+/// Absolute UTC timestamp for a unix-ms instant (em-dash when unknown). The
+/// report is read later, so an absolute time beats a relative "x ago".
+fn fmt_ts_ms(ms: Option<i64>) -> String {
+    match ms.and_then(|m| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(m)) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M UTC").to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// Self-contained dark stylesheet for the HTML report — matches the app palette.
+const HTML_STYLE: &str = "\
+:root{--bg:#0a0d12;--panel:#0e131b;--elev:#131822;--line:#1c2230;--line2:#283042;--text:#d6dbe5;--dim:#9aa3b5;--muted:#6b748a;--accent:#d4ff4e;--ok:#5dd39e;--crit:#ff3a4a}\
+*{box-sizing:border-box}\
+body{font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg);color:var(--text);margin:0 auto;padding:28px;max-width:1100px}\
+.rpt-head{border-bottom:1px solid var(--line2);padding-bottom:14px;margin-bottom:22px}\
+.brand{font-size:18px;letter-spacing:.04em}.brand .mark{color:var(--accent)}.brand .dim{color:var(--muted)}\
+.meta{color:var(--dim);font-size:12px;margin-top:6px}.meta b{color:var(--text);font-weight:600}\
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:26px}\
+@media(max-width:720px){.cards{grid-template-columns:repeat(2,1fr)}}\
+.card{border:1px solid var(--line2);background:var(--elev);padding:12px 14px;border-radius:5px}\
+.card .k{font-size:10px;letter-spacing:.12em;color:var(--muted)}\
+.card .v{font-size:17px;color:var(--text);margin-top:5px;word-break:break-word}\
+.card .sub{font-size:11px;color:var(--dim);margin-top:3px}\
+h2{color:var(--accent);font-weight:500;font-size:14px;letter-spacing:.06em;border-bottom:1px solid var(--line);padding-bottom:7px;margin:30px 0 10px}\
+table{border-collapse:collapse;width:100%;margin:6px 0 8px}\
+th,td{border-bottom:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}\
+th{font-size:10px;color:var(--muted);font-weight:500;letter-spacing:.1em;text-transform:uppercase}\
+td{font-size:12px}\
+.num{text-align:right;white-space:nowrap}.dim{color:var(--dim)}.crit{color:var(--crit);font-weight:600}.mono{color:var(--dim)}\
+td.sql{max-width:540px}\
+td.sql code{display:block;background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:5px 8px;color:var(--accent);font-size:11.5px;white-space:pre-wrap;word-break:break-word;max-height:150px;overflow:auto}\
+.bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-bottom:3px}\
+.bar span{display:block;height:100%;background:var(--accent)}\
+.empty{color:var(--dim);font-style:italic;padding:4px 0 10px}\
+footer{margin-top:30px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}";
+
+/// Render the report as a self-contained, styled HTML document built directly
+/// from the report data (NOT by string-munging the markdown — that left tables
+/// and headings as literal text). Inline CSS + inline duration bars, no JS, no
+/// external assets: open in any browser, or download & email.
 pub fn render_html(r: &WeeklyReport) -> String {
-    let md = render_markdown(r);
-    // Convert headers/tables into HTML in a very minimal way (no markdown crate
-    // — keep deps small). Most consumers will hit the JSON or markdown directly;
-    // HTML is the "download and email" path.
-    let body = md
-        .replace("\n\n", "</p><p>")
-        .replace("\n", "<br>");
+    let generated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    let mut body = String::new();
+
+    // ── Header ──────────────────────────────────────────
+    let _ = write!(
+        body,
+        "<header class=\"rpt-head\"><div class=\"brand\"><span class=\"mark\">▣</span> dbopt <span class=\"dim\">/ sentinel pain report</span></div>\
+<div class=\"meta\">window <b>{}</b> → <b>{}</b> · {} instance(s) · generated {}</div></header>",
+        r.window_from.format("%Y-%m-%d %H:%M UTC"),
+        r.window_to.format("%Y-%m-%d %H:%M UTC"),
+        r.instances,
+        generated,
+    );
+
+    // ── Summary cards ───────────────────────────────────
+    let _ = write!(
+        body,
+        "<section class=\"cards\">\
+<div class=\"card\"><div class=\"k\">TOP WAIT</div><div class=\"v\">{}</div><div class=\"sub\">{}</div></div>\
+<div class=\"card\"><div class=\"k\">DEADLOCKS</div><div class=\"v\">{}</div></div>\
+<div class=\"card\"><div class=\"k\">BLOCKING INCIDENTS</div><div class=\"v\">{}</div></div>\
+<div class=\"card\"><div class=\"k\">INSTANCES</div><div class=\"v\">{}</div></div>\
+</section>",
+        esc(r.pain.top_wait_type.as_deref().unwrap_or("—")),
+        fmt_ms(r.pain.top_wait_time_ms),
+        r.pain.deadlock_count,
+        r.pain.blocking_incidents,
+        r.instances,
+    );
+
+    // ── Top queries by total duration (with inline proportion bars) ──
+    let max_total = r.top_queries.iter().map(|q| q.total_duration_ms).max().unwrap_or(0);
+    let _ = write!(body, "<section><h2>Top queries · by total duration</h2>");
+    if r.top_queries.is_empty() {
+        body.push_str("<p class=\"empty\">No Query Store rows in window. Enable Query Store on the target database, then wait for the next poll.</p>");
+    } else {
+        body.push_str("<table><thead><tr><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th><th class=\"num\">Last run</th></tr></thead><tbody>");
+        for q in &r.top_queries {
+            let pct = if max_total > 0 {
+                (q.total_duration_ms as f64 / max_total as f64 * 100.0).round() as i64
+            } else {
+                0
+            };
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td>\
+<td class=\"num\"><div class=\"bar\"><span style=\"width:{}%\"></span></div>{}</td>\
+<td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num dim\">{}</td></tr>",
+                q.query_id,
+                esc(&one_line(q.query_sql_text.as_deref())),
+                pct,
+                fmt_ms(q.total_duration_ms),
+                q.executions,
+                fmt_ms(q.avg_duration_ms),
+                fmt_ts_ms(q.last_run_ms),
+            );
+        }
+        body.push_str("</tbody></table>");
+    }
+    body.push_str("</section>");
+
+    // ── Top queries by last run ─────────────────────────
+    if !r.recent_queries.is_empty() {
+        body.push_str("<section><h2>Top queries · by last run</h2><table><thead><tr><th class=\"num\">Last run</th><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th></tr></thead><tbody>");
+        for q in &r.recent_queries {
+            let _ = write!(
+                body,
+                "<tr><td class=\"num dim\">{}</td><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+                fmt_ts_ms(q.last_run_ms),
+                q.query_id,
+                esc(&one_line(q.query_sql_text.as_deref())),
+                fmt_ms(q.total_duration_ms),
+                q.executions,
+                fmt_ms(q.avg_duration_ms),
+            );
+        }
+        body.push_str("</tbody></table></section>");
+    }
+
+    // ── Regressions ─────────────────────────────────────
+    body.push_str("<section><h2>Regressions · ≥2× slower vs. baseline half-window</h2>");
+    if r.regressions.is_empty() {
+        body.push_str("<p class=\"empty\">No regressions detected in window.</p>");
+    } else {
+        body.push_str("<table><thead><tr><th>Query</th><th class=\"num\">Baseline</th><th class=\"num\">Current</th><th class=\"num\">Δ</th></tr></thead><tbody>");
+        for x in &r.regressions {
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num crit\">+{:.0}%</td></tr>",
+                x.query_id,
+                fmt_ms(x.baseline_duration_ms),
+                fmt_ms(x.current_duration_ms),
+                x.delta_pct,
+            );
+        }
+        body.push_str("</tbody></table>");
+    }
+    body.push_str("</section>");
+
+    // ── Unused indexes ──────────────────────────────────
+    body.push_str("<section><h2>Indexes accumulating writes with zero reads</h2>");
+    if r.unused_indexes.is_empty() {
+        body.push_str("<p class=\"empty\">No fully-unused indexes in window.</p>");
+    } else {
+        body.push_str("<table><thead><tr><th>Table</th><th>Index</th><th class=\"num\">Writes</th></tr></thead><tbody>");
+        for u in &r.unused_indexes {
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"num\">{}</td></tr>",
+                esc(&format!("{}.{}.{}", u.db_name, u.schema_name, u.table_name)),
+                esc(&u.index_name),
+                u.updates_in_window,
+            );
+        }
+        body.push_str("</tbody></table>");
+    }
+    body.push_str("</section>");
+
+    body.push_str("<footer>Generated by dbopt-sentinel · local-only telemetry. Cross-reference any row against the static analyzer findings in the app.</footer>");
+
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>sqlopt sentinel report</title>\
-<style>\
-body{{font:14px/1.6 ui-monospace,Menlo,monospace;background:#0a0d12;color:#d6dbe5;margin:0;padding:32px;max-width:980px}}\
-h1{{color:#d4ff4e;font-weight:500;letter-spacing:0.04em}}\
-h2{{color:#d4ff4e;font-weight:500;border-bottom:1px solid #1c2230;padding-bottom:6px;margin-top:32px}}\
-table{{border-collapse:collapse;width:100%;margin:8px 0 20px}}\
-th,td{{border-bottom:1px solid #1c2230;padding:6px 10px;text-align:left;font-size:12px}}\
-th{{color:#6b748a;font-weight:400;letter-spacing:0.1em;text-transform:uppercase}}\
-code{{background:#131822;padding:1px 5px;color:#d4ff4e}}\
-</style></head><body><p>{}</p></body></html>",
-        body
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>dbopt sentinel · pain report</title><style>{}</style></head><body>{}</body></html>",
+        HTML_STYLE, body
     )
 }
 
@@ -301,6 +469,11 @@ mod tests {
         assert!(md.contains("# sqlopt sentinel"));
         assert!(md.contains("Top 0 queries"));
         let html = render_html(&report);
-        assert!(html.contains("<html>"));
+        assert!(html.contains("<html"));
+        // Real HTML structure, not the old markdown-string munge.
+        assert!(html.contains("DEADLOCKS"));
+        assert!(html.contains("<section class=\"cards\">"));
+        assert!(!html.contains("</p><p>"));
+        assert!(!html.contains("## "));
     }
 }
