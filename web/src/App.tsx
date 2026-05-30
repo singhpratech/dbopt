@@ -719,7 +719,7 @@ export function App() {
         )}
 
         {ui.workspace === "sentinel" && (
-          <Workspace title="Sentinel" subtitle="continuous SQL Server monitoring · weekly pain report">
+          <Workspace title="Sentinel" subtitle="live pulse · continuous monitoring · weekly pain report">
             <SentinelView conn={conn} />
           </Workspace>
         )}

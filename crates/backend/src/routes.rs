@@ -21,6 +21,7 @@ pub fn router() -> Router {
         .route("/health/db", post(health_db))
         .route("/health/issue/detail", post(crate::health::enrichment::issue_detail))
         .route("/dmv", post(dmv))
+        .route("/monitor/live", post(monitor_live))
         .route("/explain", post(explain))
         .route("/llm/models", get(llm_models))
         .route("/llm/chat", post(llm_chat))
@@ -78,6 +79,16 @@ async fn dmv(Json(req): Json<ConnectReq>) -> impl IntoResponse {
         // impossible) serialization failure — never a handler panic.
         Ok(bundle) => (StatusCode::OK, Json(bundle)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// POST /api/monitor/live — one real-time snapshot of server vitals (CPU,
+/// waits, batch/sec, IO, live sessions). The UI polls this on an interval and
+/// renders scrolling line charts (Activity-Monitor style). DMV-only; no rows.
+async fn monitor_live(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+    match sqlserver::pull_live_metrics(&req).await {
+        Ok(m) => (StatusCode::OK, Json(m)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
 

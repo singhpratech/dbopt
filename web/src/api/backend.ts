@@ -206,6 +206,39 @@ export async function getIssueDetail(info: ConnectionInfo, issue: Issue): Promis
   return r.json() as Promise<Remediation>;
 }
 
+// ---- Live activity monitor (real-time server vitals) ---------------------
+export type LiveWait = { wait_type: string; tasks: number; wait_ms: number };
+export type LiveSession = {
+  session_id: number; status: string; command: string; duration_ms: number;
+  cpu_ms: number; logical_reads: number; blocked_by: number; wait_type: string | null;
+  database: string; login: string; host: string; program: string; sql_preview: string;
+};
+export type LiveMetrics = {
+  server_time_ms: number;
+  cpu_sql_pct: number | null; cpu_other_pct: number | null;
+  waiting_tasks: number; active_requests: number; blocked_requests: number; user_sessions: number;
+  batch_requests_total: number; compilations_total: number; recompilations_total: number;
+  transactions_total: number; page_life_expectancy: number | null;
+  io_read_bytes_total: number; io_write_bytes_total: number;
+  io_stall_read_ms: number; io_stall_write_ms: number;
+  top_waits: LiveWait[]; sessions: LiveSession[];
+};
+
+/** One real-time snapshot of server vitals. The caller polls this on an
+ *  interval and derives per-second rates from successive cumulative counters. */
+export async function liveMetrics(info: ConnectionInfo): Promise<LiveMetrics> {
+  const r = await fetch(`${BASE}/monitor/live`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(info),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `live monitor failed (${r.status})`);
+  }
+  return r.json() as Promise<LiveMetrics>;
+}
+
 export async function pullDmv(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/dmv`, {
     method: "POST",

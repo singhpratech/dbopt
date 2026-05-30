@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
+import { LiveMonitor } from "./LiveMonitor";
 
 // ---------- Wire types (mirror crates/sentinel/src/report.rs) -------------
 
@@ -79,6 +80,7 @@ function downloadBlob(blob: Blob, name: string) {
 }
 
 export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
+  const [tab, setTab] = useState<"live" | "report">("live");
   const [status, setStatus] = useState<SentinelStatus | null>(null);
   const [report, setReport] = useState<WeeklyReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -177,7 +179,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
         className="pane-title"
         style={{ position: "sticky", top: 0, zIndex: 2, alignItems: "center" }}
       >
-        <div className="label" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div className="label" style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
           <span
             className={`dot ${running ? "ok" : "err"}`}
             style={{
@@ -185,6 +187,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
               width: 8,
               height: 8,
               borderRadius: "50%",
+              flex: "none",
               background: running ? "var(--ok, #5dd39e)" : "var(--crit, #ff3a4a)",
             }}
           />
@@ -194,30 +197,49 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
           <span style={{ ...mono, color: "var(--text-dim)" }}>
             · {status?.instances ?? 0} instance(s)
           </span>
-          {status?.db_path && (
-            <span style={{ ...mono, color: "var(--text-dim)", marginLeft: 6 }}>
-              · {status.db_path}
-            </span>
-          )}
         </div>
-        <div className="ops">
-          <button onClick={start} disabled={busy || running} title="Start the daemon for the current SQL Server connection">
-            START
+        {/* Toggle stays in the header; daemon actions move to their own row. */}
+        <span className="live-tabs">
+          <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")} title="Real-time server vitals — live pulse">
+            ● LIVE
           </button>
-          <button onClick={stop} disabled={busy || !running} title="Stop the daemon">
-            STOP
+          <button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")} title="Accumulated weekly pain report from the background daemon">
+            REPORT
           </button>
-          <button onClick={refresh} disabled={busy} title="Reload status and report">
-            REFRESH
-          </button>
-          <button onClick={downloadHtml} title="Download the report as a self-contained HTML file">
-            DOWNLOAD HTML
-          </button>
-          <button onClick={downloadJson} title="Download the raw JSON report">
-            DOWNLOAD JSON
-          </button>
-        </div>
+        </span>
       </div>
+
+      {/* ── Daemon actions row (report mode) — kept off the header so the
+            controls never crowd the title or truncate the db path. ── */}
+      {tab === "report" && (
+        <div className="watch-actions">
+          {status?.db_path && (
+            <span className="watch-dbpath" title={status.db_path}>{status.db_path}</span>
+          )}
+          <div className="ops">
+            <button onClick={start} disabled={busy || running} title="Start the daemon for the current SQL Server connection">
+              START
+            </button>
+            <button onClick={stop} disabled={busy || !running} title="Stop the daemon">
+              STOP
+            </button>
+            <button onClick={refresh} disabled={busy} title="Reload status and report">
+              REFRESH
+            </button>
+            <button onClick={downloadHtml} title="Download the report as a self-contained HTML file">
+              DOWNLOAD HTML
+            </button>
+            <button onClick={downloadJson} title="Download the raw JSON report">
+              DOWNLOAD JSON
+            </button>
+          </div>
+        </div>
+      )}
+
+      {tab === "live" && <LiveMonitor conn={conn} />}
+
+      {tab === "report" && (<>
+
 
       {err && (
         <div
@@ -364,6 +386,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
           <Empty msg="No fully-unused indexes in window." />
         )}
       </Section>
+      </>)}
     </div>
   );
 }

@@ -417,3 +417,266 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
 
     Ok(bundle)
 }
+
+// ===========================================================================
+// Live Pulse — instantaneous server vitals for the real-time WATCH
+// view. Every query hits ONLY DMVs (sys.dm_*); we never read user table rows.
+// Cumulative counters (batch req, IO bytes) are returned raw + a server clock
+// so the UI can compute per-second rates between successive polls, exactly the
+// the way any live counter does. Each query is best-effort: a login missing
+// VIEW SERVER STATE still gets whatever it's allowed to see.
+// ===========================================================================
+
+/// Benign idle/background wait types that are always "waiting" on a healthy
+/// server (the well-known community ignore-list). Excluded from the live
+/// waiting-tasks count and the resource-waits panel so an idle instance does
+/// not read as "28 tasks waiting". Kept as a quoted, comma-separated SQL list.
+const BENIGN_WAITS: &str = "\
+'SLEEP_TASK','LAZYWRITER_SLEEP','LOGMGR_QUEUE','CHECKPOINT_QUEUE',\
+'REQUEST_FOR_DEADLOCK_SEARCH','XE_TIMER_EVENT','XE_DISPATCHER_WAIT','XE_DISPATCHER_JOIN',\
+'BROKER_TO_FLUSH','BROKER_TASK_STOP','BROKER_EVENTHANDLER','BROKER_RECEIVE_WAITFOR',\
+'SQLTRACE_BUFFER_FLUSH','SQLTRACE_INCREMENTAL_FLUSH_SLEEP','SQLTRACE_WAIT_ENTRIES',\
+'CLR_AUTO_EVENT','CLR_MANUAL_EVENT','DISPATCHER_QUEUE_SEMAPHORE','FT_IFTS_SCHEDULER_IDLE_WAIT',\
+'WAITFOR','DBMIRROR_DBM_EVENT','DBMIRROR_EVENTS_QUEUE','DBMIRROR_WORKER_QUEUE',\
+'HADR_FILESTREAM_IOMGR_IOCOMPLETION','HADR_WORK_QUEUE','HADR_TIMER_TASK','HADR_CLUSAPI_CALL',\
+'KSOURCE_WAKEUP','LOGMGR_FLUSH','ONDEMAND_TASK_QUEUE','PWAIT_ALL_COMPONENTS_INITIALIZED',\
+'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP','QDS_ASYNC_QUEUE','QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',\
+'QDS_SHUTDOWN_QUEUE','SP_SERVER_DIAGNOSTICS_SLEEP','SLEEP_DBSTARTUP','SLEEP_DCOMSTARTUP',\
+'SLEEP_MASTERDBREADY','SLEEP_MASTERMDREADY','SLEEP_MASTERUPGRADED','SLEEP_SYSTEMTASK',\
+'WAIT_XTP_HOST_WAIT','WAIT_XTP_OFFLINE_CKPT_NEW_LOG','WAIT_XTP_CKPT_CLOSE','WAIT_FOR_RESULTS',\
+'DIRTY_PAGE_POLL','POPULATE_LOCK_ORDINALS','PREEMPTIVE_OS_FLUSHFILEBUFFERS','PREEMPTIVE_XE_GETTARGETSTATE',\
+'BROKER_TRANSMITTER','PVS_PREALLOCATE','HADR_NOTIFICATION_DEQUEUE','HADR_NOTIFICATION_WORKER_EXCLUSIVE_ACCESS',\
+'VDI_CLIENT_OTHER','PARALLEL_REDO_DRAIN_WORKER','PARALLEL_REDO_LOG_CACHE','PARALLEL_REDO_TRAN_LIST',\
+'PARALLEL_REDO_WORKER_WAIT_WORK','PARALLEL_REDO_WORKER_SYNC','UCS_SESSION_REGISTRATION','VDI_CLIENT_COMPLETED',\
+'SOS_WORK_DISPATCHER','STARTUP_DEPENDENCY_MANAGER','SLEEP_TEMPDBSTARTUP','BACKUPTHREAD'";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveWait {
+    pub wait_type: String,
+    pub tasks: i64,
+    pub wait_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveSession {
+    pub session_id: i64,
+    pub status: String,
+    pub command: String,
+    pub duration_ms: i64,
+    pub cpu_ms: i64,
+    pub logical_reads: i64,
+    pub blocked_by: i64,
+    pub wait_type: Option<String>,
+    pub database: String,
+    pub login: String,
+    pub host: String,
+    pub program: String,
+    pub sql_preview: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LiveMetrics {
+    pub server_time_ms: i64,
+    pub cpu_sql_pct: Option<i64>,
+    pub cpu_other_pct: Option<i64>,
+    pub waiting_tasks: i64,
+    pub active_requests: i64,
+    pub blocked_requests: i64,
+    pub user_sessions: i64,
+    // cumulative perf counters (UI derives /sec rates)
+    pub batch_requests_total: i64,
+    pub compilations_total: i64,
+    pub recompilations_total: i64,
+    pub transactions_total: i64,
+    pub page_life_expectancy: Option<i64>,
+    // cumulative IO (UI derives MB/sec)
+    pub io_read_bytes_total: i64,
+    pub io_write_bytes_total: i64,
+    pub io_stall_read_ms: i64,
+    pub io_stall_write_ms: i64,
+    pub top_waits: Vec<LiveWait>,
+    pub sessions: Vec<LiveSession>,
+}
+
+/// One real-time snapshot of server vitals. Polled on an interval by the UI.
+pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> {
+    let mut client = open(req).await?;
+    let mut m = LiveMetrics::default();
+
+    // --- server clock (ms since epoch) so the UI can compute rate = Δcounter/Δt
+    if let Ok(s) = client
+        .simple_query("SELECT DATEDIFF_BIG(MILLISECOND, '19700101', SYSUTCDATETIME())")
+        .await
+    {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.server_time_ms = r.get::<i64, _>(0).unwrap_or(0);
+            }
+        }
+    }
+
+    // --- recent CPU split (SQL process vs everything else) from the scheduler
+    //     monitor ring buffer. Best-effort: XML shredding can vary by edition.
+    let cpu_sql = r#"
+        SELECT TOP 1
+            record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS sql_cpu,
+            record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS idle
+        FROM (
+            SELECT CONVERT(xml, record) AS record, timestamp
+            FROM sys.dm_os_ring_buffers
+            WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+              AND record LIKE '%<SystemHealth>%'
+        ) AS x
+        ORDER BY x.timestamp DESC;
+    "#;
+    if let Ok(s) = client.simple_query(cpu_sql).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                let sql_cpu = r.get::<i32, _>(0).unwrap_or(0) as i64;
+                let idle = r.get::<i32, _>(1).unwrap_or(0) as i64;
+                m.cpu_sql_pct = Some(sql_cpu.clamp(0, 100));
+                m.cpu_other_pct = Some((100 - idle - sql_cpu).clamp(0, 100));
+            }
+        }
+    }
+
+    // --- instantaneous counts (all CAST to BIGINT so they read as one i64 row).
+    //     Waiting-tasks excludes benign idle/background waits so the number
+    //     reflects REAL contention, not housekeeping — avoiding idle false alarms.
+    let counts = r#"
+        SELECT
+          CAST((SELECT COUNT(*) FROM sys.dm_os_waiting_tasks
+                WHERE session_id IS NOT NULL AND wait_type NOT IN (BENIGN_WAITS)) AS BIGINT),
+          CAST((SELECT COUNT(*) FROM sys.dm_exec_requests r
+                JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
+                WHERE s.is_user_process = 1 AND r.session_id <> @@SPID) AS BIGINT),
+          CAST((SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS BIGINT),
+          CAST((SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1) AS BIGINT);
+    "#.replace("BENIGN_WAITS", BENIGN_WAITS);
+    if let Ok(s) = client.simple_query(&counts).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.waiting_tasks = r.get::<i64, _>(0).unwrap_or(0);
+                m.active_requests = r.get::<i64, _>(1).unwrap_or(0);
+                m.blocked_requests = r.get::<i64, _>(2).unwrap_or(0);
+                m.user_sessions = r.get::<i64, _>(3).unwrap_or(0);
+            }
+        }
+    }
+
+    // --- cumulative perf counters (UI turns these into /sec rates)
+    let perf = r#"
+        SELECT
+          MAX(CASE WHEN RTRIM(counter_name)='Batch Requests/sec' THEN cntr_value END),
+          MAX(CASE WHEN RTRIM(counter_name)='SQL Compilations/sec' THEN cntr_value END),
+          MAX(CASE WHEN RTRIM(counter_name)='SQL Re-Compilations/sec' THEN cntr_value END),
+          MAX(CASE WHEN RTRIM(counter_name)='Transactions/sec' AND RTRIM(instance_name)='_Total' THEN cntr_value END),
+          MAX(CASE WHEN RTRIM(counter_name)='Page life expectancy' THEN cntr_value END)
+        FROM sys.dm_os_performance_counters
+        WHERE RTRIM(counter_name) IN
+          ('Batch Requests/sec','SQL Compilations/sec','SQL Re-Compilations/sec','Transactions/sec','Page life expectancy');
+    "#;
+    if let Ok(s) = client.simple_query(perf).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.batch_requests_total = r.get::<i64, _>(0).unwrap_or(0);
+                m.compilations_total = r.get::<i64, _>(1).unwrap_or(0);
+                m.recompilations_total = r.get::<i64, _>(2).unwrap_or(0);
+                m.transactions_total = r.get::<i64, _>(3).unwrap_or(0);
+                let ple = r.get::<i64, _>(4).unwrap_or(-1);
+                if ple >= 0 { m.page_life_expectancy = Some(ple); }
+            }
+        }
+    }
+
+    // --- cumulative IO across all data/log files (UI turns into MB/sec)
+    let io = r#"
+        SELECT
+          CAST(SUM(num_of_bytes_read) AS BIGINT),
+          CAST(SUM(num_of_bytes_written) AS BIGINT),
+          CAST(SUM(io_stall_read_ms) AS BIGINT),
+          CAST(SUM(io_stall_write_ms) AS BIGINT)
+        FROM sys.dm_io_virtual_file_stats(NULL, NULL);
+    "#;
+    if let Ok(s) = client.simple_query(io).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.io_read_bytes_total = r.get::<i64, _>(0).unwrap_or(0);
+                m.io_write_bytes_total = r.get::<i64, _>(1).unwrap_or(0);
+                m.io_stall_read_ms = r.get::<i64, _>(2).unwrap_or(0);
+                m.io_stall_write_ms = r.get::<i64, _>(3).unwrap_or(0);
+            }
+        }
+    }
+
+    // --- top resource waits happening right now
+    let waits = r#"
+        SELECT TOP (8) wait_type,
+               CAST(COUNT(*) AS BIGINT) AS tasks,
+               CAST(SUM(wait_duration_ms) AS BIGINT) AS wait_ms
+        FROM sys.dm_os_waiting_tasks
+        WHERE wait_type IS NOT NULL AND session_id IS NOT NULL
+          AND wait_type NOT IN (BENIGN_WAITS)
+        GROUP BY wait_type
+        ORDER BY tasks DESC, wait_ms DESC;
+    "#.replace("BENIGN_WAITS", BENIGN_WAITS);
+    if let Ok(s) = client.simple_query(&waits).await {
+        if let Ok(rows) = s.into_first_result().await {
+            for r in rows {
+                m.top_waits.push(LiveWait {
+                    wait_type: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                    tasks: r.get::<i64, _>(1).unwrap_or(0),
+                    wait_ms: r.get::<i64, _>(2).unwrap_or(0),
+                });
+            }
+        }
+    }
+
+    // --- live user requests ("running now"). sql_preview MUST be cast to
+    //     a bounded NVARCHAR or tiberius returns NULL for the nvarchar(max) text.
+    let sessions = r#"
+        SELECT TOP (50)
+            r.session_id,
+            r.status,
+            r.command,
+            DATEDIFF(MILLISECOND, r.start_time, SYSUTCDATETIME()) AS duration_ms,
+            r.cpu_time,
+            r.logical_reads,
+            r.blocking_session_id,
+            r.wait_type,
+            DB_NAME(r.database_id) AS db,
+            s.login_name,
+            ISNULL(s.host_name,'') AS host_name,
+            ISNULL(s.program_name,'') AS program,
+            CAST(LEFT(REPLACE(REPLACE(t.text, CHAR(13), ' '), CHAR(10), ' '), 300) AS NVARCHAR(300)) AS sql_preview
+        FROM sys.dm_exec_requests AS r
+        JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
+        OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
+        WHERE r.session_id <> @@SPID AND s.is_user_process = 1
+        ORDER BY r.cpu_time DESC;
+    "#;
+    if let Ok(s) = client.simple_query(sessions).await {
+        if let Ok(rows) = s.into_first_result().await {
+            for r in rows {
+                let blocked_raw = r.get::<i16, _>(6).unwrap_or(0);
+                m.sessions.push(LiveSession {
+                    session_id: r.get::<i16, _>(0).unwrap_or(0) as i64,
+                    status: r.get::<&str, _>(1).unwrap_or("").to_string(),
+                    command: r.get::<&str, _>(2).unwrap_or("").to_string(),
+                    duration_ms: r.get::<i32, _>(3).unwrap_or(0) as i64,
+                    cpu_ms: r.get::<i32, _>(4).unwrap_or(0) as i64,
+                    logical_reads: r.get::<i64, _>(5).unwrap_or(0),
+                    blocked_by: if blocked_raw > 0 { blocked_raw as i64 } else { 0 },
+                    wait_type: r.get::<&str, _>(7).map(|s| s.to_string()),
+                    database: r.get::<&str, _>(8).unwrap_or("").to_string(),
+                    login: r.get::<&str, _>(9).unwrap_or("").to_string(),
+                    host: r.get::<&str, _>(10).unwrap_or("").to_string(),
+                    program: r.get::<&str, _>(11).unwrap_or("").to_string(),
+                    sql_preview: r.get::<&str, _>(12).unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(m)
+}

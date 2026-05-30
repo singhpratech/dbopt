@@ -43,6 +43,12 @@
   --warn:           #ffd166;
   --info-sev:       #7fb4ff;
 
+  /* ── Live-monitor chart hues (4 distinguishable lines, dark) ── */
+  --chart-cpu:   #5fb0ff;
+  --chart-batch: #3ad29f;
+  --chart-wait:  #ffd166;
+  --chart-io:    #b78cff;
+
   /* ── Type ─────────────────────────────────────────── */
   --f-sans:  'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   --f-mono:  'IBM Plex Mono', 'JetBrains Mono', 'SF Mono', Menlo, monospace;
@@ -94,6 +100,12 @@
   --err:            #a85608;   /* burnt orange — 5.3:1 on white (was #d4740a, FAIL 2.8:1 as text) */
   --warn:           #8a6500;   /* dark amber — 5.3:1 on white (was #c79400, FAIL 2.7:1 — gold-on-white) */
   --info-sev:       #1f5fc4;
+
+  /* Live-monitor chart hues, darkened for >=3:1 on white */
+  --chart-cpu:   #1f6fd6;
+  --chart-batch: #08784f;
+  --chart-wait:  #8a6500;
+  --chart-io:    #6b46c1;
 }
 
 /* Light-mode shell texture: faint dark grain + soft brand washes,
@@ -2432,6 +2444,7 @@ kbd {
 .term-pop {
   position: fixed;
   z-index: 200;
+  box-sizing: border-box;
   width: 300px;
   max-width: calc(100vw - 20px);
   display: flex;
@@ -2446,6 +2459,16 @@ kbd {
   /* a hairline signal accent so it reads as "ours" */
   border-top: 2px solid var(--signal);
   animation: term-pop-in 0.1s ease-out;
+  /* The popover is a DOM child of the inline .term, so it INHERITS white-space
+     from grade/table ancestors that set nowrap — which made the definition spill
+     out to the right instead of wrapping inside the 300px box. Force normal. */
+  white-space: normal;
+  text-align: left;
+}
+.term-pop-name,
+.term-pop-def {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 @keyframes term-pop-in {
   from { opacity: 0; }
@@ -3801,3 +3824,113 @@ kbd {
 }
 .help-sentinel-why strong { color: var(--warn); }
 .help-sentinel-why .health-signal-eye { flex: none; }
+
+/* ============================================================
+   Live activity monitor (WATCH ▸ LIVE) — real-time vitals.
+   ============================================================ */
+.live-tabs { display: inline-flex; gap: 0; border: 1px solid var(--line-strong); border-radius: 3px; overflow: hidden; }
+.live-tabs button {
+  font: 10px var(--f-mono); letter-spacing: 0.08em; padding: 3px 10px; border: 0;
+  background: transparent; color: var(--text-dim); cursor: pointer; transition: background .12s, color .12s;
+}
+.live-tabs button + button { border-left: 1px solid var(--line-strong); }
+.live-tabs button:hover { color: var(--text); }
+.live-tabs button.active { background: var(--accent); color: #0a0e07; }
+
+.live-mon { display: flex; flex-direction: column; min-height: 0; }
+
+.live-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+  background: var(--bg-panel); z-index: 1;
+}
+.live-bar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.live-title { font: 12px var(--f-mono); letter-spacing: 0.12em; color: var(--text); font-weight: 600; }
+.live-target { font: 11px var(--f-mono); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-bar-right { display: flex; align-items: center; gap: 8px; flex: none; }
+.live-bar-right select, .live-bar-right button {
+  font: 11px var(--f-mono); padding: 3px 9px; background: var(--bg-elev);
+  border: 1px solid var(--line-strong); color: var(--text); border-radius: 3px; cursor: pointer;
+}
+.live-bar-right button:hover { border-color: var(--accent); }
+.live-chip { font: 10px var(--f-mono); letter-spacing: 0.06em; padding: 2px 8px; border-radius: 3px; }
+.live-chip.ok { color: var(--text-dim); }
+.live-chip.err { color: var(--crit); background: var(--crit-glow); }
+
+.live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.live-dot.on  { background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: live-pulse 1.8s ease-out infinite; }
+.live-dot.off { background: var(--text-muted); }
+@keyframes live-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--ok-glow, rgba(58,210,159,0.5)); }
+  70%  { box-shadow: 0 0 0 7px rgba(58,210,159,0); }
+  100% { box-shadow: 0 0 0 0 rgba(58,210,159,0); }
+}
+
+/* charts grid: 4 across, collapse to 2 then 1 */
+.live-charts {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
+  background: var(--line); border-bottom: 1px solid var(--line);
+}
+@media (max-width: 1100px) { .live-charts { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+@media (max-width: 620px)  { .live-charts { grid-template-columns: minmax(0,1fr); } }
+.live-chart { background: var(--bg-panel); padding: 12px 14px 8px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.live-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.live-chart-l { font: 10px var(--f-mono); letter-spacing: 0.1em; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-chart-v { font: 18px var(--f-mono); color: var(--c, var(--text)); font-weight: 600; flex: none; }
+.live-chart-svg { width: 100%; height: 64px; display: block; }
+.live-chart-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.5; }
+.live-chart-area { fill: var(--c); opacity: 0.10; }
+.live-chart-line { fill: none; stroke: var(--c); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.live-chart-dot  { fill: var(--c); }
+
+/* secondary vitals tiles */
+.live-tiles { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+@media (max-width: 900px) { .live-tiles { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+.live-tile { background: var(--bg-panel); padding: 10px 14px; min-width: 0; }
+.live-tile-l { font: 9.5px var(--f-mono); letter-spacing: 0.1em; color: var(--text-muted); }
+.live-tile-v { font: 16px var(--f-mono); color: var(--text); margin-top: 3px; }
+.live-tile.tone-err .live-tile-v  { color: var(--crit); }
+.live-tile.tone-warn .live-tile-v { color: var(--warn); }
+
+.live-section { border-bottom: 1px solid var(--line); }
+.live-section-h {
+  font: 10px var(--f-mono); letter-spacing: 0.12em; color: var(--text-muted); font-weight: 600;
+  padding: 9px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg-panel);
+}
+.live-empty { padding: 14px 16px; font: 12px var(--f-mono); color: var(--text-dim); }
+
+/* resource waits */
+.live-waits { padding: 8px 16px 12px; display: flex; flex-direction: column; gap: 6px; }
+.live-wait-row { display: grid; grid-template-columns: 220px 1fr 44px; align-items: center; gap: 10px; }
+.live-wait-name { font: 11px var(--f-mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-wait-bar { height: 10px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+.live-wait-bar > span { display: block; height: 100%; background: var(--warn); opacity: 0.7; }
+.live-wait-n { font: 11px var(--f-mono); color: var(--text-dim); text-align: right; }
+
+/* live requests table */
+.live-table-wrap { overflow-x: auto; }
+.live-table { width: 100%; border-collapse: collapse; font: 11px var(--f-mono); }
+.live-table th {
+  text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line);
+  font: 9.5px var(--f-mono); letter-spacing: 0.08em; color: var(--text-muted); font-weight: 500;
+  text-transform: uppercase; white-space: nowrap; position: sticky; top: 0; background: var(--bg-panel);
+}
+.live-table th.r { text-align: right; }
+.live-table td { padding: 6px 12px; border-bottom: 1px solid var(--line); color: var(--text); vertical-align: top; white-space: nowrap; }
+.live-table td.r { text-align: right; }
+.live-table td.sql { max-width: 360px; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
+.live-table tr.blocked td { background: var(--crit-glow); }
+.live-table td.block-cell { color: var(--crit); font-weight: 600; }
+
+/* WATCH ▸ REPORT daemon actions row — kept below the title so the controls
+   never crowd the header or clip the db path. */
+.watch-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg-elev);
+  flex-wrap: wrap;
+}
+.watch-dbpath {
+  font: 11px var(--f-mono); color: var(--text-dim); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;
+}
+.watch-actions .ops { display: flex; gap: 7px; flex: none; flex-wrap: wrap; }
