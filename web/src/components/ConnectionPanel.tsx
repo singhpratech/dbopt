@@ -70,7 +70,10 @@ export function ConnectionPanel({
       password: "",
       remember_password: false,
       trust_cert: true,
-      auth_mode: "integrated",
+      // SQL auth by default: integrated/Windows auth is NOT compiled into the
+      // standard build (it needs `--features integrated-auth` + Kerberos libs),
+      // so defaulting a new profile to integrated would reject the connection.
+      auth_mode: "sql",
       id: newProfileId(),
       name: name.trim() || "new server",
     };
