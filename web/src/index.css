@@ -1416,16 +1416,28 @@ body {
 /* ---- Rendered Markdown (AI chat output) -----------------------------------
    The AI body is parsed into real elements (see Markdown.tsx). Reset the
    container's pre-wrap so block spacing comes from margins, not raw newlines. */
-.md { white-space: normal; }
+/* Cap the prose at a comfortable reading measure so single-column answers
+   don't sprawl edge-to-edge as one wall of text. Narrow fanout columns are
+   already below this, so it only kicks in when there's room. Code blocks set
+   their own width and scroll, so the cap doesn't clip them. */
+.md { white-space: normal; max-width: 76ch; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md-p { margin: 0 0 10px; line-height: 1.65; }
-.md-h { margin: 14px 0 7px; font-weight: 700; color: var(--text); line-height: 1.3; }
+.md-p { margin: 0 0 12px; line-height: 1.72; }
+.md-h { margin: 18px 0 8px; font-weight: 700; color: var(--text); line-height: 1.3; }
 .md-h1 { font-size: 16px; } .md-h2 { font-size: 15px; } .md-h3 { font-size: 13.5px; }
 .md-h4, .md-h5, .md-h6 { font-size: 12.5px; color: var(--text-dim); letter-spacing: 0.02em; }
-.md-ul, .md-ol { margin: 0 0 10px; padding-left: 22px; }
+.md-ul, .md-ol { margin: 0 0 12px; padding-left: 24px; }
 .md-ul { list-style: disc; } .md-ol { list-style: decimal; }
-.md-ul li, .md-ol li { margin: 3px 0; line-height: 1.55; }
+.md-ul li, .md-ol li { margin: 5px 0; line-height: 1.62; }
+.md-ul li::marker, .md-ol li::marker { color: var(--text-muted); }
+/* Inline code chips — distinct from prose, but the block-code rule below
+   (.md-code pre code) wins for fenced blocks via higher specificity. */
+.md code {
+  font: 0.9em var(--f-mono); background: var(--bg-elev);
+  border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px;
+  color: var(--text); word-break: break-word;
+}
 .md-quote {
   margin: 0 0 10px; padding: 4px 12px; border-left: 3px solid var(--line-strong);
   color: var(--text-dim); background: var(--bg-elev);

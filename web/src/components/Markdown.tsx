@@ -125,10 +125,18 @@ function parseBlocks(src: string): Block[] {
   return blocks;
 }
 
-// Inline spans: `code`, **bold**/__bold__, *italic*/_italic_, [text](url).
-// Code is matched first so markup inside backticks stays literal.
+// Inline spans, matched leftmost-first; each alternative is one capture group:
+//   1 `code`   2 ***bold-italic***   3 **bold**/__bold__   4 *italic*   5 _italic_   6 [text](url)
+// Code is first so markup inside backticks stays literal. Emphasis spans require
+// a non-space just inside the markers (so "a * b" isn't italics).
+//
+// The `_italic_` form (group 5) is gated by word boundaries — `(?<![\w])_…_(?![\w])`
+// — because intra-word underscores are NOT emphasis in CommonMark/GFM. Without
+// this, SQL identifiers like `counter_name` and `sys.dm_os_performance_counters`
+// get mangled into "counter*name*" / "dmosperformancecounters". Asterisk emphasis
+// is left intra-word-capable, matching the spec.
 const RE_INLINE =
-  /(`[^`]+`)|(\*\*[\s\S]+?\*\*|__[\s\S]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(\[[^\]]+\]\([^)\s]+\))/;
+  /(`[^`]+`)|(\*\*\*(?!\s)[\s\S]+?(?<!\s)\*\*\*)|(\*\*(?!\s)[\s\S]+?(?<!\s)\*\*|__(?!\s)[\s\S]+?(?<!\s)__)|(\*(?!\s)[^*\n]+?(?<!\s)\*)|((?<![A-Za-z0-9_])_(?!\s)[^_\n]+?(?<!\s)_(?![A-Za-z0-9_]))|(\[[^\]]+\]\([^)\s]+\))/;
 
 function renderInline(text: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
@@ -148,10 +156,17 @@ function renderInline(text: string): React.ReactNode[] {
     if (m[1]) {
       out.push(<code key={key++}>{tok.slice(1, -1)}</code>);
     } else if (m[2]) {
-      out.push(<strong key={key++}>{renderInline(tok.slice(2, -2))}</strong>);
+      // ***bold-italic*** → strong wrapping em
+      out.push(
+        <strong key={key++}>
+          <em>{renderInline(tok.slice(3, -3))}</em>
+        </strong>,
+      );
     } else if (m[3]) {
+      out.push(<strong key={key++}>{renderInline(tok.slice(2, -2))}</strong>);
+    } else if (m[4] || m[5]) {
       out.push(<em key={key++}>{renderInline(tok.slice(1, -1))}</em>);
-    } else if (m[4]) {
+    } else if (m[6]) {
       const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(tok);
       if (link && /^https?:\/\//i.test(link[2])) {
         out.push(
