@@ -134,8 +134,11 @@ export function ProvidersPanel({
   return (
     <div className="providers">
       <h3>Model providers</h3>
-      <p style={{ font: "12px var(--f-sans)", color: "var(--text-muted)", margin: "0 0 18px" }}>
-        Enable any combination. The "Fanout" checkbox lets a provider participate when you send a prompt to multiple models at once from the AI workspace. Keys live in this browser only.
+      <p style={{ font: "12px var(--f-sans)", color: "var(--text-muted)", margin: "0 0 10px" }}>
+        Enable any combination. The "Fanout" checkbox sends one prompt to several models at once from the AI workspace.
+      </p>
+      <p style={{ font: "12px/1.55 var(--f-sans)", color: "var(--text)", margin: "0 0 18px", padding: "10px 13px", border: "1px solid var(--line-strong)", borderLeft: "3px solid var(--warn)", borderRadius: 4, background: "var(--bg-elev)" }}>
+        <b>Honest about your data:</b> your API keys are stored only in this browser (localStorage) — never on any dbopt server. <b>Local</b> models (Ollama, web-llm) run on your machine and nothing leaves it. <b>Cloud</b> providers (OpenAI, Anthropic, Azure&nbsp;OpenAI, AWS&nbsp;Bedrock, OpenRouter) are different: when you send a prompt, it travels over the internet to that provider — and your prompt can include your SQL, schema and findings — along with your key to authenticate the request. <b>If your SQL must never leave this machine, use a local model.</b>
       </p>
 
       {ORDER.map((k) => {

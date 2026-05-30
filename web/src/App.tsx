@@ -737,7 +737,7 @@ export function App() {
         )}
 
         {ui.workspace === "settings" && (
-          <Workspace title="Providers" subtitle="local + cloud LLMs · API keys never leave this browser">
+          <Workspace title="Providers" subtitle="local LLMs stay on-device · cloud LLMs receive your prompt">
             <div className="pane-body">
               <ProvidersPanel providers={providers} setProviders={setProviders} />
             </div>
