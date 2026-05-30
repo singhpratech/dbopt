@@ -37,10 +37,29 @@ export function ConnectionPanel({
   const [databases, setDatabases] = useState<string[] | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [scan, setScan] = useState<ScanResult | null>(null);
+  // Whether THIS backend binary was built with integrated/Windows auth. Standard
+  // release builds are not, so the UI must not offer it as a working option.
+  const [integratedAuthOk, setIntegratedAuthOk] = useState(false);
 
   function patch<K extends keyof SqlConnectionConfig>(k: K, v: SqlConnectionConfig[K]) {
     setConn({ ...conn, [k]: v });
   }
+
+  // Ask the backend what it can actually do, and auto-heal a profile that is
+  // stuck on integrated auth this build can't honor (otherwise the user is
+  // trapped on a "Failed · Integrated auth requires…" dead end after a reload).
+  useEffect(() => {
+    let live = true;
+    backend.capabilities().then((caps) => {
+      if (!live) return;
+      setIntegratedAuthOk(caps.integrated_auth);
+      if (!caps.integrated_auth && conn.auth_mode === "integrated") {
+        setConn({ ...conn, auth_mode: "sql" });
+      }
+    });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Saved-server profile management ───────────────────────────
   function newProfileId(): string {
@@ -266,17 +285,26 @@ export function ConnectionPanel({
           <div className="form-row full">
             <label>Authentication</label>
             <select value={conn.auth_mode} onChange={(e) => patch("auth_mode", e.target.value as any)}>
-              <option value="integrated">Windows (Integrated · requires backend feature flag on Linux)</option>
               <option value="sql">SQL Server (user + password)</option>
+              <option value="integrated" disabled={!integratedAuthOk}>
+                {integratedAuthOk
+                  ? "Windows (Integrated)"
+                  : "Windows (Integrated) — not available in this build"}
+              </option>
             </select>
             <p className="form-hint">
               {conn.auth_mode === "sql" ? (
-                <>SQL auth needs a login + password (e.g. <code>sa</code>).</>
+                integratedAuthOk ? (
+                  <>SQL auth needs a login + password (e.g. <code>sa</code>).</>
+                ) : (
+                  <>
+                    SQL auth needs a login + password (e.g. <code>sa</code>). Windows/Integrated
+                    auth isn’t compiled into this build, so it’s disabled above.
+                  </>
+                )
               ) : (
                 <>
-                  Windows / Integrated uses your current credentials — it needs the
-                  integrated-auth backend build (a feature-flagged binary, not the default on
-                  Linux). On Linux without it, pick <strong>SQL Server</strong> auth instead.
+                  Windows / Integrated uses your current Windows credentials — no password needed.
                 </>
               )}
             </p>

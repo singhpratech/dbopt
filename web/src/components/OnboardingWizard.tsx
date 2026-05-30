@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { defaultConn } from "../store/persist";
 import type { SqlConnectionConfig } from "../store/persist";
 import * as backend from "../api/backend";
@@ -43,6 +43,14 @@ export function OnboardingWizard({
   }));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [integratedAuthOk, setIntegratedAuthOk] = useState(false);
+
+  // This build may not include integrated/Windows auth; don't offer it if so.
+  useEffect(() => {
+    let live = true;
+    backend.capabilities().then((caps) => { if (live) setIntegratedAuthOk(caps.integrated_auth); });
+    return () => { live = false; };
+  }, []);
 
   function patch<K extends keyof SqlConnectionConfig>(k: K, v: SqlConnectionConfig[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
@@ -140,7 +148,11 @@ export function OnboardingWizard({
                 <label>Authentication</label>
                 <select value={draft.auth_mode} onChange={(e) => patch("auth_mode", e.target.value as any)}>
                   <option value="sql">SQL Server (user + password)</option>
-                  <option value="integrated">Windows (Integrated · needs backend flag on Linux)</option>
+                  <option value="integrated" disabled={!integratedAuthOk}>
+                    {integratedAuthOk
+                      ? "Windows (Integrated)"
+                      : "Windows (Integrated) — not available in this build"}
+                  </option>
                 </select>
               </div>
               {draft.auth_mode === "sql" && (

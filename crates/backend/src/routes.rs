@@ -14,6 +14,7 @@ use crate::{health, logs, ollama, providers, scan, sentinel_api, sqlserver};
 pub fn router() -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/capabilities", get(capabilities))
         .route("/connect", post(connect))
         .route("/databases", post(databases))
         .route("/advise", post(advise))
@@ -41,6 +42,16 @@ pub fn router() -> Router {
 }
 
 async fn health() -> &'static str { "ok" }
+
+/// What THIS binary can actually do. The UI gates connection options on this so
+/// it never offers a path the build can't honor (e.g. Integrated/Windows auth,
+/// which is only compiled in with `--features integrated-auth` + Kerberos libs
+/// and is absent from every standard release build).
+async fn capabilities() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "integrated_auth": cfg!(feature = "integrated-auth"),
+    }))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ConnectReq {

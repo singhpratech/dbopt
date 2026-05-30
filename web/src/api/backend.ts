@@ -29,6 +29,20 @@ export async function backendHealthy(): Promise<boolean> {
   }
 }
 
+export type Capabilities = { integrated_auth: boolean };
+
+/** What this backend binary actually supports. Defaults to the safe assumption
+ *  (no integrated auth) if the call fails, so the UI never offers a dead end. */
+export async function capabilities(): Promise<Capabilities> {
+  try {
+    const r = await fetch(`${BASE}/capabilities`, { method: "GET" });
+    if (!r.ok) return { integrated_auth: false };
+    return await r.json();
+  } catch {
+    return { integrated_auth: false };
+  }
+}
+
 export async function connect(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/connect`, {
     method: "POST",
