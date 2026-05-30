@@ -24,8 +24,40 @@ pub async fn run(
     instances: Vec<InstanceConfig>,
     storage: Arc<Storage>,
     shutdown: CancellationToken,
+    retention_days: u64,
 ) {
     let mut handles = Vec::new();
+
+    // Housekeeping: prune aged-out telemetry so the SQLite store can't grow
+    // without bound. Fires immediately on start (trims an existing large DB),
+    // then every 6 hours. `retention_days == 0` disables pruning.
+    if retention_days > 0 {
+        let storage = storage.clone();
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(6 * 60 * 60));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+                        match storage.prune_before(cutoff) {
+                            Ok(n) if n > 0 => tracing::info!(
+                                target: "sentinel::scheduler",
+                                "pruned {n} telemetry rows older than {retention_days}d"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
+                                target: "sentinel::scheduler", "prune failed: {e:#}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
     for inst in instances.into_iter().filter(|i| i.enabled) {
         let cadences = inst.cadences.clone();
         let conn = Arc::new(inst.conn.clone());

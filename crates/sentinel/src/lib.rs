@@ -77,7 +77,15 @@ fn default_true() -> bool { true }
 pub struct SentinelConfig {
     pub instances: Vec<InstanceConfig>,
     pub db_path: PathBuf,
+    /// How many days of captured time-series to keep. Older rows are pruned by a
+    /// background housekeeping task so the SQLite store can't grow without bound.
+    /// `0` disables pruning (keep forever).
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
 }
+
+/// Default retention window for captured telemetry (90 days).
+pub fn default_retention_days() -> u64 { 90 }
 
 impl SentinelConfig {
     /// Resolve the default DB path: `$SQLOPT_DATA_DIR/sentinel.db` if set,
@@ -115,8 +123,9 @@ impl Sentinel {
         let storage_for_task = storage.clone();
         let shutdown_for_task = shutdown.clone();
         let instances = config.instances.clone();
+        let retention_days = config.retention_days;
         let join = tokio::spawn(async move {
-            scheduler::run(instances, storage_for_task, shutdown_for_task).await;
+            scheduler::run(instances, storage_for_task, shutdown_for_task, retention_days).await;
         });
 
         tracing::info!(target: "sentinel", "sentinel started with {} instance(s)", config.instances.len());

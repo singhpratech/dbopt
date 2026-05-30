@@ -187,6 +187,41 @@ impl Storage {
         Ok(())
     }
 
+    // ---------- Retention --------------------------------------------------
+
+    /// Delete captured time-series rows older than `cutoff` across every
+    /// time-series table, bounding the store's on-disk growth. Returns the
+    /// number of rows removed. After a non-trivial prune we truncate the WAL so
+    /// freed pages are actually reclaimed on disk.
+    ///
+    /// `instances` / `poller_state` / `meta` / the AI + analysis logs are NOT
+    /// touched — only the high-volume telemetry tables age out.
+    pub fn prune_before(&self, cutoff: DateTime<Utc>) -> anyhow::Result<usize> {
+        const TABLES: &[&str] = &[
+            "query_store_snapshot",
+            "live_request_snapshot",
+            "wait_stats_delta",
+            "deadlock_capture",
+            "index_usage_delta",
+            "size_snapshot",
+        ];
+        let cutoff_ms = cutoff.timestamp_millis();
+        let conn = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let mut removed = 0usize;
+        for t in TABLES {
+            // Table names are compile-time constants, never user input.
+            removed += conn.execute(
+                &format!("DELETE FROM {t} WHERE captured_at < ?1"),
+                [cutoff_ms],
+            )?;
+        }
+        if removed > 0 {
+            // Best-effort: reclaim WAL space after a large delete.
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        Ok(removed)
+    }
+
     // ---------- Instance registry ----------------------------------------
 
     /// Find-or-create an `instances` row for the given name + connection.
@@ -929,5 +964,40 @@ mod tests {
         s.update_wait_snapshot(id, &snap).expect("save");
         let restored = s.previous_wait_snapshot(id).expect("restore");
         assert_eq!(restored.get("LCK_M_X"), Some(&(10, 100, 5)));
+    }
+
+    #[test]
+    fn prune_drops_only_old_rows() {
+        let s = Storage::open_in_memory().expect("open");
+        let conn = ConnectionInfo {
+            server: "localhost,1433".into(),
+            database: Some("master".into()),
+            user: Some("sa".into()),
+            password: Some("x".into()),
+            trust_cert: Some(true),
+        };
+        let id = s.ensure_instance("t", &conn).expect("ensure");
+        let mk = |age_days: i64, qid: i64| QueryStoreRow {
+            captured_at: Utc::now() - chrono::Duration::days(age_days),
+            query_id: qid,
+            plan_id: 1,
+            total_duration_ms: 10,
+            cpu_ms: 5,
+            logical_reads: 1,
+            executions: 1,
+            query_sql_text: Some("SELECT 1".into()),
+            last_execution_ms: Some(Utc::now().timestamp_millis()),
+        };
+        s.insert_query_store_row(id, &mk(100, 1)).expect("old");
+        s.insert_query_store_row(id, &mk(1, 2)).expect("recent");
+
+        let removed = s
+            .prune_before(Utc::now() - chrono::Duration::days(30))
+            .expect("prune");
+        assert_eq!(removed, 1, "only the 100-day-old row should be pruned");
+
+        let rows = s.top_n_by_duration(TimeRange::last_days(365), 10).expect("top");
+        assert_eq!(rows.len(), 1, "recent row survives");
+        assert_eq!(rows[0].query_id, 2);
     }
 }

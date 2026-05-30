@@ -104,6 +104,7 @@ fn build_config(instances: Vec<PersistedInstance>) -> SentinelConfig {
             })
             .collect(),
         db_path: SentinelConfig::default_db_path(),
+        retention_days: sentinel::default_retention_days(),
     }
 }
 
