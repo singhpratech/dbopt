@@ -11,6 +11,15 @@ machine unless you choose to send it.
 > PostgreSQL and MySQL are on the roadmap (future, not yet implemented). The
 > engine seam is in place so they slot in without disturbing the SQL Server core.
 
+> **Free and open.** No per-seat cost, no paywalled features. The goal is to give
+> SQL developers and DBAs what the commercial tools do — without monetizing their pain.
+
+## Documentation
+
+- **[Who is dbopt for?](docs/WHO-IS-DBOPT-FOR.md)** — what it does for SQL developers, DBAs, and platform teams (start here).
+- **[Access & Permissions](docs/ACCESS.md)** — exactly what database access each capability needs, with a least-privilege grant script and a per-platform matrix (self-managed / RDS / Azure).
+- **[Roadmap to "complete"](docs/ROADMAP-TO-COMPLETE.md)** — honest gap analysis vs the commercial field and the prioritized plan to close it.
+
 ---
 
 ## Why this exists
