@@ -3948,3 +3948,26 @@ kbd {
   text-underline-offset: 2px;
 }
 .syntax-diag:hover { color: var(--text); }
+
+/* Query Store capture-mode control (WATCH ▸ REPORT). */
+.qstore-strip { border-bottom: 1px solid var(--line); background: var(--bg-elev); }
+.qstore-row { display: flex; align-items: center; gap: 12px; padding: 9px 16px; flex-wrap: wrap; }
+.qstore-label { font: 10px var(--f-mono); letter-spacing: 0.12em; color: var(--text-muted); font-weight: 600; }
+.qstore-note { font: 11px var(--f-mono); color: var(--text-dim); min-width: 0; flex: 1 1 240px; }
+.qstore-err { padding: 6px 16px; font: 11px var(--f-mono); color: var(--crit); background: var(--crit-glow); }
+.qstore-confirm {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 16px; border-top: 1px solid var(--line); background: var(--bg-panel);
+  font: 11px var(--f-mono); color: var(--text-dim);
+}
+.qstore-confirm code {
+  font: 11px var(--f-mono); color: var(--text); background: var(--bg-elev);
+  border: 1px solid var(--line-strong); border-radius: 3px; padding: 3px 8px;
+}
+.qstore-confirm-ops { display: flex; gap: 7px; }
+.qstore-confirm-ops button {
+  font: 11px var(--f-mono); padding: 3px 12px; border: 1px solid var(--line-strong);
+  background: var(--bg-elev); color: var(--text); border-radius: 3px; cursor: pointer;
+}
+.qstore-confirm-ops button.primary { background: var(--accent); color: #0a0e07; border-color: var(--accent); }
+.qstore-confirm-ops button:disabled { opacity: .5; cursor: default; }

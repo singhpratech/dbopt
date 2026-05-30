@@ -260,6 +260,33 @@ export async function explain(info: ConnectionInfo, sql: string): Promise<string
   return (json as any).plan_xml as string;
 }
 
+export type QStoreStatus = { enabled: boolean; state: string; capture_mode: string };
+
+/** Query Store config for the connected database (capture_mode AUTO|ALL|NONE). */
+export async function qstoreStatus(info: ConnectionInfo): Promise<QStoreStatus> {
+  const r = await fetch(`${BASE}/qstore/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(info),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((json as any).error ?? `query store status failed (${r.status})`);
+  return json as QStoreStatus;
+}
+
+/** Set the connected DB's Query Store capture mode (runs DDL — caller must
+ *  preview + confirm first). mode is allowlisted server-side to AUTO|ALL|NONE. */
+export async function qstoreSetCapture(info: ConnectionInfo, mode: "AUTO" | "ALL" | "NONE"): Promise<{ ok: boolean; message?: string }> {
+  const r = await fetch(`${BASE}/qstore/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...info, mode }),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((json as any).error ?? `set capture mode failed (${r.status})`);
+  return json as { ok: boolean; message?: string };
+}
+
 export type ParseDiagnostic = { number: number; line: number; message: string };
 export type ValidateResult = { ok: boolean; diagnostics: ParseDiagnostic[] };
 

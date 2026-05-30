@@ -165,6 +165,55 @@ pub async fn estimated_plan(req: &ConnectReq, sql: &str) -> anyhow::Result<Strin
     Ok(out)
 }
 
+/// Query Store config for the connected database. `capture_mode` is AUTO (skip
+/// one-off/cheap queries — the engine default), ALL (capture every query), or
+/// NONE/OFF. `enabled` is false when Query Store is OFF for the database.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueryStoreStatus {
+    pub enabled: bool,
+    pub state: String,
+    pub capture_mode: String,
+}
+
+pub async fn query_store_status(req: &ConnectReq) -> anyhow::Result<QueryStoreStatus> {
+    let mut client = open(req).await?;
+    let stream = client
+        .simple_query("SELECT actual_state_desc, query_capture_mode_desc FROM sys.database_query_store_options")
+        .await?;
+    let rows = stream.into_first_result().await?;
+    if let Some(r) = rows.into_iter().next() {
+        let state = r.get::<&str, _>(0).unwrap_or("OFF").to_string();
+        let mode = r.get::<&str, _>(1).unwrap_or("NONE").to_string();
+        Ok(QueryStoreStatus { enabled: !state.eq_ignore_ascii_case("OFF"), state, capture_mode: mode })
+    } else {
+        Ok(QueryStoreStatus { enabled: false, state: "OFF".into(), capture_mode: "NONE".into() })
+    }
+}
+
+/// Set the connected database's Query Store capture mode. `mode` is validated
+/// against a strict allowlist — we NEVER interpolate arbitrary text into DDL —
+/// and we target `DATABASE CURRENT` (the connected DB) so there is no database
+/// name to escape. Caller (UI) shows this exact statement and requires explicit
+/// confirmation before invoking — this is a Safe-Apply action, not auto-DDL.
+pub async fn set_query_store_capture(req: &ConnectReq, mode: &str) -> anyhow::Result<String> {
+    let mode = match mode.to_ascii_uppercase().as_str() {
+        "AUTO" => "AUTO",
+        "ALL" => "ALL",
+        "NONE" => "NONE",
+        other => return Err(anyhow::anyhow!("unsupported capture mode '{other}' (expected AUTO, ALL, or NONE)")),
+    };
+    if req.database.as_deref().map(|d| d.is_empty()).unwrap_or(true) {
+        return Err(anyhow::anyhow!("select a database first — Query Store capture mode is per-database"));
+    }
+    let mut client = open(req).await?;
+    // Query Store must be ON before its capture mode can be set; ON when already
+    // on is a no-op. CURRENT = the connected database (no name interpolation).
+    let _ = client.simple_query("ALTER DATABASE CURRENT SET QUERY_STORE = ON").await;
+    let stmt = format!("ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = {mode})");
+    client.simple_query(stmt.as_str()).await?;
+    Ok(format!("Query Store capture mode set to {mode}"))
+}
+
 /// One T-SQL syntax diagnostic from the real engine parser. `number` is the
 /// SQL Server error number (e.g. 102 "Incorrect syntax near …"), `line` is the
 /// 1-based line within the submitted batch.

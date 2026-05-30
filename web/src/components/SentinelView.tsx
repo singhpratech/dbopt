@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
 import { LiveMonitor } from "./LiveMonitor";
+import * as backend from "../api/backend";
+import type { QStoreStatus } from "../api/backend";
 
 // ---------- Wire types (mirror crates/sentinel/src/report.rs) -------------
 
@@ -240,6 +242,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
 
       {tab === "report" && (<>
 
+      <QStoreCapture conn={conn} />
 
       {err && (
         <div
@@ -484,6 +487,89 @@ function Empty({ msg }: { msg: string }) {
       }}
     >
       {msg}
+    </div>
+  );
+}
+
+/**
+ * Query Store capture-mode control. AUTO (default) lets SQL Server skip the
+ * cheapest/rarest queries; ALL captures every statement. Switching ALL is a
+ * DDL change to the connected database, so we PREVIEW the exact statement and
+ * require an explicit Apply (Safe-Apply) — never silent. Per-database.
+ */
+function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
+  const [status, setStatus] = useState<QStoreStatus | null>(null);
+  const [pending, setPending] = useState<"AUTO" | "ALL" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const connected = !!conn.server && !!conn.database;
+
+  const payload = {
+    server: conn.server,
+    database: conn.database || undefined,
+    user: conn.auth_mode === "sql" ? conn.user : undefined,
+    password: conn.auth_mode === "sql" ? conn.password : undefined,
+    trust_cert: conn.trust_cert,
+  };
+
+  const load = useCallback(async () => {
+    if (!connected) return;
+    try {
+      setStatus(await backend.qstoreStatus(payload as any));
+      setErr(null);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn.server, conn.database, conn.user, conn.password, conn.trust_cert]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function apply(mode: "AUTO" | "ALL") {
+    setBusy(true); setErr(null);
+    try {
+      await backend.qstoreSetCapture(payload as any, mode);
+      setPending(null);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!connected) return null;
+
+  const mode = status?.capture_mode ?? "—";
+  const stmt = (m: string) => `ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = ${m})`;
+
+  return (
+    <div className="qstore-strip">
+      <div className="qstore-row">
+        <span className="qstore-label">QUERY STORE CAPTURE</span>
+        <span className="live-tabs">
+          <button className={mode === "AUTO" ? "active" : ""} disabled={busy} onClick={() => mode !== "AUTO" && setPending("AUTO")}>AUTO</button>
+          <button className={mode === "ALL" ? "active" : ""} disabled={busy} onClick={() => mode !== "ALL" && setPending("ALL")}>ALL</button>
+        </span>
+        <span className="qstore-note">
+          {status && !status.enabled
+            ? "Query Store is OFF for this database."
+            : mode === "ALL"
+            ? "Full capture — every statement is recorded (higher overhead)."
+            : "AUTO (default) — recurring/expensive queries are captured; one-off ad-hoc queries are skipped."}
+        </span>
+      </div>
+      {err && <div className="qstore-err">{err}</div>}
+      {pending && (
+        <div className="qstore-confirm">
+          <span>Apply this change to <b>{conn.database}</b>?</span>
+          <code>{stmt(pending)}</code>
+          <div className="qstore-confirm-ops">
+            <button className="primary" disabled={busy} onClick={() => apply(pending)}>{busy ? "APPLYING…" : "APPLY"}</button>
+            <button disabled={busy} onClick={() => setPending(null)}>CANCEL</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

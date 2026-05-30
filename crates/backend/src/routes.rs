@@ -24,6 +24,8 @@ pub fn router() -> Router {
         .route("/monitor/live", post(monitor_live))
         .route("/explain", post(explain))
         .route("/validate", post(validate))
+        .route("/qstore/status", post(qstore_status))
+        .route("/qstore/capture", post(qstore_capture))
         .route("/llm/models", get(llm_models))
         .route("/llm/chat", post(llm_chat))
         .route("/llm/cloud/:provider", post(llm_cloud))
@@ -167,6 +169,32 @@ async fn validate(Json(req): Json<ExplainReq>) -> impl IntoResponse {
             Json(serde_json::json!({ "ok": diags.is_empty(), "diagnostics": diags })),
         )
             .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// POST /api/qstore/status — Query Store config for the connected database.
+async fn qstore_status(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+    match sqlserver::query_store_status(&req).await {
+        Ok(s) => (StatusCode::OK, Json(s)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QStoreCaptureReq {
+    #[serde(flatten)]
+    pub conn: ConnectReq,
+    /// AUTO | ALL | NONE — validated server-side against an allowlist.
+    pub mode: String,
+}
+
+/// POST /api/qstore/capture — set the connected DB's Query Store capture mode.
+/// This runs DDL; the UI must preview the statement and get explicit user
+/// confirmation first (Safe-Apply). Mode is allowlisted in `set_query_store_capture`.
+async fn qstore_capture(Json(req): Json<QStoreCaptureReq>) -> impl IntoResponse {
+    match sqlserver::set_query_store_capture(&req.conn, &req.mode).await {
+        Ok(msg) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "message": msg }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
