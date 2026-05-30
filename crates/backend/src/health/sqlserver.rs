@@ -300,6 +300,10 @@ impl HealthProvider for SqlServerHealthProvider {
         // g. Sort by severity then impact_rank desc.
         rank(&mut issues);
 
+        // g2. Top-of-report "tackle this week" plan — the worst few, in plain
+        //     English, derived straight from the ranked issues.
+        let action_plan = super::build_action_plan(&issues, 6);
+
         // SignalSummary from rec-kind counts + sentinel pain + regression count.
         let mut signals = SignalSummary {
             top_wait_type: pain.top_wait_type.clone(),
@@ -343,6 +347,7 @@ impl HealthProvider for SqlServerHealthProvider {
             efficiency_grade: scores.efficiency_grade,
             operational_score: scores.operational_score,
             operational_grade: scores.operational_grade,
+            action_plan,
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
             counts,

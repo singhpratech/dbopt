@@ -48,6 +48,10 @@ pub struct HealthReport {
     /// Operational lane (backups, config best-practices, log VLFs). 100 = clean.
     pub operational_score: u8,
     pub operational_grade: char,
+    /// Top-of-report prioritized "tackle this week" list, in plain English.
+    /// Derived from the ranked issues — never fabricated; if there's nothing
+    /// worth acting on (or not enough data yet) it's empty.
+    pub action_plan: Vec<ActionItem>,
     pub is_learning: bool,
     /// Seconds of sentinel telemetry backing the runtime signals (None when the
     /// monitor hasn't captured anything yet). Lets the UI say "monitoring for 2h"
@@ -355,6 +359,45 @@ pub fn score_report(
         operational_grade,
         is_learning: false,
     }
+}
+
+/// One prioritized, plain-English to-do for the top of the report. This is a
+/// re-presentation of a real ranked [`Issue`] — never invented.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionItem {
+    pub priority: u32,
+    pub severity: String,
+    pub object: String,
+    /// What's wrong, in plain words (the issue title).
+    pub headline: String,
+    /// Why it hurts (the issue's plain-English consequence).
+    pub why: String,
+    /// What to do about it (imperative).
+    pub do_this: String,
+    pub issue_id: String,
+    pub fix_sql: Option<String>,
+}
+
+/// Build the "tackle this week" list: the top `max` actionable issues, already
+/// ranked (critical first, then impact). Info-level noise is excluded. Returns
+/// empty when there's nothing worth acting on — we never pad it.
+pub fn build_action_plan(issues: &[Issue], max: usize) -> Vec<ActionItem> {
+    issues
+        .iter()
+        .filter(|i| matches!(i.severity.as_str(), "critical" | "error" | "warning"))
+        .take(max)
+        .enumerate()
+        .map(|(idx, i)| ActionItem {
+            priority: (idx + 1) as u32,
+            severity: i.severity.clone(),
+            object: i.affected_object.clone(),
+            headline: i.title.clone(),
+            why: i.consequence.clone(),
+            do_this: i.rationale.clone(),
+            issue_id: i.id.clone(),
+            fix_sql: i.fix_sql.clone(),
+        })
+        .collect()
 }
 
 /// Map a score to a letter grade + status word.
