@@ -167,11 +167,26 @@ pub struct InstanceReq {
 pub struct ReportQuery {
     #[serde(default)]
     pub days: Option<i64>,
+    /// Which query sort the user has selected in the UI ("duration" | "recent").
+    /// Echoed into the report so HTML/Markdown lead with that view and JSON
+    /// reflects it — a download then matches what the user is looking at.
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 fn window_from_query(q: &ReportQuery) -> TimeRange {
     let days = q.days.unwrap_or(7).max(1);
     TimeRange::last_days(days)
+}
+
+/// Normalize the requested sort to the allowed set; anything but "recent" is
+/// treated as the default "duration".
+fn sort_from_query(q: &ReportQuery) -> String {
+    match q.sort.as_deref() {
+        Some(s) if s.eq_ignore_ascii_case("recent") => "recent",
+        _ => "duration",
+    }
+    .to_string()
 }
 
 // ---------- handlers -------------------------------------------------------
@@ -283,19 +298,22 @@ pub fn build_report(window: TimeRange) -> WeeklyReport {
             recent_queries: Vec::new(),
             regressions: Vec::new(),
             unused_indexes: Vec::new(),
+            sort: "duration".to_string(),
         },
     }
 }
 
 pub async fn report_json(Query(q): Query<ReportQuery>) -> impl IntoResponse {
     let window = window_from_query(&q);
-    let report = build_report(window);
+    let mut report = build_report(window);
+    report.sort = sort_from_query(&q);
     (StatusCode::OK, Json(report))
 }
 
 pub async fn report_markdown(Query(q): Query<ReportQuery>) -> impl IntoResponse {
     let window = window_from_query(&q);
-    let report = build_report(window);
+    let mut report = build_report(window);
+    report.sort = sort_from_query(&q);
     let body = render_markdown(&report);
     (
         StatusCode::OK,
@@ -306,7 +324,8 @@ pub async fn report_markdown(Query(q): Query<ReportQuery>) -> impl IntoResponse 
 
 pub async fn report_html(Query(q): Query<ReportQuery>) -> impl IntoResponse {
     let window = window_from_query(&q);
-    let report = build_report(window);
+    let mut report = build_report(window);
+    report.sort = sort_from_query(&q);
     let body = render_html(&report);
     (
         StatusCode::OK,

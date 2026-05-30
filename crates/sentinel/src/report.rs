@@ -20,6 +20,21 @@ pub struct WeeklyReport {
     pub recent_queries: Vec<TopQueryDto>,
     pub regressions: Vec<RegressionDto>,
     pub unused_indexes: Vec<UnusedIndexDto>,
+    /// Which query sort the viewer had selected ("duration" | "recent"). The
+    /// HTML/Markdown render lead with that view (and the JSON echoes it), so a
+    /// download matches the list the user is actually looking at. Defaults to
+    /// "duration".
+    #[serde(default)]
+    pub sort: String,
+}
+
+/// Number of top queries kept per sort in the report (both "by duration" and
+/// "by last run"). Matches the poller's per-tick capture depth.
+pub const TOP_N: usize = 50;
+
+/// True when the report should lead with the "by last run" view.
+fn recent_first(r: &WeeklyReport) -> bool {
+    r.sort.eq_ignore_ascii_case("recent")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -116,13 +131,13 @@ impl From<UnusedIndexRow> for UnusedIndexDto {
 /// Build a report for the given window.
 pub fn render_weekly(storage: &Storage, window: TimeRange) -> WeeklyReport {
     let top_queries = storage
-        .top_n_by_duration(window, 25)
+        .top_n_by_duration(window, TOP_N)
         .unwrap_or_default()
         .into_iter()
         .map(TopQueryDto::from)
         .collect();
     let recent_queries = storage
-        .top_n_by_recency(window, 25)
+        .top_n_by_recency(window, TOP_N)
         .unwrap_or_default()
         .into_iter()
         .map(TopQueryDto::from)
@@ -151,6 +166,7 @@ pub fn render_weekly(storage: &Storage, window: TimeRange) -> WeeklyReport {
         recent_queries,
         regressions,
         unused_indexes,
+        sort: "duration".to_string(),
     }
 }
 
@@ -158,6 +174,65 @@ fn fmt_ms(ms: i64) -> String {
     if ms >= 60_000 { format!("{:.1} min", ms as f64 / 60_000.0) }
     else if ms >= 1_000 { format!("{:.2} s", ms as f64 / 1_000.0) }
     else { format!("{} ms", ms) }
+}
+
+/// One-line, pipe-escaped, 80-char-clipped SQL for a Markdown table cell.
+fn md_sql(t: Option<&str>) -> String {
+    match t {
+        Some(t) if !t.trim().is_empty() => {
+            let one_line = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            let clipped: String = one_line.chars().take(80).collect();
+            format!("`{}`", clipped.replace('|', "\\|"))
+        }
+        _ => "—".to_string(),
+    }
+}
+
+fn md_cur(current: bool) -> &'static str {
+    if current { " (current view)" } else { "" }
+}
+
+/// Markdown section: top queries by total duration. `current` marks the view
+/// the user had selected so the download matches the UI.
+fn md_top_by_duration(s: &mut String, r: &WeeklyReport, current: bool) {
+    let _ = writeln!(s, "## Top {} queries by total duration{}", r.top_queries.len(), md_cur(current));
+    let _ = writeln!(s);
+    if r.top_queries.is_empty() {
+        let _ = writeln!(s, "_No Query Store rows in window. Enable Query Store on the target database._");
+    } else {
+        let _ = writeln!(s, "| Query | SQL | Total | Executions | Avg | Last run |");
+        let _ = writeln!(s, "|---|---|---:|---:|---:|---:|");
+        for q in &r.top_queries {
+            let _ = writeln!(
+                s,
+                "| `{}` | {} | {} | {} | {} | {} |",
+                q.query_id, md_sql(q.query_sql_text.as_deref()), fmt_ms(q.total_duration_ms),
+                q.executions, fmt_ms(q.avg_duration_ms), fmt_ts_ms(q.last_run_ms),
+            );
+        }
+    }
+    let _ = writeln!(s);
+}
+
+/// Markdown section: top queries by most-recent execution.
+fn md_top_by_recency(s: &mut String, r: &WeeklyReport, current: bool) {
+    let _ = writeln!(s, "## Top {} queries by last run{}", r.recent_queries.len(), md_cur(current));
+    let _ = writeln!(s);
+    if r.recent_queries.is_empty() {
+        let _ = writeln!(s, "_No Query Store rows with a recorded last-run time in window._");
+    } else {
+        let _ = writeln!(s, "| Last run | Query | SQL | Total | Executions | Avg |");
+        let _ = writeln!(s, "|---|---|---|---:|---:|---:|");
+        for q in &r.recent_queries {
+            let _ = writeln!(
+                s,
+                "| {} | `{}` | {} | {} | {} | {} |",
+                fmt_ts_ms(q.last_run_ms), q.query_id, md_sql(q.query_sql_text.as_deref()),
+                fmt_ms(q.total_duration_ms), q.executions, fmt_ms(q.avg_duration_ms),
+            );
+        }
+    }
+    let _ = writeln!(s);
 }
 
 /// Render the report as a Markdown document.
@@ -189,32 +264,14 @@ pub fn render_markdown(r: &WeeklyReport) -> String {
     let _ = writeln!(s, "| Blocking incidents | {} |", r.pain.blocking_incidents);
     let _ = writeln!(s);
 
-    // ── Top queries by total duration ───────────────────
-    let _ = writeln!(s, "## Top {} queries by total duration", r.top_queries.len());
-    let _ = writeln!(s);
-    if r.top_queries.is_empty() {
-        let _ = writeln!(s, "_No Query Store rows in window. Enable Query Store on the target database._");
+    // ── Top queries — lead with the view the user had selected ──
+    if recent_first(r) {
+        md_top_by_recency(&mut s, r, true);
+        md_top_by_duration(&mut s, r, false);
     } else {
-        let _ = writeln!(s, "| Query | SQL | Total | Executions | Avg |");
-        let _ = writeln!(s, "|---|---|---:|---:|---:|");
-        for q in &r.top_queries {
-            let sql = q
-                .query_sql_text
-                .as_deref()
-                .map(|t| {
-                    let one_line = t.split_whitespace().collect::<Vec<_>>().join(" ");
-                    let clipped: String = one_line.chars().take(80).collect();
-                    format!("`{}`", clipped.replace('|', "\\|"))
-                })
-                .unwrap_or_else(|| "—".to_string());
-            let _ = writeln!(
-                s,
-                "| `{}` | {} | {} | {} | {} |",
-                q.query_id, sql, fmt_ms(q.total_duration_ms), q.executions, fmt_ms(q.avg_duration_ms),
-            );
-        }
+        md_top_by_duration(&mut s, r, true);
+        md_top_by_recency(&mut s, r, false);
     }
-    let _ = writeln!(s);
 
     // ── Regressions ─────────────────────────────────────
     let _ = writeln!(s, "## Regressions (≥2× slower vs. baseline half-window)");
@@ -321,7 +378,72 @@ td.sql code{display:block;background:var(--panel);border:1px solid var(--line);b
 .bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-bottom:3px}\
 .bar span{display:block;height:100%;background:var(--accent)}\
 .empty{color:var(--dim);font-style:italic;padding:4px 0 10px}\
+.cur{color:var(--muted);font-size:11px;letter-spacing:.04em}\
 footer{margin-top:30px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}";
+
+/// "· current view" marker appended to the heading of the selected sort.
+fn cur_marker(current: bool) -> &'static str {
+    if current { " <span class=\"cur\">· current view</span>" } else { "" }
+}
+
+/// HTML section: top queries ranked by total duration (with inline proportion
+/// bars). `current` marks it as the view the user had selected.
+fn html_top_by_duration(body: &mut String, r: &WeeklyReport, current: bool) {
+    let max_total = r.top_queries.iter().map(|q| q.total_duration_ms).max().unwrap_or(0);
+    let _ = write!(body, "<section><h2>Top queries · by total duration{}</h2>", cur_marker(current));
+    if r.top_queries.is_empty() {
+        body.push_str("<p class=\"empty\">No Query Store rows in window. Enable Query Store on the target database, then wait for the next poll.</p>");
+    } else {
+        body.push_str("<table><thead><tr><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th><th class=\"num\">Last run</th></tr></thead><tbody>");
+        for q in &r.top_queries {
+            let pct = if max_total > 0 {
+                (q.total_duration_ms as f64 / max_total as f64 * 100.0).round() as i64
+            } else {
+                0
+            };
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td>\
+<td class=\"num\"><div class=\"bar\"><span style=\"width:{}%\"></span></div>{}</td>\
+<td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num dim\">{}</td></tr>",
+                q.query_id,
+                esc(&one_line(q.query_sql_text.as_deref())),
+                pct,
+                fmt_ms(q.total_duration_ms),
+                q.executions,
+                fmt_ms(q.avg_duration_ms),
+                fmt_ts_ms(q.last_run_ms),
+            );
+        }
+        body.push_str("</tbody></table>");
+    }
+    body.push_str("</section>");
+}
+
+/// HTML section: top queries ranked by most-recent execution. `current` marks
+/// it as the view the user had selected.
+fn html_top_by_recency(body: &mut String, r: &WeeklyReport, current: bool) {
+    let _ = write!(body, "<section><h2>Top queries · by last run{}</h2>", cur_marker(current));
+    if r.recent_queries.is_empty() {
+        body.push_str("<p class=\"empty\">No Query Store rows with a recorded last-run time in window.</p>");
+    } else {
+        body.push_str("<table><thead><tr><th class=\"num\">Last run</th><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th></tr></thead><tbody>");
+        for q in &r.recent_queries {
+            let _ = write!(
+                body,
+                "<tr><td class=\"num dim\">{}</td><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+                fmt_ts_ms(q.last_run_ms),
+                q.query_id,
+                esc(&one_line(q.query_sql_text.as_deref())),
+                fmt_ms(q.total_duration_ms),
+                q.executions,
+                fmt_ms(q.avg_duration_ms),
+            );
+        }
+        body.push_str("</tbody></table>");
+    }
+    body.push_str("</section>");
+}
 
 /// Render the report as a self-contained, styled HTML document built directly
 /// from the report data (NOT by string-munging the markdown — that left tables
@@ -358,53 +480,13 @@ pub fn render_html(r: &WeeklyReport) -> String {
         r.instances,
     );
 
-    // ── Top queries by total duration (with inline proportion bars) ──
-    let max_total = r.top_queries.iter().map(|q| q.total_duration_ms).max().unwrap_or(0);
-    let _ = write!(body, "<section><h2>Top queries · by total duration</h2>");
-    if r.top_queries.is_empty() {
-        body.push_str("<p class=\"empty\">No Query Store rows in window. Enable Query Store on the target database, then wait for the next poll.</p>");
+    // ── Top queries — lead with the view the user had selected ──
+    if recent_first(r) {
+        html_top_by_recency(&mut body, r, true);
+        html_top_by_duration(&mut body, r, false);
     } else {
-        body.push_str("<table><thead><tr><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th><th class=\"num\">Last run</th></tr></thead><tbody>");
-        for q in &r.top_queries {
-            let pct = if max_total > 0 {
-                (q.total_duration_ms as f64 / max_total as f64 * 100.0).round() as i64
-            } else {
-                0
-            };
-            let _ = write!(
-                body,
-                "<tr><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td>\
-<td class=\"num\"><div class=\"bar\"><span style=\"width:{}%\"></span></div>{}</td>\
-<td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num dim\">{}</td></tr>",
-                q.query_id,
-                esc(&one_line(q.query_sql_text.as_deref())),
-                pct,
-                fmt_ms(q.total_duration_ms),
-                q.executions,
-                fmt_ms(q.avg_duration_ms),
-                fmt_ts_ms(q.last_run_ms),
-            );
-        }
-        body.push_str("</tbody></table>");
-    }
-    body.push_str("</section>");
-
-    // ── Top queries by last run ─────────────────────────
-    if !r.recent_queries.is_empty() {
-        body.push_str("<section><h2>Top queries · by last run</h2><table><thead><tr><th class=\"num\">Last run</th><th>Query</th><th>SQL text</th><th class=\"num\">Total</th><th class=\"num\">Executions</th><th class=\"num\">Avg</th></tr></thead><tbody>");
-        for q in &r.recent_queries {
-            let _ = write!(
-                body,
-                "<tr><td class=\"num dim\">{}</td><td class=\"mono\">{}</td><td class=\"sql\"><code>{}</code></td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
-                fmt_ts_ms(q.last_run_ms),
-                q.query_id,
-                esc(&one_line(q.query_sql_text.as_deref())),
-                fmt_ms(q.total_duration_ms),
-                q.executions,
-                fmt_ms(q.avg_duration_ms),
-            );
-        }
-        body.push_str("</tbody></table></section>");
+        html_top_by_duration(&mut body, r, true);
+        html_top_by_recency(&mut body, r, false);
     }
 
     // ── Regressions ─────────────────────────────────────

@@ -180,14 +180,15 @@ export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig
     }
   }
 
+  // Downloads honor the selected sort so the file matches the on-screen view.
   async function downloadHtml() {
-    const r = await fetch(`${BASE}/sentinel/report.html?days=${DAYS}`);
+    const r = await fetch(`${BASE}/sentinel/report.html?days=${DAYS}&sort=${querySort}`);
     const blob = await r.blob();
     downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.html`);
   }
 
   async function downloadJson() {
-    const r = await fetch(`${BASE}/sentinel/report?days=${DAYS}`);
+    const r = await fetch(`${BASE}/sentinel/report?days=${DAYS}&sort=${querySort}`);
     const blob = await r.blob();
     downloadBlob(blob, `dbopt-sentinel-${new Date().toISOString().slice(0, 10)}.json`);
   }
