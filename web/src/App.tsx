@@ -370,6 +370,7 @@ export function App() {
   }, [ui.workspace, conn.server, dmv, dmvLoading, dmvErr]);
 
   const [explainBusy, setExplainBusy] = useState(false);
+  const [actualBusy, setActualBusy] = useState(false);
   const [explainErr, setExplainErr] = useState<string | null>(null);
 
   // SSMS-style T-SQL "Parse" (SET PARSEONLY ON via the real engine).
@@ -423,6 +424,30 @@ export function App() {
       setExplainErr(e.message ?? String(e));
     } finally {
       setExplainBusy(false);
+    }
+  }
+
+  // ACTUAL plan: actually runs the query (real row counts + runtime). The backend
+  // wraps it in a transaction it always rolls back (writes leave no trace) and
+  // refuses destructive / DDL / EXEC batches. See sqlserver::actual_plan.
+  async function generateActualPlan() {
+    if (!ui.draft_sql.trim()) { setExplainErr("paste some SQL first"); return; }
+    setActualBusy(true);
+    setExplainErr(null);
+    try {
+      const payload = {
+        server: conn.server,
+        database: conn.database || undefined,
+        user: conn.auth_mode === "sql" ? conn.user : undefined,
+        password: conn.auth_mode === "sql" ? conn.password : undefined,
+        trust_cert: conn.trust_cert,
+      };
+      const planXml = await backend.actualPlan(payload as any, ui.draft_sql);
+      setUi({ ...ui, draft_plan: planXml });
+    } catch (e: any) {
+      setExplainErr(e.message ?? String(e));
+    } finally {
+      setActualBusy(false);
     }
   }
 
@@ -590,7 +615,7 @@ export function App() {
             <div className="split-60">
               <div className="pane-section">
                 <div className="pane-title">
-                  <div className="label"><b>EDITOR</b> {ui.draft_plan ? "T-SQL · plan" : "T-SQL"}</div>
+                  <div className="label"><b>EDITOR</b> {ui.draft_plan ? `T-SQL · ${planKind(ui.draft_plan)} plan` : "T-SQL"}</div>
                   <div className="ops">
                     <button
                       onClick={validateSyntax}
@@ -601,10 +626,17 @@ export function App() {
                     </button>
                     <button
                       onClick={generatePlan}
-                      disabled={explainBusy || !conn.server}
-                      title={conn.server ? "Run SET SHOWPLAN_XML ON against the configured server and pull the estimated plan" : "Configure a SQL Server connection first"}
+                      disabled={explainBusy || actualBusy || !conn.server}
+                      title={conn.server ? "ESTIMATED plan (SET SHOWPLAN_XML ON): the optimizer compiles your query and returns the plan it WOULD use. Nothing runs — no data read or written, no locks." : "Configure a SQL Server connection first"}
                     >
-                      {explainBusy ? "GENERATING…" : "GENERATE PLAN"}
+                      {explainBusy ? "COMPILING…" : "ESTIMATED PLAN"}
+                    </button>
+                    <button
+                      onClick={generateActualPlan}
+                      disabled={explainBusy || actualBusy || !conn.server}
+                      title={conn.server ? "ACTUAL plan: RUNS the query for real row counts + runtime, inside a transaction that is ALWAYS rolled back so writes leave no trace. DROP/TRUNCATE/ALTER/EXEC are refused. May take real time on heavy queries." : "Configure a SQL Server connection first"}
+                    >
+                      {actualBusy ? "RUNNING…" : "ACTUAL PLAN"}
                     </button>
                     <label className="file" title="Load a .sqlplan XML manually">
                       <input type="file" accept=".sqlplan,.xml" onChange={(e) => e.target.files && onLoadPlan(e.target.files[0])} />
@@ -785,7 +817,10 @@ export function App() {
 
         {ui.workspace === "sentinel" && (
           <Workspace title="Sentinel" subtitle="live pulse · continuous monitoring · weekly pain report">
-            <SentinelView conn={conn} />
+            <SentinelView
+              conn={conn}
+              onAnalyzeSql={(sql) => setUi({ ...ui, draft_sql: sql, draft_plan: "", workspace: "analyze" })}
+            />
           </Workspace>
         )}
 
@@ -856,6 +891,14 @@ export function App() {
       )}
     </div>
   );
+}
+
+/**
+ * Distinguish an actual plan from an estimated one for the editor label. Actual
+ * plans carry runtime counters (real rows/time); estimated plans never do.
+ */
+function planKind(xml: string): "actual" | "estimated" {
+  return /RunTimeCountersPerThread|QueryTimeStats|<RunTimeInformation/i.test(xml) ? "actual" : "estimated";
 }
 
 /** Stable-ish id for a wizard-created server profile (mirrors persist.newId). */

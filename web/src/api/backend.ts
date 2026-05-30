@@ -260,6 +260,23 @@ export async function explain(info: ConnectionInfo, sql: string): Promise<string
   return (json as any).plan_xml as string;
 }
 
+/**
+ * Capture the ACTUAL execution plan — the backend runs the query inside a
+ * transaction it always rolls back (so DML leaves no trace) and refuses
+ * destructive / DDL / EXEC batches. Returns the ShowPlanXML (with real row
+ * counts + runtime). Throws with the server's reason on refusal or error.
+ */
+export async function actualPlan(info: ConnectionInfo, sql: string): Promise<string> {
+  const r = await fetch(`${BASE}/plan/actual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...info, sql }),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((json as any).error ?? `actual plan failed (${r.status})`);
+  return (json as any).plan_xml as string;
+}
+
 export type QStoreStatus = { enabled: boolean; state: string; capture_mode: string; can_alter: boolean };
 
 /** Query Store config for the connected database (capture_mode AUTO|ALL|NONE). */

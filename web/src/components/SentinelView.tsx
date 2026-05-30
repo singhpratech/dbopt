@@ -102,7 +102,7 @@ function downloadBlob(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
+export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig; onAnalyzeSql?: (sql: string) => void }) {
   const [tab, setTab] = useState<"live" | "report">("live");
   const [querySort, setQuerySort] = useState<"duration" | "recent">("duration");
   const [status, setStatus] = useState<SentinelStatus | null>(null);
@@ -338,34 +338,14 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
                   <col style={{ width: 92 }} />
                   <col style={{ width: 80 }} />
                   <col style={{ width: 92 }} />
+                  <col style={{ width: 138 }} />
                 </colgroup>
                 <thead>
-                  <Th cols={["Query", "SQL text", "Total", "Executions", "Avg", "Last run"]} aligns={["l", "l", "r", "r", "r", "r"]} />
+                  <Th cols={["Query", "SQL text", "Total", "Executions", "Avg", "Last run", "Actions"]} aligns={["l", "l", "r", "r", "r", "r", "r"]} />
                 </thead>
                 <tbody>
                   {list.map((q, i) => (
-                    <tr key={i}>
-                      <td style={mono}>{q.query_id}</td>
-                      <td style={{ ...mono, color: "var(--text)" }}>
-                        <div
-                          title={q.query_sql_text ?? undefined}
-                          style={{
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
-                            wordBreak: "break-word",
-                            cursor: q.query_sql_text ? "help" : "default",
-                          }}
-                        >
-                          {q.query_sql_text ? q.query_sql_text.replace(/\s+/g, " ").trim() : "—"}
-                        </div>
-                      </td>
-                      <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
-                      <td style={numCell}>{q.executions.toLocaleString()}</td>
-                      <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
-                      <td style={numCell} title={fmtTsMs(q.last_run_ms)}>{fmtLastRun(q.last_run_ms)}</td>
-                    </tr>
+                    <QueryRow key={i} q={q} onAnalyzeSql={onAnalyzeSql} />
                   ))}
                 </tbody>
               </table>
@@ -519,6 +499,83 @@ function Empty({ msg }: { msg: string }) {
     >
       {msg}
     </div>
+  );
+}
+
+/**
+ * One Top-Queries row with its own copy/analyze actions. The captured T-SQL is
+ * otherwise only reachable via the hover tooltip — these buttons let you grab it
+ * for analysis: COPY puts the statement on the clipboard (works for read-only
+ * logins too), ANALYZE → loads it straight into the Analyze editor.
+ *
+ * Note: Query Store stores statement-level text and the poller keeps the first
+ * 1000 chars, so very long batches are copied truncated (we surface that in the
+ * button title rather than silently misleading).
+ */
+function QueryRow({ q, onAnalyzeSql }: { q: TopQueryDto; onAnalyzeSql?: (sql: string) => void }) {
+  const [copied, setCopied] = useState(false);
+  const mono: React.CSSProperties = { font: "12px var(--f-mono, ui-monospace, Menlo, monospace)" };
+  const numCell: React.CSSProperties = { ...mono, textAlign: "right", whiteSpace: "nowrap" };
+  const raw = (q.query_sql_text ?? "").trim();
+  const hasText = raw.length > 0;
+  const maybeTruncated = raw.length >= 1000;
+
+  async function copy() {
+    if (!hasText) return;
+    try {
+      await navigator.clipboard?.writeText(raw);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* clipboard may be blocked (non-secure context) — silent, button just won't tick */
+    }
+  }
+
+  return (
+    <tr>
+      <td style={mono}>{q.query_id}</td>
+      <td style={{ ...mono, color: "var(--text)" }}>
+        <div
+          title={hasText ? raw : undefined}
+          style={{
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            wordBreak: "break-word",
+            cursor: hasText ? "help" : "default",
+          }}
+        >
+          {hasText ? raw.replace(/\s+/g, " ") : "—"}
+        </div>
+      </td>
+      <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
+      <td style={numCell}>{q.executions.toLocaleString()}</td>
+      <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
+      <td style={numCell} title={fmtTsMs(q.last_run_ms)}>{fmtLastRun(q.last_run_ms)}</td>
+      <td>
+        <div className="q-actions">
+          <button
+            className={`q-act${copied ? " copied" : ""}`}
+            disabled={!hasText}
+            onClick={copy}
+            title={maybeTruncated ? "Copy the captured T-SQL (truncated to the first 1000 chars)" : "Copy the captured T-SQL to the clipboard"}
+          >
+            {copied ? "COPIED ✓" : "COPY"}
+          </button>
+          {onAnalyzeSql && (
+            <button
+              className="q-act"
+              disabled={!hasText}
+              onClick={() => onAnalyzeSql(raw)}
+              title="Load this query into the Analyze editor"
+            >
+              ANALYZE →
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }
 

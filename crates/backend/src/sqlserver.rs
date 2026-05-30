@@ -165,6 +165,85 @@ pub async fn estimated_plan(req: &ConnectReq, sql: &str) -> anyhow::Result<Strin
     Ok(out)
 }
 
+/// Statements we refuse to auto-run when capturing an ACTUAL plan. The rollback
+/// transaction undoes INSERT/UPDATE/DELETE, but DDL, permission, server-control
+/// and EXEC statements are either not safely transactional or can have effects
+/// beyond this connection — and COMMIT would defeat the rollback. Conservative:
+/// a whole-word, case-insensitive match anywhere in the batch (comments/strings
+/// included). We'd rather over-block and have the user fall back to the estimate.
+const ACTUAL_PLAN_BLOCKED: &[&str] = &[
+    "DROP", "TRUNCATE", "ALTER", "CREATE", "GRANT", "REVOKE", "DENY", "COMMIT",
+    "BACKUP", "RESTORE", "SHUTDOWN", "RECONFIGURE", "DBCC", "KILL", "WAITFOR",
+    "EXEC", "EXECUTE",
+];
+
+/// First blocked keyword found in `sql` (whole-word, case-insensitive), if any.
+/// Tokenizes on non-identifier characters so `sp_executesql` does NOT trip
+/// `EXEC`, while a leading `EXEC sp_...` does.
+fn actual_plan_blocked_keyword(sql: &str) -> Option<&'static str> {
+    use std::collections::HashSet;
+    let words: HashSet<String> = sql
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_uppercase())
+        .collect();
+    ACTUAL_PLAN_BLOCKED.iter().copied().find(|kw| words.contains(*kw))
+}
+
+/// Capture the ACTUAL execution plan (real row counts + runtime) by executing
+/// the batch with `SET STATISTICS XML ON`, wrapped in a transaction we ALWAYS
+/// roll back so DML leaves no trace. Destructive/DDL/EXEC batches are refused up
+/// front. Returns the concatenated ShowPlanXML for every statement that produced
+/// one. NOTE: this genuinely runs the query — it can take real time and pulls
+/// result rows over the wire; the UI gates it behind an explicit action.
+pub async fn actual_plan(req: &ConnectReq, sql: &str) -> anyhow::Result<String> {
+    if let Some(kw) = actual_plan_blocked_keyword(sql) {
+        return Err(anyhow::anyhow!(
+            "Actual plan refused: the batch contains `{kw}`. The auto-rollback guard only runs SELECT/DML (and undoes any data changes); DDL, EXEC and server-control statements are blocked. Use ESTIMATED PLAN — it never executes the query."
+        ));
+    }
+
+    let mut client = open(req).await?;
+    // STATISTICS XML emits, after each executed statement, an extra single-column
+    // result set holding that statement's <ShowPlanXML>.
+    let _ = client.simple_query("SET STATISTICS XML ON").await;
+    let _ = client.simple_query("BEGIN TRANSACTION").await;
+
+    // Run + fully drain the batch BEFORE the rollback (the stream borrows client).
+    // Capture the outcome so we roll back even when the query itself errors.
+    let exec = match client.simple_query(sql).await {
+        Ok(stream) => stream.into_results().await,
+        Err(e) => Err(e),
+    };
+
+    // Undo everything regardless of success, then clear the session flag.
+    let _ = client.simple_query("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await;
+    let _ = client.simple_query("SET STATISTICS XML OFF").await;
+
+    let result_sets = exec.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let mut out = String::new();
+    for rs in &result_sets {
+        for row in rs {
+            // The plan rows are a single string column; data columns of other
+            // types fail the &str get and are skipped (never panics).
+            if let Ok(Some(s)) = row.try_get::<&str, _>(0) {
+                if s.contains("<ShowPlanXML") {
+                    out.push_str(s);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    if out.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "the batch ran (and was rolled back) but returned no actual plan — it may produce no executable statement, or STATISTICS XML is unavailable on this server"
+        ));
+    }
+    Ok(out)
+}
+
 /// Query Store config for the connected database. `capture_mode` is AUTO (skip
 /// one-off/cheap queries — the engine default), ALL (capture every query), or
 /// NONE/OFF. `enabled` is false when Query Store is OFF for the database.

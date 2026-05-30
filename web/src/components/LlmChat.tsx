@@ -5,6 +5,7 @@ import * as P from "../store/persist";
 import * as router from "../llm/router";
 import * as webllm from "../llm/webllm";
 import type { ChatMessage } from "../api/backend";
+import { Markdown } from "./Markdown";
 
 interface ColumnState {
   key: ProviderKey;
@@ -284,7 +285,13 @@ export function LlmChat({
                       </span>
                     </div>
                     <div className="ai-col-body">
-                      {c.state === "err" ? <span style={{ color: "var(--crit)" }}>{c.error}</span> : c.body || "…"}
+                      {c.state === "err" ? (
+                        <span style={{ color: "var(--crit)" }}>{c.error}</span>
+                      ) : c.body ? (
+                        <Markdown text={c.body} />
+                      ) : (
+                        <span style={{ color: "var(--text-dim)" }}>…</span>
+                      )}
                     </div>
                   </div>
                 ))}
