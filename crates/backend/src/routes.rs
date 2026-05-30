@@ -63,7 +63,9 @@ async fn connect(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 
 async fn dmv(Json(req): Json<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_dmv_bundle(&req).await {
-        Ok(bundle) => (StatusCode::OK, Json(serde_json::to_value(&bundle).unwrap())).into_response(),
+        // `Json` serializes on the fly and returns a 500 on the (practically
+        // impossible) serialization failure — never a handler panic.
+        Ok(bundle) => (StatusCode::OK, Json(bundle)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -112,7 +114,7 @@ pub struct HealthReq {
 async fn health_db(Json(req): Json<HealthReq>) -> impl IntoResponse {
     let engine = req.engine.as_deref().unwrap_or("sqlserver");
     match health::run(engine, &req.conn).await {
-        Ok(report) => (StatusCode::OK, Json(serde_json::to_value(&report).unwrap())).into_response(),
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         Err((code, msg)) => (code, Json(serde_json::json!({ "error": msg }))).into_response(),
     }
 }

@@ -82,6 +82,9 @@ jobs:
       - name: macos dmg
         if: startsWith(matrix.label, 'macos-')
         run: |
+          VER="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${VER#v}"          # strip leading v from e.g. v0.2.0
+          VER="${VER:-0.0.0}"     # fall back if somehow empty
           mkdir -p sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS
           cp staging/sqlopt sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
           chmod +x sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
@@ -93,7 +96,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>dev.sqlopt.observatory</string>
             <key>CFBundleName</key><string>sqlopt</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>CFBundleShortVersionString</key><string>${VER}</string>
             <key>CFBundleVersion</key><string>1</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>

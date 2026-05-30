@@ -2,8 +2,13 @@ use axum::response::sse::Event;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::time::Duration;
 
 use crate::ollama::Message;
+
+/// Cap a single un-terminated SSE line at 1 MiB so a misbehaving provider can't
+/// grow the buffer until the backend daemon OOMs.
+const MAX_LINE_SIZE: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -78,7 +83,11 @@ pub fn stream_chat(
         };
 
         let body = ChatRequest { model: &cfg.model, messages: &messages, stream: true, temperature: 0.2 };
-        let resp = match reqwest::Client::new()
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let resp = match client
             .post(&url)
             .header(&auth_header_name, &auth_header_value)
             .header("Content-Type", "application/json")
@@ -102,6 +111,10 @@ pub fn stream_chat(
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk { Ok(b) => b, Err(e) => { yield Ok(Event::default().event("error").data(e.to_string())); return; } };
             buf.extend_from_slice(&bytes);
+            if buf.len() > MAX_LINE_SIZE {
+                yield Ok(Event::default().event("error").data("provider response line exceeded 1MB limit"));
+                return;
+            }
             while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
                 let line = buf.drain(..=nl).collect::<Vec<u8>>();
                 let s = match std::str::from_utf8(&line) { Ok(s) => s.trim().to_string(), Err(_) => continue };

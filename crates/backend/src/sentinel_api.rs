@@ -61,18 +61,30 @@ struct PersistedInstance {
 }
 
 /// Best-effort write of the persisted config; logs a warning on failure.
+///
+/// This file holds the DB connection password in plaintext, so on Unix we lock
+/// down the directory (0700) and file (0600) to the owning user. On Windows we
+/// rely on the default per-user profile ACLs.
 fn write_persisted(cfg: &PersistedConfig) {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let path = config_path();
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(target: "sentinel", "failed to create config dir {}: {e}", parent.display());
             return;
         }
+        #[cfg(unix)]
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
     match serde_json::to_string_pretty(cfg) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
                 tracing::warn!(target: "sentinel", "failed to write sentinel config {}: {e}", path.display());
+            } else {
+                #[cfg(unix)]
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
         }
         Err(e) => tracing::warn!(target: "sentinel", "failed to serialize sentinel config: {e}"),

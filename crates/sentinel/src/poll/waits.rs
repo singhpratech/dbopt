@@ -39,8 +39,40 @@ pub async fn poll_wait_stats(conn_info: &ConnectionInfo, storage: &Storage) -> a
         ignorable_waits_in_clause()
     );
 
-    let stream = client.simple_query(&sql).await?;
-    let rows = stream.into_first_result().await?;
+    // Degrade gracefully when the DMV is unavailable (Azure SQL DB exposes a
+    // different shape, and a login without VIEW SERVER STATE can't read it) —
+    // log once and skip, mirroring deadlocks.rs / query_store.rs, rather than
+    // erroring on every tick.
+    let stream = match client.simple_query(&sql).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("dm_os_wait_stats")
+                || msg.contains("Invalid object name")
+                || msg.contains("VIEW SERVER STATE")
+                || msg.contains("permission")
+            {
+                tracing::warn!(
+                    target: "sentinel::poll::waits",
+                    "wait stats unavailable on {} (missing DMV or VIEW SERVER STATE): {msg}",
+                    conn_info.server
+                );
+                return Ok(());
+            }
+            return Err(e.into());
+        }
+    };
+    let rows = match stream.into_first_result().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                target: "sentinel::poll::waits",
+                "wait stats stream collection failed on {}: {e}",
+                conn_info.server
+            );
+            return Ok(());
+        }
+    };
 
     // (waiting_tasks_count, wait_time_ms, signal_wait_ms)
     let mut current: HashMap<String, (i64, i64, i64)> = HashMap::new();

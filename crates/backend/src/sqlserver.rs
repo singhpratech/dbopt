@@ -1,8 +1,39 @@
 use crate::routes::ConnectReq;
 use analyzer_core::dmv::{DmvBundle, IndexUsage, IndexMeta, MissingIndex, PartitionStats};
+use std::time::Duration;
 use tiberius::{AuthMethod, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+/// How long we'll wait for the initial TCP connect before giving up. Without
+/// this the OS default (60–120s on an unreachable host) leaves the request — and
+/// the user — hanging with no feedback.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Map a tiberius connect/login failure to a safe, actionable category message.
+///
+/// We never embed the raw error: the connection config carries the password
+/// (`AuthMethod::sql_server`), and forwarding tiberius' `Display` verbatim into
+/// an HTTP body / browser console / log risks leaking connection context. We
+/// inspect the lowercased message to pick a useful category, but only ever emit
+/// a fixed string the user can act on.
+fn safe_connect_err(e: &tiberius::error::Error) -> anyhow::Error {
+    let raw = e.to_string().to_ascii_lowercase();
+    let msg = if raw.contains("login failed")
+        || raw.contains("password")
+        || raw.contains("authentication")
+        || raw.contains("user")
+    {
+        "authentication failed — check the username and password"
+    } else if raw.contains("cannot open database") || raw.contains("database") {
+        "could not open the requested database — check the database name and that the login has access"
+    } else if raw.contains("certificate") || raw.contains("tls") || raw.contains("ssl") {
+        "TLS/certificate error — enable \"trust server certificate\" or install a trusted certificate"
+    } else {
+        "could not connect to SQL Server — check the server address and port, and that the instance is reachable"
+    };
+    anyhow::anyhow!(msg)
+}
 
 async fn open(req: &ConnectReq) -> anyhow::Result<Client<tokio_util::compat::Compat<TcpStream>>> {
     let mut config = Config::new();
@@ -31,9 +62,14 @@ Either rebuild with that feature, or switch to SQL authentication and provide a 
     if req.trust_cert.unwrap_or(false) {
         config.trust_cert();
     }
-    let tcp = TcpStream::connect(config.get_addr()).await?;
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(config.get_addr()))
+        .await
+        .map_err(|_| anyhow::anyhow!("connection to SQL Server timed out after {}s", CONNECT_TIMEOUT.as_secs()))?
+        .map_err(|_| anyhow::anyhow!("could not reach SQL Server — check the server address and port, and that the instance is reachable"))?;
     tcp.set_nodelay(true)?;
-    let client = Client::connect(config, tcp.compat_write()).await?;
+    let client = Client::connect(config, tcp.compat_write())
+        .await
+        .map_err(|e| safe_connect_err(&e))?;
     Ok(client)
 }
 
@@ -167,19 +203,33 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
         }
     }
 
-    // Index metadata (key + included columns)
+    // Index metadata (key + included columns).
+    //
+    // We deliberately avoid STRING_AGG here: it was only introduced in SQL
+    // Server 2017, and we advertise 2014+ support. The FOR XML PATH('') +
+    // STUFF idiom is the portable string-aggregation pattern that works on
+    // every version from 2014 onward. The `, TYPE).value('.', …)` step
+    // round-trips through typed XML so column names containing XML-special
+    // characters (`&`, `<`, `>`) come back un-escaped.
     let q_indexes = r#"
         SELECT s.name AS schema_name, t.name AS table_name, i.name AS index_name,
                i.is_unique, i.is_primary_key,
-               STRING_AGG(CASE WHEN ic.is_included_column = 0 THEN c.name END, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS key_cols,
-               STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',') AS inc_cols
+               STUFF((SELECT ',' + c.name
+                      FROM sys.index_columns ic
+                      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                      ORDER BY ic.key_ordinal
+                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '') AS key_cols,
+               STUFF((SELECT ',' + c.name
+                      FROM sys.index_columns ic
+                      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
+                      ORDER BY ic.key_ordinal
+                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '') AS inc_cols
         FROM sys.indexes i
         JOIN sys.tables t ON t.object_id = i.object_id
         JOIN sys.schemas s ON s.schema_id = t.schema_id
-        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
         WHERE t.is_ms_shipped = 0 AND i.name IS NOT NULL
-        GROUP BY s.name, t.name, i.name, i.is_unique, i.is_primary_key
     "#;
     if let Ok(stream) = client.simple_query(q_indexes).await {
         let rows = stream.into_first_result().await.unwrap_or_default();

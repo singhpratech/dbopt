@@ -22,6 +22,13 @@ dirs = "5"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
 sha2 = "0.10"
 
+[features]
+default = []
+# Windows/Kerberos auth for the monitoring daemon (GSSAPI on Linux). Off by
+# default because it pulls system Kerberos libs that aren't present everywhere;
+# build with `--features integrated-auth` in domain-auth environments.
+integrated-auth = ["tiberius/integrated-auth-gssapi"]
+
 [[bin]]
 name = "sqlopt-sentinel"
 path = "src/bin/sentinel_cli.rs"

@@ -252,13 +252,16 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             && fname.map(|f| f.kind == TokKind::Word).unwrap_or(false)
             && lparen.map(|p| p.text == "(").unwrap_or(false)
         {
+            // The condition above already proved `fname` is a Word token; bind
+            // it instead of unwrapping so a future refactor can't panic here.
+            let Some(fname) = fname else { continue };
             let schema = t.text.to_ascii_lowercase();
             if matches!(schema.as_str(), "sys" | "information_schema") { continue; }
             if !seen.insert((t.start, t.text)) { continue; }
             out.push(finding(
                 "hygiene.scalar_udf_in_select",
                 Severity::Warning,
-                format!("Scalar function `{}.{}( … )` in the SELECT list runs once per output row (RBAR). On SQL Server < 2019 it also forces the whole statement serial.", t.text, fname.unwrap().text),
+                format!("Scalar function `{}.{}( … )` in the SELECT list runs once per output row (RBAR). On SQL Server < 2019 it also forces the whole statement serial.", t.text, fname.text),
                 Some(make_loc(t)),
                 Some("Inline the expression, join to an inline TVF (CROSS APPLY), or precompute. On 2019+ confirm the plan actually inlined the UDF (no per-row Compute Scalar calling it).".into()),
             ));

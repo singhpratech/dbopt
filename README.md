@@ -77,7 +77,14 @@ suggested against a 2014 target.
 ## Quick start
 
 ```bash
-# Build everything (single workspace, no external services required)
+# Build the web UI first (it is embedded into the backend binary at compile
+# time). Requires Node 18+ and wasm-pack (`cargo install wasm-pack`).
+wasm-pack build crates/analyzer-wasm --target web --out-dir ../../web/src/wasm --release
+cd web && npm install && npm run build && cd ..
+
+# Then build the Rust workspace (single workspace, no external services needed).
+# Skipping the web build above just makes the backend serve a placeholder page;
+# the CLI and analysis engine work regardless.
 cargo build --release
 
 # 1) Analyze a script statically — no DB connection needed
@@ -97,6 +104,24 @@ cargo run -p eval -- --html   # → target/eval-report.html
 
 For UI development: `cd web && npm install && npm run dev` (proxies the API to
 the backend on :3690).
+
+## Authentication
+
+dbopt connects to SQL Server with **SQL Server authentication** (username +
+password) out of the box — this is the default and needs no special build.
+
+For **Windows / integrated (Kerberos) authentication**, rebuild with the
+`integrated-auth` feature, which links GSSAPI on Linux:
+
+```bash
+cargo build --release -p backend  --features integrated-auth
+cargo build --release -p sentinel --features integrated-auth
+```
+
+It is off by default because the GSSAPI/Kerberos system libraries it links are
+not present on every build host (and are not used on Windows targets). When the
+feature is enabled and you connect without a username/password, dbopt uses the
+current Windows identity; otherwise SQL authentication is used.
 
 ## Architecture
 

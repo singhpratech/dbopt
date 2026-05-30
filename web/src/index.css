@@ -220,7 +220,7 @@ body {
 /* Light mode: the tiny uppercase status labels read too faint at --text-dim;
    bump them to the secondary tone (~6.4:1) so analyzer/findings/backend are
    clearly legible on a white topbar. Dark theme keeps its dimmer hierarchy. */
-:root[data-theme="light"] .topbar-status .k { color: var(--text-muted); }
+:root[data-theme="light"] .topbar-status .k { color: var(--text); }
 .topbar-status .v {
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
@@ -1016,6 +1016,10 @@ body {
 .form-actions .btn.danger { color: var(--crit); border-color: var(--line); }
 .form-actions .btn.danger:hover { border-color: var(--crit); }
 .form-actions .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* Keyboard focus ring for the primary action buttons (a11y). Outline doesn't
+   affect layout, so this is purely additive. */
+.form-actions .btn:focus-visible,
+.ws-head .actions .btn:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 
 .form-status {
   margin-top: 14px;

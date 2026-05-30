@@ -190,6 +190,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
           />
           <b>SENTINEL</b>
           <span style={mono}>{running ? "RUNNING" : "STOPPED"}</span>
+          {busy && <span style={{ ...mono, color: "var(--accent, #d4ff4e)" }}>· working…</span>}
           <span style={{ ...mono, color: "var(--text-dim)" }}>
             · {status?.instances ?? 0} instance(s)
           </span>
@@ -229,6 +230,25 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
           }}
         >
           {err}
+        </div>
+      )}
+
+      {/* ── First-run empty state ──────────────────────── */}
+      {!running && !report && !busy && (
+        <div style={{ padding: "22px 18px", borderBottom: "1px solid var(--line)" }}>
+          <div style={{ ...mono, fontSize: 13, color: "var(--text)", marginBottom: 6 }}>
+            Sentinel isn't running yet.
+          </div>
+          <div style={{ ...mono, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 620 }}>
+            Click <b style={{ color: "var(--accent, #d4ff4e)" }}>START</b> to begin continuous
+            monitoring of your connected SQL Server. It polls Query Store, wait stats, deadlocks,
+            live blocking, index usage, and table sizes into a local SQLite time-series, then rolls
+            them up into the weekly pain report below. Polling runs in the background — leave this
+            tab any time.
+          </div>
+          <div style={{ ...mono, color: "var(--text-dim)", marginTop: 10, opacity: 0.8 }}>
+            Uses the connection from the Connection tab (SQL authentication).
+          </div>
         </div>
       )}
 
