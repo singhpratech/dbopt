@@ -148,6 +148,71 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
         });
     }
 
+    // --- Structural checks (schema-only; need NO workload and NO procs) ------
+    // These fire from index metadata + row counts alone, so they surface real
+    // pain on an idle, data-only database where the usage DMVs and the proc-body
+    // scan find nothing. Thresholds are deliberately conservative to avoid the
+    // false-positive noise that erodes DBA trust.
+    {
+        use std::collections::BTreeSet;
+        let mut rows_by_table: BTreeMap<(String, String), u64> = BTreeMap::new();
+        let mut heap_rows: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for p in &bundle.partition_stats {
+            let key = (p.schema_name.clone(), p.table_name.clone());
+            let e = rows_by_table.entry(key.clone()).or_insert(0);
+            *e = (*e).max(p.row_count);
+            if p.index_name.is_none() {
+                let h = heap_rows.entry(key).or_insert(0);
+                *h = (*h).max(p.row_count);
+            }
+        }
+        let mut has_pk: BTreeSet<(String, String)> = BTreeSet::new();
+        for ix in &bundle.indexes {
+            if ix.is_primary_key {
+                has_pk.insert((ix.schema_name.clone(), ix.table_name.clone()));
+            }
+        }
+        // Heaps holding real data.
+        for ((schema, table), rows) in &heap_rows {
+            if *rows < 1000 { continue; }
+            let sev = if *rows >= 100_000 { Severity::Warning } else { Severity::Info };
+            findings.push(Finding {
+                rule: RuleId("structure.heap_table".into()),
+                severity: sev,
+                message: format!("{schema}.{table} is a heap (no clustered index) holding {rows} rows."),
+                location: None,
+                recommendation: Some("Heaps fragment over time, can't be range-seeked, and accumulate forward pointers on UPDATE that slow every read. Add a clustered index — usually the primary key, or a narrow ever-increasing surrogate. Deliberate staging / bulk-load heaps are fine, but document them.".into()),
+            });
+        }
+        // Substantial tables with no primary key.
+        for ((schema, table), rows) in &rows_by_table {
+            if *rows < 100 { continue; }
+            if has_pk.contains(&(schema.clone(), table.clone())) { continue; }
+            findings.push(Finding {
+                rule: RuleId("structure.no_primary_key".into()),
+                severity: Severity::Warning,
+                message: format!("{schema}.{table} has no primary key ({rows} rows)."),
+                location: None,
+                recommendation: Some("A primary key gives every row a stable identity and is required for reliable updates, replication, and most tooling. Add one — `ALTER TABLE [schema].[table] ADD CONSTRAINT PK_table PRIMARY KEY (...);` — a narrow surrogate key is fine if no natural key fits.".into()),
+            });
+        }
+        // Over-wide clustered / primary key inflates every nonclustered index.
+        for ix in &bundle.indexes {
+            if ix.is_primary_key && ix.key_columns.len() >= 5 {
+                findings.push(Finding {
+                    rule: RuleId("structure.wide_clustered_key".into()),
+                    severity: Severity::Info,
+                    message: format!(
+                        "{}.{} primary key spans {} columns ({}). Every nonclustered index stores the full key as its row locator, so a wide key inflates all of them.",
+                        ix.schema_name, ix.table_name, ix.key_columns.len(), ix.key_columns.join(", ")
+                    ),
+                    location: None,
+                    recommendation: Some("Keep the clustered key narrow, static, and ever-increasing — often a surrogate INT/BIGINT IDENTITY. Enforce the wide natural key with a separate UNIQUE constraint if you still need it.".into()),
+                });
+            }
+        }
+    }
+
     // Size treemap
     for p in &bundle.partition_stats {
         let leaf = p.index_name.clone().unwrap_or_else(|| "(heap)".to_string());
