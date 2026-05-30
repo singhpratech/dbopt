@@ -318,6 +318,26 @@ body {
 .topbar-controls .theme-toggle .glyph { font-size: 13px; line-height: 1; color: var(--signal); }
 .topbar-controls .theme-toggle .lbl { color: inherit; }
 
+/* Mode toggle: unlike theme/help (icon-only), this KEEPS its label so the
+   current lens (DBA vs DEV) is always legible at a glance. Filled diamond = the
+   full DBA superset; hollow = the leaner developer view. */
+.topbar-controls .mode-toggle {
+  padding: 0 13px;
+  height: 100%;
+  display: flex; align-items: center; gap: 7px;
+  font: 11px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  cursor: pointer;
+}
+.topbar-controls .mode-toggle:hover { color: var(--signal); background: var(--signal-faint); }
+.topbar-controls .mode-toggle .glyph { font-size: 11px; line-height: 1; color: var(--signal); }
+.topbar-controls .mode-toggle .lbl { color: inherit; font-weight: 600; }
+
 /* ── Left rail ────────────────────────────────────── */
 .rail {
   grid-area: rail;
@@ -435,6 +455,18 @@ body {
 .rail-toggle { color: var(--text-dim); border-bottom: 1px solid var(--line); margin-bottom: 2px; flex-shrink: 0; }
 .rail-toggle:hover { color: var(--signal); }
 .rail-toggle .glyph { font-size: 16px; }
+
+/* Developer-mode footer hint: the one quiet affordance pointing to the DBA
+   tools that developer mode hides. Sits at the bottom, dim until hovered. */
+.rail-dba-hint {
+  color: var(--text-dim);
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.rail-dba-hint:hover { color: var(--signal); }
+.rail-dba-hint .glyph { color: var(--text-muted); }
+.rail-dba-hint:hover .glyph { color: var(--signal); }
 
 /* ── Main area ────────────────────────────────────── */
 .main {

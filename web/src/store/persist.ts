@@ -208,10 +208,18 @@ export const defaultProviders: Record<ProviderKey, ProviderConfig> = {
 
 export type Theme = "dark" | "light";
 
+// Role mode is a LENS, not a permission boundary. "developer" trims the app to
+// query-craft surfaces (analyze the query, the plan, the findings, AI refactor);
+// "dba" is the superset — everything, including server health, monitoring, the
+// DMV advisor, and the operational lane. It also seeds the default voice the
+// explain-at-your-level layer speaks in (plain dev English vs. DBA shorthand).
+export type Mode = "developer" | "dba";
+
 export interface UiPrefs {
   workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
   server_version: 2014 | 2016 | 2017 | 2019 | 2022 | 2025;
   theme: Theme;
+  mode: Mode;
   draft_sql: string;
   draft_plan: string;
 }
@@ -220,6 +228,9 @@ export const defaultUi: UiPrefs = {
   workspace: "health",
   server_version: 2025,
   theme: "dark",
+  // Default to the full app so nothing silently "disappears" on first run;
+  // developers opt into the leaner lens via the topbar toggle.
+  mode: "dba",
   draft_sql: "",
   draft_plan: "",
 };

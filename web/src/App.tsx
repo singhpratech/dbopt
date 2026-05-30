@@ -48,30 +48,45 @@ type Workspace = P.UiPrefs["workspace"];
 // rather than a flat 13-item list. Order within the array IS the render order.
 type NavGroup = "START" | "OPERATE" | "INSPECT" | "SETUP";
 
-const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGroup }[] = [
+// `dba: true` marks a server/operations surface that only appears in DBA mode.
+// Developer mode keeps the query-craft surfaces: analyze, the plan, the findings,
+// AI refactor, your own runs, plus connection/config. Everything else is the
+// DBA superset (health front-door, monitoring, advisor, server-wide charts).
+const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGroup; dba?: true }[] = [
   // START — get a database in front of you and graded.
-  { key: "health",     glyph: "❤", label: "HEALTH",  group: "START" },
+  { key: "health",     glyph: "❤", label: "HEALTH",  group: "START", dba: true },
   { key: "analyze",    glyph: "▤", label: "ANALYZE", group: "START" },
   { key: "connection", glyph: "⌬", label: "Connection", group: "START" },
   // OPERATE — the live, prescriptive, audit surfaces.
-  { key: "sentinel",   glyph: "◉", label: "WATCH",   group: "OPERATE" },
-  { key: "advisor",    glyph: "✦", label: "ADVISE",  group: "OPERATE" },
+  { key: "sentinel",   glyph: "◉", label: "WATCH",   group: "OPERATE", dba: true },
+  { key: "advisor",    glyph: "✦", label: "ADVISE",  group: "OPERATE", dba: true },
   { key: "history",    glyph: "⌖", label: "RUNS",    group: "OPERATE" },
-  { key: "logs",       glyph: "⎯", label: "LOGS",    group: "OPERATE" },
+  { key: "logs",       glyph: "⎯", label: "LOGS",    group: "OPERATE", dba: true },
   // INSPECT — drill into the charts behind the grades.
   { key: "plan",       glyph: "◫", label: "PLAN",    group: "INSPECT" },
-  { key: "indexes",    glyph: "◰", label: "INDEX",   group: "INSPECT" },
-  { key: "sizes",      glyph: "◧", label: "SIZE",    group: "INSPECT" },
+  { key: "indexes",    glyph: "◰", label: "INDEX",   group: "INSPECT", dba: true },
+  { key: "sizes",      glyph: "◧", label: "SIZE",    group: "INSPECT", dba: true },
   { key: "severity",   glyph: "≡", label: "Severity", group: "INSPECT" },
   // SETUP — configuration that's set once and left alone.
   { key: "ai",         glyph: "↪", label: "AI",      group: "SETUP" },
   { key: "settings",   glyph: "⚙", label: "Config",   group: "SETUP" },
 ];
 
-// Sections in render order, each holding its workspaces (preserving array order).
-const NAV_SECTIONS: { group: NavGroup; items: typeof WORKSPACES }[] = (
-  ["START", "OPERATE", "INSPECT", "SETUP"] as NavGroup[]
-).map((group) => ({ group, items: WORKSPACES.filter((w) => w.group === group) }));
+// Sections in render order, each holding the workspaces visible in `mode`.
+// Developer mode drops the DBA-only surfaces (and any now-empty section), so the
+// rail genuinely shrinks rather than just greying things out.
+function navSectionsForMode(mode: P.Mode): { group: NavGroup; items: typeof WORKSPACES }[] {
+  return (["START", "OPERATE", "INSPECT", "SETUP"] as NavGroup[])
+    .map((group) => ({
+      group,
+      items: WORKSPACES.filter((w) => w.group === group && (mode === "dba" || !w.dba)),
+    }))
+    .filter((sec) => sec.items.length > 0);
+}
+
+// Workspaces a developer can't reach in developer mode — used to bounce back to
+// ANALYZE if the persisted workspace was a DBA surface when the mode flips.
+const DBA_ONLY: Workspace[] = WORKSPACES.filter((w) => w.dba).map((w) => w.key);
 
 // Pass 5 A1: the chart workspaces whose empty state pulls a live DMV bundle in
 // place (vs. routing to CONN). Entering one with a connection + null dmv triggers
@@ -442,6 +457,26 @@ export function App() {
 
         <div className="topbar-controls">
           <button
+            className={`mode-toggle mode-${ui.mode}`}
+            title={
+              ui.mode === "dba"
+                ? "DBA mode — server health, monitoring & advisor included. Click for the leaner Developer view."
+                : "Developer mode — query-craft only. Click for full DBA tools (server health, monitoring, advisor)."
+            }
+            aria-label="Toggle developer / DBA mode"
+            onClick={() => {
+              const next = ui.mode === "dba" ? "developer" : "dba";
+              // Switching to developer while sitting on a DBA-only surface would
+              // land on a hidden, unreachable workspace — bounce to ANALYZE.
+              const workspace =
+                next === "developer" && DBA_ONLY.includes(ui.workspace) ? "analyze" : ui.workspace;
+              setUi({ ...ui, mode: next, workspace });
+            }}
+          >
+            <span className="glyph">{ui.mode === "dba" ? "◆" : "◇"}</span>
+            <span className="lbl">{ui.mode === "dba" ? "DBA" : "DEV"}</span>
+          </button>
+          <button
             className="theme-toggle"
             title={ui.theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             aria-label="Toggle color theme"
@@ -476,7 +511,7 @@ export function App() {
           <span className="glyph">{railExpanded ? "«" : "≡"}</span>
           <span>Collapse</span>
         </button>
-        {NAV_SECTIONS.map((sec, si) => (
+        {navSectionsForMode(ui.mode).map((sec, si) => (
           <div className="rail-group" key={sec.group}>
             {/* Thin divider + tiny uppercase caption between groups. The first
                 group leads with just its caption (no divider above it). */}
@@ -497,6 +532,17 @@ export function App() {
           </div>
         ))}
         <div className="rail-spacer" />
+        {ui.mode === "developer" && (
+          <button
+            className="rail-btn rail-dba-hint"
+            onClick={() => setUi({ ...ui, mode: "dba" })}
+            title="Server health, monitoring & advisor live in DBA mode"
+            aria-label="Switch to DBA mode for server tools"
+          >
+            <span className="glyph">◆</span>
+            <span>DBA tools…</span>
+          </button>
+        )}
       </nav>
 
       <main className="main">
