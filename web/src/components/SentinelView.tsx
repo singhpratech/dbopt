@@ -20,6 +20,7 @@ interface TopQueryDto {
   executions: number;
   avg_duration_ms: number;
   query_sql_text?: string | null;
+  last_run_ms?: number | null;
 }
 
 interface RegressionDto {
@@ -43,6 +44,7 @@ interface WeeklyReport {
   instances: number;
   pain: PainSummaryDto;
   top_queries: TopQueryDto[];
+  recent_queries?: TopQueryDto[];
   regressions: RegressionDto[];
   unused_indexes: UnusedIndexDto[];
 }
@@ -60,6 +62,25 @@ function fmtMs(ms: number): string {
   if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)} min`;
   if (ms >= 1_000) return `${(ms / 1_000).toFixed(2)} s`;
   return `${ms} ms`;
+}
+
+/** Relative "x ago" for a unix-ms last-execution time; "—" when unknown. */
+function fmtLastRun(ms?: number | null): string {
+  if (ms == null) return "—";
+  const diff = Date.now() - ms;
+  if (diff < 0) return "just now";
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function fmtTsMs(ms?: number | null): string {
+  if (ms == null) return "unknown";
+  try { return new Date(ms).toISOString().slice(0, 19).replace("T", " ") + " UTC"; } catch { return "unknown"; }
 }
 
 function fmtTs(s: string): string {
@@ -83,6 +104,7 @@ function downloadBlob(blob: Blob, name: string) {
 
 export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
   const [tab, setTab] = useState<"live" | "report">("live");
+  const [querySort, setQuerySort] = useState<"duration" | "recent">("duration");
   const [status, setStatus] = useState<SentinelStatus | null>(null);
   const [report, setReport] = useState<WeeklyReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -291,59 +313,68 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
         </div>
       </div>
 
-      {/* ── Top queries ────────────────────────────────── */}
-      <Section title={`TOP ${report?.top_queries.length ?? 0} QUERIES BY TOTAL DURATION`}>
-        {report && report.top_queries.length > 0 ? (
-          <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
-            {/* Fixed layout takes column widths from the FIRST row, so define
-                them once here — otherwise the header (no widths) and the data
-                cells (their own widths) disagree and the columns drift apart.
-                The SQL-text col has no width → it absorbs the remaining space. */}
-            <colgroup>
-              <col style={{ width: 56 }} />
-              <col />
-              <col style={{ width: 96 }} />
-              <col style={{ width: 110 }} />
-              <col style={{ width: 96 }} />
-            </colgroup>
-            <thead>
-              <Th cols={["Query", "SQL text", "Total", "Executions", "Avg"]} aligns={["l", "l", "r", "r", "r"]} />
-            </thead>
-            <tbody>
-              {report.top_queries.map((q, i) => (
-                <tr key={i}>
-                  {/* Column widths come from the <colgroup> (table-layout:fixed); per-cell
-                      widths here would be ignored, so they're omitted to avoid confusion. */}
-                  <td style={mono}>{q.query_id}</td>
-                  <td style={{ ...mono, color: "var(--text)" }}>
-                    {/* Clamp to 2 lines so one giant query can't balloon the table;
-                        whitespace is collapsed for a clean preview and the full
-                        text shows on hover (title). */}
-                    <div
-                      title={q.query_sql_text ?? undefined}
-                      style={{
-                        display: "-webkit-box",
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: "vertical",
-                        overflow: "hidden",
-                        wordBreak: "break-word",
-                        cursor: q.query_sql_text ? "help" : "default",
-                      }}
-                    >
-                      {q.query_sql_text ? q.query_sql_text.replace(/\s+/g, " ").trim() : "—"}
-                    </div>
-                  </td>
-                  <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
-                  <td style={numCell}>{q.executions.toLocaleString()}</td>
-                  <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <Empty msg="No Query Store rows in window. Enable Query Store on the target database, then wait for the next poll." />
-        )}
-      </Section>
+      {/* ── Top queries (toggle: by total duration ⇄ by last run) ── */}
+      {(() => {
+        const list = querySort === "recent"
+          ? (report?.recent_queries ?? [])
+          : (report?.top_queries ?? []);
+        return (
+          <div style={{ borderBottom: "1px solid var(--line)" }}>
+            <div className="pane-title" style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--bg-panel)", alignItems: "center" }}>
+              <div className="label">
+                <b>TOP QUERIES</b> {querySort === "recent" ? "by last run" : "by total duration"} · {list.length}
+              </div>
+              <span className="live-tabs">
+                <button className={querySort === "duration" ? "active" : ""} onClick={() => setQuerySort("duration")} title="Heaviest by total time spent in window">BY DURATION</button>
+                <button className={querySort === "recent" ? "active" : ""} onClick={() => setQuerySort("recent")} title="Most recently executed">BY LAST RUN</button>
+              </span>
+            </div>
+            {list.length > 0 ? (
+              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+                <colgroup>
+                  <col style={{ width: 56 }} />
+                  <col />
+                  <col style={{ width: 96 }} />
+                  <col style={{ width: 92 }} />
+                  <col style={{ width: 80 }} />
+                  <col style={{ width: 92 }} />
+                </colgroup>
+                <thead>
+                  <Th cols={["Query", "SQL text", "Total", "Executions", "Avg", "Last run"]} aligns={["l", "l", "r", "r", "r", "r"]} />
+                </thead>
+                <tbody>
+                  {list.map((q, i) => (
+                    <tr key={i}>
+                      <td style={mono}>{q.query_id}</td>
+                      <td style={{ ...mono, color: "var(--text)" }}>
+                        <div
+                          title={q.query_sql_text ?? undefined}
+                          style={{
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            wordBreak: "break-word",
+                            cursor: q.query_sql_text ? "help" : "default",
+                          }}
+                        >
+                          {q.query_sql_text ? q.query_sql_text.replace(/\s+/g, " ").trim() : "—"}
+                        </div>
+                      </td>
+                      <td style={numCell}>{fmtMs(q.total_duration_ms)}</td>
+                      <td style={numCell}>{q.executions.toLocaleString()}</td>
+                      <td style={numCell}>{fmtMs(q.avg_duration_ms)}</td>
+                      <td style={numCell} title={fmtTsMs(q.last_run_ms)}>{fmtLastRun(q.last_run_ms)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <Empty msg="No Query Store rows in window. Enable Query Store on the target database, then wait for the next poll." />
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Regressions ────────────────────────────────── */}
       <Section title="REGRESSIONS (≥2× SLOWER VS. BASELINE HALF-WINDOW)">

@@ -50,6 +50,14 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
           AND qt.query_sql_text NOT LIKE '%xml_deadlock_report%'
           AND qt.query_sql_text NOT LIKE '%dm_xe_session_targets%'
           AND qt.query_sql_text NOT LIKE '%dm_xe_sessions%'
+          -- dbopt's own live-monitor / query-store / capabilities probes: keep
+          -- the report showing the USER's workload, not our own polling.
+          AND qt.query_sql_text NOT LIKE '%dm_os_ring_buffers%'
+          AND qt.query_sql_text NOT LIKE '%dm_os_performance_counters%'
+          AND qt.query_sql_text NOT LIKE '%dm_io_virtual_file_stats%'
+          AND qt.query_sql_text NOT LIKE '%dm_os_waiting_tasks%'
+          AND qt.query_sql_text NOT LIKE '%database_query_store_options%'
+          AND qt.query_sql_text NOT LIKE '%HAS_PERMS_BY_NAME%'
         GROUP BY q.query_id, p.plan_id
         ORDER BY total_duration_ms DESC;
     "#;

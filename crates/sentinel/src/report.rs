@@ -15,6 +15,9 @@ pub struct WeeklyReport {
     pub instances: i64,
     pub pain: PainSummaryDto,
     pub top_queries: Vec<TopQueryDto>,
+    /// Same queries ranked by most-recent execution (the "by last run" view).
+    #[serde(default)]
+    pub recent_queries: Vec<TopQueryDto>,
     pub regressions: Vec<RegressionDto>,
     pub unused_indexes: Vec<UnusedIndexDto>,
 }
@@ -49,6 +52,10 @@ pub struct TopQueryDto {
     /// before query-text capture existed.
     #[serde(default)]
     pub query_sql_text: Option<String>,
+    /// Most recent execution time (unix ms), or null if unknown. Powers the
+    /// "by last run" sort and the LAST RUN column.
+    #[serde(default)]
+    pub last_run_ms: Option<i64>,
 }
 
 impl From<TopQueryRow> for TopQueryDto {
@@ -61,6 +68,7 @@ impl From<TopQueryRow> for TopQueryDto {
             executions: r.executions,
             avg_duration_ms: avg,
             query_sql_text: r.query_sql_text,
+            last_run_ms: r.last_execution_ms,
         }
     }
 }
@@ -113,6 +121,12 @@ pub fn render_weekly(storage: &Storage, window: TimeRange) -> WeeklyReport {
         .into_iter()
         .map(TopQueryDto::from)
         .collect();
+    let recent_queries = storage
+        .top_n_by_recency(window, 25)
+        .unwrap_or_default()
+        .into_iter()
+        .map(TopQueryDto::from)
+        .collect();
     let regressions = storage
         .regressions_since(window)
         .unwrap_or_default()
@@ -134,6 +148,7 @@ pub fn render_weekly(storage: &Storage, window: TimeRange) -> WeeklyReport {
         instances,
         pain,
         top_queries,
+        recent_queries,
         regressions,
         unused_indexes,
     }

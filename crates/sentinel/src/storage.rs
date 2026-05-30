@@ -58,6 +58,9 @@ pub struct TopQueryRow {
     pub total_duration_ms: i64,
     pub executions: i64,
     pub query_sql_text: Option<String>,
+    /// Most recent execution time (unix ms) seen for this query in the window —
+    /// powers the "by last run" sort. Null for pre-0004 rows without it.
+    pub last_execution_ms: Option<i64>,
 }
 
 /// One row of "regression detected" — query got slower across the window.
@@ -491,18 +494,32 @@ impl Storage {
     // ---------- Query helpers ---------------------------------------------
 
     pub fn top_n_by_duration(&self, window: TimeRange, n: usize) -> anyhow::Result<Vec<TopQueryRow>> {
+        self.top_n_queries(window, n, "total_duration_ms DESC")
+    }
+
+    /// Top queries by most-recent execution (the "by last run" view). Queries
+    /// missing a last_execution_ms (pre-0004 rows) sort last.
+    pub fn top_n_by_recency(&self, window: TimeRange, n: usize) -> anyhow::Result<Vec<TopQueryRow>> {
+        self.top_n_queries(window, n, "last_execution_ms IS NULL, last_execution_ms DESC")
+    }
+
+    /// Shared aggregation for the top-queries views; `order_by` is a fixed,
+    /// caller-supplied clause (never user input).
+    fn top_n_queries(&self, window: TimeRange, n: usize, order_by: &str) -> anyhow::Result<Vec<TopQueryRow>> {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
-        let mut stmt = lock.prepare(
+        let sql = format!(
             "SELECT query_id, plan_id,
                     SUM(total_duration_ms) AS total_duration_ms,
                     SUM(executions)        AS executions,
-                    MAX(query_sql_text)    AS query_sql_text
+                    MAX(query_sql_text)    AS query_sql_text,
+                    MAX(last_execution_ms) AS last_execution_ms
              FROM query_store_snapshot
              WHERE captured_at >= ?1 AND captured_at < ?2
              GROUP BY query_id, plan_id
-             ORDER BY total_duration_ms DESC
-             LIMIT ?3",
-        )?;
+             ORDER BY {order_by}
+             LIMIT ?3"
+        );
+        let mut stmt = lock.prepare(&sql)?;
         let rows = stmt
             .query_map(params![window.from_ms(), window.to_ms(), n as i64], |r| {
                 Ok(TopQueryRow {
@@ -511,6 +528,7 @@ impl Storage {
                     total_duration_ms: r.get(2)?,
                     executions: r.get(3)?,
                     query_sql_text: r.get(4)?,
+                    last_execution_ms: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

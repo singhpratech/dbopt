@@ -280,6 +280,7 @@ pub fn build_report(window: TimeRange) -> WeeklyReport {
             instances: 0,
             pain: Default::default(),
             top_queries: Vec::new(),
+            recent_queries: Vec::new(),
             regressions: Vec::new(),
             unused_indexes: Vec::new(),
         },
