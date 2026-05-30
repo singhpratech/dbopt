@@ -223,7 +223,7 @@ export function SentinelView({ conn }: { conn: SqlConnectionConfig }) {
         <div
           style={{
             padding: "8px 14px",
-            background: "rgba(255,58,74,0.08)",
+            background: "var(--crit-glow, rgba(255,58,74,0.08))",
             borderBottom: "1px solid var(--line)",
             color: "var(--crit, #ff3a4a)",
             font: "11px var(--f-mono, ui-monospace, Menlo, monospace)",

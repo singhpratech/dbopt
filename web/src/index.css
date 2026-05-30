@@ -22,14 +22,18 @@
   --text:           #d6dbe5;
   --text-strong:    #f0f2f7;
   --text-muted:     #6b748a;
-  --text-dim:       #3e465a;
+  --text-dim:       #5a6478;   /* tertiary labels — was #3e465a (1.99:1, effectively invisible); now ~3.1:1 */
 
   /* ── Signal ───────────────────────────────────────── */
   --signal:         #d4ff4e;     /* acid chartreuse — the single hero color */
   --signal-glow:    rgba(212, 255, 78, 0.18);
   --signal-dim:     rgba(212, 255, 78, 0.6);
   --signal-faint:   rgba(212, 255, 78, 0.08);
+  --accent:         var(--signal);  /* alias — some components reference --accent */
   --ok:             #3ad29f;
+  --ok-faint:       var(--ok-faint);
+  --ok-glow:        var(--ok-glow);
+  --ok-line:        rgba(58, 210, 159, 0.40);
   --info:           #7fb4ff;
 
   /* ── Severities ───────────────────────────────────── */
@@ -74,17 +78,21 @@
   --text-muted:     #4d586b;   /* secondary       ~6.4:1 */
   --text-dim:       #69748a;   /* labels/tertiary ~4.4:1 — still clearly visible */
 
-  --signal:         #587600;   /* deep chartreuse ~4.7:1 as text on white */
-  --signal-glow:    rgba(88, 118, 0, 0.16);
-  --signal-dim:     rgba(88, 118, 0, 0.72);
-  --signal-faint:   rgba(88, 118, 0, 0.10);
-  --ok:             #0c8f60;
+  --signal:         #4f6b07;   /* richer chartreuse-green — 6.1:1 on white (was #587600, a muddy 5.2:1 olive) */
+  --signal-glow:    rgba(79, 107, 7, 0.16);
+  --signal-dim:     rgba(79, 107, 7, 0.72);
+  --signal-faint:   rgba(79, 107, 7, 0.10);
+  --accent:         var(--signal);
+  --ok:             #08784f;   /* deep green — 5.5:1 on white (was #0c8f60, AA-large-only 4.1:1) */
+  --ok-faint:       rgba(8, 120, 79, 0.08);
+  --ok-glow:        rgba(8, 120, 79, 0.12);
+  --ok-line:        rgba(8, 120, 79, 0.40);
   --info:           #1f5fc4;
 
-  --crit:           #cc1c2b;
+  --crit:           #cc1c2b;   /* 5.6:1 on white */
   --crit-glow:      rgba(204, 28, 43, 0.12);
-  --err:            #d4740a;
-  --warn:           #c79400;
+  --err:            #a85608;   /* burnt orange — 5.3:1 on white (was #d4740a, FAIL 2.8:1 as text) */
+  --warn:           #8a6500;   /* dark amber — 5.3:1 on white (was #c79400, FAIL 2.7:1 — gold-on-white) */
   --info-sev:       #1f5fc4;
 }
 
@@ -256,7 +264,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.07em;
 }
-.topbar-status .group.db-connected   { color: var(--ok);   background: rgba(58, 210, 159, 0.12); }
+.topbar-status .group.db-connected   { color: var(--ok);   background: var(--ok-glow); }
 .topbar-status .group.db-offline      { color: var(--crit); background: var(--crit-glow); }
 .topbar-status .group.db-checking     { color: var(--warn); }
 .topbar-status .group.db-unconfigured { color: var(--text-dim); border-color: var(--line); }
@@ -1726,7 +1734,7 @@ kbd {
 }
 /* Grade chips: piggy-back on .pill geometry, recolor by band. */
 .pill.grade-a, .health-grade-chip.grade-a .health-score {
-  color: var(--ok); border-color: rgba(58, 210, 159, 0.4); background: rgba(58, 210, 159, 0.1);
+  color: var(--ok); border-color: var(--ok-line); background: var(--ok-glow);
 }
 .pill.grade-b {
   color: var(--signal); border-color: var(--signal-dim); background: var(--signal-faint);
@@ -3142,7 +3150,7 @@ kbd {
   animation: since-scan-in 0.25s ease-out;
 }
 /* Net improvement tints the strip toward "ok"; a regression toward "crit". */
-.since-scan.tone-up    { border-color: var(--ok);   border-left-color: var(--ok);   background: rgba(58, 210, 159, 0.08); }
+.since-scan.tone-up    { border-color: var(--ok);   border-left-color: var(--ok);   background: var(--ok-faint); }
 .since-scan.tone-down  { border-color: var(--crit); border-left-color: var(--crit); background: rgba(255, 58, 74, 0.07); }
 @keyframes since-scan-in {
   from { opacity: 0; transform: translateY(-4px); }
@@ -3246,7 +3254,7 @@ kbd {
   font: 11px var(--f-mono);
   color: var(--text-muted);
 }
-.since-scan-delta.dir-up   { border-color: var(--ok);   background: rgba(58, 210, 159, 0.10); }
+.since-scan-delta.dir-up   { border-color: var(--ok);   background: var(--ok-glow); }
 .since-scan-delta.dir-up   .since-scan-delta-num { color: var(--ok); }
 .since-scan-delta.dir-down { border-color: var(--crit); background: rgba(255, 58, 74, 0.09); }
 .since-scan-delta.dir-down .since-scan-delta-num { color: var(--crit); }
@@ -3278,7 +3286,7 @@ kbd {
   font: 600 11px var(--f-mono);
   font-variant-numeric: tabular-nums;
   color: var(--ok);
-  background: rgba(58, 210, 159, 0.10);
+  background: var(--ok-glow);
   padding: 1px 7px;
   border-radius: 3px;
 }
@@ -3560,7 +3568,7 @@ kbd {
 .mark-validated-toggle input { accent-color: var(--ok); cursor: pointer; }
 .mark-validated-toggle.on {
   border-color: var(--ok);
-  background: rgba(58, 210, 159, 0.1);
+  background: var(--ok-glow);
   color: var(--ok);
 }
 .mark-validated-label { font-weight: 600; }
@@ -3582,9 +3590,9 @@ kbd {
   align-items: center;
   gap: 4px;
   padding: 1px 8px;
-  border: 1px solid rgba(58, 210, 159, 0.5);
+  border: 1px solid var(--ok-line);
   border-radius: 999px;
-  background: rgba(58, 210, 159, 0.12);
+  background: var(--ok-glow);
   color: var(--ok);
   font: 600 10px var(--f-tech);
   letter-spacing: 0.06em;
