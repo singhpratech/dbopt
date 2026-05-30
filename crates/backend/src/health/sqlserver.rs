@@ -281,7 +281,10 @@ impl HealthProvider for SqlServerHealthProvider {
         }
 
         // h. Score (per-lane). Back-compat headline mirrors the reliability lane.
-        let scores = score_report(&issues, &signals);
+        //    The monitoring data-age lets the scorer tell a fresh/just-reset
+        //    monitor ("learning") from a long, genuinely-clean history.
+        let monitoring_secs = sentinel_api::monitoring_age_secs();
+        let scores = score_report(&issues, &signals, monitoring_secs);
         let counts = count_severities(&issues);
 
         Ok(HealthReport {
@@ -301,6 +304,7 @@ impl HealthProvider for SqlServerHealthProvider {
             efficiency_score: scores.efficiency_score,
             efficiency_grade: scores.efficiency_grade,
             is_learning: scores.is_learning,
+            monitoring_age_secs: monitoring_secs,
             counts,
             issues,
             signals,

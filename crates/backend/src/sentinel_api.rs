@@ -262,6 +262,14 @@ pub async fn status() -> impl IntoResponse {
 /// Build a `WeeklyReport` for the configured window, or an empty stub if the
 /// DB hasn't been created yet (e.g. user hit the report tab before ever
 /// starting the daemon).
+/// Seconds of captured telemetry currently held (None if the sentinel store
+/// doesn't exist yet or is empty). Lets the Health front-door distinguish a
+/// just-started / freshly-reset monitor from a long, genuinely-clean history.
+pub fn monitoring_age_secs() -> Option<i64> {
+    let path = SentinelConfig::default_db_path();
+    Storage::open(&path).ok().and_then(|s| s.monitoring_age_secs())
+}
+
 pub fn build_report(window: TimeRange) -> WeeklyReport {
     let path = SentinelConfig::default_db_path();
     match Storage::open(&path) {

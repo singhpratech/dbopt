@@ -45,6 +45,10 @@ pub struct HealthReport {
     pub efficiency_score: u8,
     pub efficiency_grade: char,
     pub is_learning: bool,
+    /// Seconds of sentinel telemetry backing the runtime signals (None when the
+    /// monitor hasn't captured anything yet). Lets the UI say "monitoring for 2h"
+    /// vs "7 days" instead of implying the grade is backed by long history.
+    pub monitoring_age_secs: Option<i64>,
     pub counts: SeverityCounts,
     pub issues: Vec<Issue>,
     pub signals: SignalSummary,
@@ -247,7 +251,11 @@ pub struct LaneScores {
 /// restarted instance whose DMV counters reset — absence of signal is not the
 /// same as health, so we report a provisional A/95 in "learning" mode for both
 /// lanes instead of a perfect 100.
-pub fn score_report(issues: &[Issue], signals: &SignalSummary) -> LaneScores {
+pub fn score_report(
+    issues: &[Issue],
+    signals: &SignalSummary,
+    monitoring_secs: Option<i64>,
+) -> LaneScores {
     let mut reliability_penalty: u32 = 0;
     let mut opportunity_penalty: u32 = 0;
     let mut reliability_count: u32 = 0;
@@ -264,12 +272,35 @@ pub fn score_report(issues: &[Issue], signals: &SignalSummary) -> LaneScores {
         }
     }
 
-    let is_learning = reliability_count == 0
+    // Minimum monitoring history before we'll treat "no signals" as proof of
+    // health rather than "we haven't watched long enough."
+    const MATURE_SECS: i64 = 6 * 3600;
+
+    let no_signal = reliability_count == 0
         && opportunity_count == 0
         && signals.deadlock_count == 0
         && signals.blocking_incidents == 0
         && signals.top_wait_time_ms < 1000;
-    if is_learning {
+
+    if no_signal {
+        let mature = monitoring_secs.map(|s| s >= MATURE_SECS).unwrap_or(false);
+        if mature {
+            // Long, clean history with zero signals — this is genuinely healthy,
+            // not "still learning". Report it as such (not a provisional grade).
+            let (grade, status) = band(98);
+            return LaneScores {
+                reliability_score: 98,
+                reliability_grade: grade,
+                status: status.to_string(),
+                efficiency_score: 98,
+                efficiency_grade: grade,
+                is_learning: false,
+            };
+        }
+        // Not enough history yet (fresh start, or DMV counters just reset on a
+        // restart). Absence of signal is NOT proof of health — report a
+        // provisional grade clearly flagged as "learning" so a deploy-during-an-
+        // incident can't read as a clean bill of health.
         return LaneScores {
             reliability_score: 95,
             reliability_grade: 'A',

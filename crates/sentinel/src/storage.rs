@@ -222,6 +222,30 @@ impl Storage {
         Ok(removed)
     }
 
+    /// How many seconds of captured telemetry we hold, i.e. `now - oldest
+    /// captured_at` across every time-series table. `None` when nothing has been
+    /// captured yet. Used by the Health front-door to tell "monitored long
+    /// enough to trust the all-clear" from "just started / counters just reset".
+    pub fn monitoring_age_secs(&self) -> Option<i64> {
+        let conn = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let oldest_ms: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(m) FROM (
+                    SELECT MIN(captured_at) AS m FROM query_store_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM live_request_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM wait_stats_delta
+                    UNION ALL SELECT MIN(captured_at) FROM deadlock_capture
+                    UNION ALL SELECT MIN(captured_at) FROM index_usage_delta
+                    UNION ALL SELECT MIN(captured_at) FROM size_snapshot
+                 )",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten();
+        oldest_ms.map(|ms| (Utc::now().timestamp_millis() - ms).max(0) / 1000)
+    }
+
     // ---------- Instance registry ----------------------------------------
 
     /// Find-or-create an `instances` row for the given name + connection.
