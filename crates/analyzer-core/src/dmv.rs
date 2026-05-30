@@ -172,10 +172,13 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 has_pk.insert((ix.schema_name.clone(), ix.table_name.clone()));
             }
         }
-        // Heaps holding real data.
+        // Heaps holding real data. Severity scales with size so a 262M-row heap
+        // ranks far above a 1k-row one and pulls the grade accordingly.
         for ((schema, table), rows) in &heap_rows {
             if *rows < 1000 { continue; }
-            let sev = if *rows >= 100_000 { Severity::Warning } else { Severity::Info };
+            let sev = if *rows >= 1_000_000 { Severity::Error }
+                      else if *rows >= 100_000 { Severity::Warning }
+                      else { Severity::Info };
             findings.push(Finding {
                 rule: RuleId("structure.heap_table".into()),
                 severity: sev,
@@ -188,9 +191,10 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
         for ((schema, table), rows) in &rows_by_table {
             if *rows < 100 { continue; }
             if has_pk.contains(&(schema.clone(), table.clone())) { continue; }
+            let sev = if *rows >= 1_000_000 { Severity::Error } else { Severity::Warning };
             findings.push(Finding {
                 rule: RuleId("structure.no_primary_key".into()),
-                severity: Severity::Warning,
+                severity: sev,
                 message: format!("{schema}.{table} has no primary key ({rows} rows)."),
                 location: None,
                 recommendation: Some("A primary key gives every row a stable identity and is required for reliable updates, replication, and most tooling. Add one — `ALTER TABLE [schema].[table] ADD CONSTRAINT PK_table PRIMARY KEY (...);` — a narrow surrogate key is fine if no natural key fits.".into()),

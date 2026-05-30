@@ -53,13 +53,38 @@ impl HealthProvider for SqlServerHealthProvider {
             let severity = severity_str(f.severity);
             // Lane by consequence: critical/error findings are correctness /
             // user-facing risks (reliability); warning/info are opportunities.
-            let lane = match f.severity {
-                Severity::Critical | Severity::Error => "reliability",
-                Severity::Warning | Severity::Info => "opportunity",
+            // Structural / efficiency findings are OPPORTUNITIES even at high
+            // severity — a heap or a missing PK is a cost/structure problem, not
+            // "users hitting errors right now" (the reliability question). Only
+            // genuine runtime-risk findings belong in the reliability lane.
+            let lane = if f.rule.0.starts_with("structure.") {
+                "opportunity"
+            } else {
+                match f.severity {
+                    Severity::Critical | Severity::Error => "reliability",
+                    Severity::Warning | Severity::Info => "opportunity",
+                }
             };
+            // Many findings share ONE rule (e.g. one heap per table). Key the id
+            // on the MESSAGE — letters only, so a row-count change between scans
+            // doesn't churn it — NOT just the rule, or dedup() collapses every
+            // heap / missing-PK into a single issue (the bug that hid a 262M-row
+            // heap behind a 318k one).
+            let obj_key: String = f
+                .message
+                .chars()
+                .map(|c| if c.is_ascii_alphabetic() || c == '.' { c.to_ascii_lowercase() } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-")
+                .chars()
+                .take(90)
+                .collect();
             let affected_object = format!("rule:{}", f.rule.0);
             issues.push(Issue {
-                id: format!("static:finding:{affected_object}"),
+                id: format!("static:finding:{}:{}", f.rule.0, obj_key),
                 source: "static".to_string(),
                 kind: "finding".to_string(),
                 severity: severity.to_string(),
