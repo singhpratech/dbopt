@@ -260,7 +260,7 @@ export async function explain(info: ConnectionInfo, sql: string): Promise<string
   return (json as any).plan_xml as string;
 }
 
-export type QStoreStatus = { enabled: boolean; state: string; capture_mode: string };
+export type QStoreStatus = { enabled: boolean; state: string; capture_mode: string; can_alter: boolean };
 
 /** Query Store config for the connected database (capture_mode AUTO|ALL|NONE). */
 export async function qstoreStatus(info: ConnectionInfo): Promise<QStoreStatus> {

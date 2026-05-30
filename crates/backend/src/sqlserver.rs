@@ -173,10 +173,30 @@ pub struct QueryStoreStatus {
     pub enabled: bool,
     pub state: String,
     pub capture_mode: String,
+    /// Whether the connected login can actually change the capture mode, i.e.
+    /// holds ALTER on this database (db_owner / sysadmin). The UI gates the
+    /// toggle on this so it never offers a change the login can't make.
+    pub can_alter: bool,
 }
 
 pub async fn query_store_status(req: &ConnectReq) -> anyhow::Result<QueryStoreStatus> {
     let mut client = open(req).await?;
+
+    // Does this login hold ALTER on the database? HAS_PERMS_BY_NAME accounts for
+    // role membership (db_owner) and server roles (sysadmin), so it's the true
+    // effective check. Run it independently so it works even when QS is OFF.
+    let mut can_alter = false;
+    if let Ok(s) = client
+        .simple_query("SELECT CAST(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS INT)")
+        .await
+    {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                can_alter = r.get::<i32, _>(0).unwrap_or(0) == 1;
+            }
+        }
+    }
+
     let stream = client
         .simple_query("SELECT actual_state_desc, query_capture_mode_desc FROM sys.database_query_store_options")
         .await?;
@@ -184,9 +204,9 @@ pub async fn query_store_status(req: &ConnectReq) -> anyhow::Result<QueryStoreSt
     if let Some(r) = rows.into_iter().next() {
         let state = r.get::<&str, _>(0).unwrap_or("OFF").to_string();
         let mode = r.get::<&str, _>(1).unwrap_or("NONE").to_string();
-        Ok(QueryStoreStatus { enabled: !state.eq_ignore_ascii_case("OFF"), state, capture_mode: mode })
+        Ok(QueryStoreStatus { enabled: !state.eq_ignore_ascii_case("OFF"), state, capture_mode: mode, can_alter })
     } else {
-        Ok(QueryStoreStatus { enabled: false, state: "OFF".into(), capture_mode: "NONE".into() })
+        Ok(QueryStoreStatus { enabled: false, state: "OFF".into(), capture_mode: "NONE".into(), can_alter })
     }
 }
 

@@ -532,7 +532,11 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
       setPending(null);
       await load();
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      const raw = e?.message ?? String(e);
+      // Turn the engine's permission denial into a plain, actionable message.
+      setErr(/permission|denied|alter database/i.test(raw)
+        ? `Couldn't change it — your login lacks ALTER on ${conn.database} (needs db_owner / sysadmin). Use COPY to hand the statement to a DBA.`
+        : `Couldn't change capture mode: ${raw}`);
     } finally {
       setBusy(false);
     }
@@ -541,27 +545,39 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
   if (!connected) return null;
 
   const mode = status?.capture_mode ?? "—";
+  const canAlter = !!status?.can_alter;
   const stmt = (m: string) => `ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = ${m})`;
+  const copy = (m: "AUTO" | "ALL") => { try { navigator.clipboard?.writeText(stmt(m) + ";"); } catch { /* clipboard may be blocked */ } };
+  const tryToggle = (m: "AUTO" | "ALL") => {
+    if (mode === m) return;
+    if (!canAlter) { setErr(`Your login can't change this — it needs ALTER on ${conn.database} (db_owner / sysadmin). Use COPY to hand the statement to a DBA.`); return; }
+    setPending(m);
+  };
 
   return (
     <div className="qstore-strip">
       <div className="qstore-row">
         <span className="qstore-label">QUERY STORE CAPTURE</span>
         <span className="live-tabs">
-          <button className={mode === "AUTO" ? "active" : ""} disabled={busy} onClick={() => mode !== "AUTO" && setPending("AUTO")}>AUTO</button>
-          <button className={mode === "ALL" ? "active" : ""} disabled={busy} onClick={() => mode !== "ALL" && setPending("ALL")}>ALL</button>
+          <button className={mode === "AUTO" ? "active" : ""} disabled={busy || !canAlter} onClick={() => tryToggle("AUTO")}>AUTO</button>
+          <button className={mode === "ALL" ? "active" : ""} disabled={busy || !canAlter} onClick={() => tryToggle("ALL")}>ALL</button>
         </span>
         <span className="qstore-note">
           {status && !status.enabled
             ? "Query Store is OFF for this database."
             : mode === "ALL"
-            ? "Full capture — every statement is recorded (higher overhead)."
-            : "AUTO (default) — recurring/expensive queries are captured; one-off ad-hoc queries are skipped."}
+            ? "Full capture — every statement is recorded (higher overhead). AUTO is the recommended default."
+            : "AUTO (recommended default) — recurring/expensive queries are captured; one-off ad-hoc queries are skipped."}
         </span>
       </div>
       <div className="qstore-perm">
-        Viewing the mode needs only read access; <b>changing</b> it needs <code>ALTER</code> on the database
-        (<code>db_owner</code> / <code>sysadmin</code>). A read-only monitoring login can copy the statement for a DBA.
+        {canAlter ? (
+          <>Viewing the mode needs only read access; <b>changing</b> it needs <code>ALTER</code> on the database
+          (<code>db_owner</code> / <code>sysadmin</code>).</>
+        ) : (
+          <>Your login can <b>view</b> the mode but not change it (needs <code>ALTER</code> — <code>db_owner</code> / <code>sysadmin</code>).{" "}
+          <button className="qstore-copy-link" onClick={() => copy("ALL")} title="Copy the ALTER statement to enable full capture">Copy the “enable full capture” statement for a DBA →</button></>
+        )}
       </div>
       {err && <div className="qstore-err">{err}</div>}
       {pending && (
@@ -572,7 +588,7 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
             <button className="primary" disabled={busy} onClick={() => apply(pending)}>{busy ? "APPLYING…" : "APPLY"}</button>
             <button
               disabled={busy}
-              onClick={() => { try { navigator.clipboard?.writeText(stmt(pending) + ";"); } catch { /* clipboard may be blocked */ } }}
+              onClick={() => copy(pending)}
               title="Copy the statement so a DBA can run it"
             >
               COPY
