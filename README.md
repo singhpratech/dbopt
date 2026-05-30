@@ -44,7 +44,7 @@ dbopt takes the opposite stance on all four.
   dare run. (We've pointed it at 100M+ row tables and optimized a multi-hour
   query without executing it once.)
 - **Prescriptive + cited fixes.** Not just "here's a finding" — the concrete
-  rewrite *and* the engine-level reasoning behind it. 52 rules, each with a
+  rewrite *and* the engine-level reasoning behind it. 59 rules, each with a
   recommendation.
 - **Three lenses, one tool.** Static T-SQL analysis · execution-plan cost
   breakdown · live DMV + continuous monitoring. Most tools do one.
@@ -70,7 +70,7 @@ cloud service.
 
 dbopt looks at your workload through three complementary lenses:
 
-1. **Static analysis** — a token-level T-SQL analyzer (52 rules across hygiene,
+1. **Static analysis** — a token-level T-SQL analyzer (59 rules across hygiene,
    sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb,
    statistics, and index design). Runs in-browser via WebAssembly or as a native
    CLI. No connection required.
@@ -153,7 +153,7 @@ No external services are required to run dbopt.
 
 dbopt holds itself to a measurable accuracy target and proves it:
 
-- **113 eval scenarios**, precision = recall = **F1 = 1.000** (target ≥ 0.95).
+- **135 eval scenarios**, precision = recall = **F1 = 1.000** (target ≥ 0.95).
 - **100% positive and 100% negative rule coverage** — every rule has a scenario
   that proves it fires when it should *and* stays silent when it shouldn't.
 - Rust unit + HTTP integration tests and a Playwright UI suite —
