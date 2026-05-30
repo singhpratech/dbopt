@@ -3971,3 +3971,5 @@ kbd {
 }
 .qstore-confirm-ops button.primary { background: var(--accent); color: #0a0e07; border-color: var(--accent); }
 .qstore-confirm-ops button:disabled { opacity: .5; cursor: default; }
+.qstore-perm { padding: 0 16px 9px; font: 10.5px var(--f-mono); color: var(--text-muted); line-height: 1.5; }
+.qstore-perm code { font: 10.5px var(--f-mono); color: var(--text-dim); }

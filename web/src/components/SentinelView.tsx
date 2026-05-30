@@ -559,6 +559,10 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
             : "AUTO (default) — recurring/expensive queries are captured; one-off ad-hoc queries are skipped."}
         </span>
       </div>
+      <div className="qstore-perm">
+        Viewing the mode needs only read access; <b>changing</b> it needs <code>ALTER</code> on the database
+        (<code>db_owner</code> / <code>sysadmin</code>). A read-only monitoring login can copy the statement for a DBA.
+      </div>
       {err && <div className="qstore-err">{err}</div>}
       {pending && (
         <div className="qstore-confirm">
@@ -566,6 +570,13 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
           <code>{stmt(pending)}</code>
           <div className="qstore-confirm-ops">
             <button className="primary" disabled={busy} onClick={() => apply(pending)}>{busy ? "APPLYING…" : "APPLY"}</button>
+            <button
+              disabled={busy}
+              onClick={() => { try { navigator.clipboard?.writeText(stmt(pending) + ";"); } catch { /* clipboard may be blocked */ } }}
+              title="Copy the statement so a DBA can run it"
+            >
+              COPY
+            </button>
             <button disabled={busy} onClick={() => setPending(null)}>CANCEL</button>
           </div>
         </div>
