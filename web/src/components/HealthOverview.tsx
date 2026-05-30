@@ -264,6 +264,14 @@ export function HealthOverview({
         </div>
       ) : report ? (
         <>
+          {/* ── HONEST TALLY ────────────────────────────────
+              The real issue count + severity breakdown. The signal strip below
+              only counts narrow DMV-usage categories (missing/unused idx, etc.),
+              so WITHOUT this the header can read all-zeros on a database that has
+              serious structural/config problems. This line can never look empty
+              when issues exist. */}
+          <IssueTally issues={report.issues} />
+
           {/* ── 2) SIGNAL STRIP ─────────────────────────────
               Structural signals (missing/unused/dup/columnstore) are always
               DMV-measured → shown as-is. Runtime signals (deadlocks/blocking/
@@ -449,7 +457,10 @@ function GradeBlock({
   return (
     <div
       className={`health-grade${provisional ? " provisional" : ""}`}
-      title={provisional ? provisionalTip : `${label} grade`}
+      /* Only the provisional hint uses a native title; the non-provisional case
+         is already explained by the <Term> popover on the label — a second
+         native tooltip here just collides with it on hover. */
+      title={provisional ? provisionalTip : undefined}
     >
       <div className={`health-grade-chip ${gradeClass}`}>
         {provisional ? (
@@ -487,6 +498,41 @@ function GradeBlock({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Honest top-line: total issue count + severity breakdown. The signal strip
+ * only counts narrow DMV-usage categories, so without this the header could read
+ * all-zeros on a DB with real structural/config problems (the bug that hid a
+ * 262M-row heap). This is the one line that always tells the true total.
+ */
+function IssueTally({ issues }: { issues: { severity: string }[] }) {
+  const n = (s: string) => issues.filter((i) => i.severity === s).length;
+  const crit = n("critical"), err = n("error"), warn = n("warning"), info = n("info");
+  const total = issues.length;
+  // "To fix first" = the actionable ones (everything but info).
+  const fixFirst = crit + err + warn;
+  if (total === 0) {
+    return (
+      <div className="health-tally clean">
+        <span className="health-tally-n">0</span>
+        <span className="health-tally-label">issues on what we can see — connect a workload for runtime checks</span>
+      </div>
+    );
+  }
+  return (
+    <div className="health-tally">
+      <span className="health-tally-n">{total}</span>
+      <span className="health-tally-label">{total === 1 ? "issue found" : "issues found"}</span>
+      <span className="health-tally-sevs">
+        {crit > 0 && <span className="health-tally-sev crit">{crit} critical</span>}
+        {err > 0 && <span className="health-tally-sev err">{err} error</span>}
+        {warn > 0 && <span className="health-tally-sev warn">{warn} warning</span>}
+        {info > 0 && <span className="health-tally-sev info">{info} info</span>}
+      </span>
+      {fixFirst > 0 && <span className="health-tally-fix">{fixFirst} to fix first ↓</span>}
     </div>
   );
 }

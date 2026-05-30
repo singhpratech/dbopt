@@ -1850,6 +1850,53 @@ kbd {
 }
 
 /* ── Signal strip — topbar-counter style ──────────── */
+/* Honest issue tally — the always-true top-line count. */
+.health-tally {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-top: 14px;
+  padding: 11px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--crit);
+  background: var(--bg-elev);
+  border-radius: 4px;
+}
+.health-tally.clean { border-left-color: var(--ok); }
+.health-tally-n {
+  font: 700 22px var(--f-mono);
+  line-height: 1;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.health-tally-label {
+  font: 12px var(--f-sans);
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.health-tally-sevs { display: flex; gap: 6px; flex-wrap: wrap; }
+.health-tally-sev {
+  font: 10px var(--f-tech);
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+}
+.health-tally-sev.crit { color: var(--crit); }
+.health-tally-sev.err  { color: var(--err); }
+.health-tally-sev.warn { color: var(--warn); }
+.health-tally-sev.info { color: var(--info-sev); }
+.health-tally-fix {
+  margin-left: auto;
+  font: 10px var(--f-tech);
+  letter-spacing: 0.06em;
+  color: var(--signal);
+  text-transform: uppercase;
+}
+
 .health-signals {
   display: flex;
   flex-wrap: wrap;
@@ -1857,6 +1904,9 @@ kbd {
   margin-top: 14px;
   border: 1px solid var(--line);
   background: var(--bg-elev);
+  /* belt-and-suspenders: never let the strip push past its container width */
+  max-width: 100%;
+  overflow: hidden;
 }
 .health-signal {
   display: flex;
