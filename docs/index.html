@@ -228,7 +228,7 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
       <h1 class="reveal" style="transition-delay:.06s">Find &amp; fix slow SQL<br><span class="hl">before</span> it reaches production.</h1>
       <p class="sub reveal" style="transition-delay:.12s">dbopt reads your T-SQL, your execution plans, and your live server metrics — then tells you exactly what's going to hurt and <b>how to fix it, with the reasoning cited</b>. Statically. Privately. No execution, no locks, no load on prod.</p>
       <div class="cta-row reveal" style="transition-delay:.18s">
-        <a class="btn btn-primary" href="https://github.com/singhpratech/dbopt" target="_blank" rel="noopener">Get dbopt — free &amp; open →</a>
+        <a class="btn btn-primary" href="#get">Download — free &amp; open →</a>
         <a class="btn btn-ghost" href="#lenses">See how it works</a>
       </div>
       <div class="status reveal" style="transition-delay:.26s">
@@ -357,13 +357,17 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
   <div class="wrap">
     <span class="kicker reveal" style="justify-content:center">Ready when you are</span>
     <h2 class="reveal" style="transition-delay:.06s;margin-top:16px">Stop guessing.<br>Start <span class="hl">seeing</span>.</h2>
-    <div class="install reveal" style="transition-delay:.12s">
-      <code id="cmd"><span class="p">$</span> git clone https://github.com/singhpratech/dbopt &amp;&amp; cargo build --release</code>
-      <button id="copy">COPY</button>
+    <div class="cta-row reveal" style="transition-delay:.12s;justify-content:center;margin-top:30px;flex-wrap:wrap">
+      <a class="btn btn-primary" href="https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-arm64.dmg">macOS · Apple Silicon</a>
+      <a class="btn btn-ghost" href="https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-x86_64.dmg">macOS · Intel</a>
+      <a class="btn btn-ghost" href="https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-windows-x86_64.zip">Windows</a>
+      <a class="btn btn-ghost" href="https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-linux-x86_64.AppImage">Linux</a>
     </div>
-    <div class="cta-row reveal" style="transition-delay:.16s;justify-content:center;margin-top:24px">
-      <a class="btn btn-primary" href="https://github.com/singhpratech/dbopt" target="_blank" rel="noopener">View on GitHub ↗</a>
-    </div>
+    <p class="reveal" style="transition-delay:.18s;text-align:center;margin-top:20px;font:12px var(--mono);color:var(--dim)">
+      one self-contained binary · run it, open <span style="color:var(--muted)">127.0.0.1:3690</span> &nbsp;·&nbsp;
+      <a href="https://github.com/singhpratech/dbopt/releases" style="color:var(--muted)">all releases</a> &nbsp;·&nbsp;
+      <a href="https://github.com/singhpratech/dbopt" style="color:var(--muted)">build from source ↗</a>
+    </p>
   </div>
 </section>
 
@@ -397,12 +401,6 @@ const cu=new IntersectionObserver((es)=>es.forEach(e=>{
   requestAnimationFrame(step);
 }),{threshold:.5});
 document.querySelectorAll('[data-count]').forEach(el=>cu.observe(el));
-// copy install
-const btn=document.getElementById('copy');
-btn.addEventListener('click',async()=>{
-  try{await navigator.clipboard.writeText('git clone https://github.com/singhpratech/dbopt && cargo build --release');
-  btn.textContent='COPIED ✓';setTimeout(()=>btn.textContent='COPY',1400);}catch{}
-});
 </script>
 </body>
 </html>

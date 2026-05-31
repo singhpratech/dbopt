@@ -41,6 +41,19 @@ cloud model.
 
 ---
 
+## Download
+
+Prebuilt — **no toolchain needed**. Grab the installer for your OS:
+
+| Platform | Download |
+|---|---|
+| **Windows** (x64) | **[portable `.zip`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-windows-x86_64.zip)** |
+| **macOS** (Apple Silicon) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-arm64.dmg)** |
+| **macOS** (Intel) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-x86_64.dmg)** |
+| **Linux** (x64) | **[`.AppImage`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-linux-x86_64.AppImage)** · [`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-linux-x86_64.tar.gz) |
+
+Each is a **single self-contained binary** (the web UI is embedded) — run it, then open `http://127.0.0.1:3690`. Checksums and all builds on the [releases page](https://github.com/singhpratech/dbopt/releases).
+
 ## Why it exists
 
 Slow SQL is the silent tax on every data-heavy company: the query "that's been running since last night,"
@@ -87,7 +100,9 @@ preview-only (Safe-Apply never auto-runs a change).
 cargo run -p eval -- --html   # → target/eval-report.html  (the live board)
 ```
 
-## Quick start
+## Build from source
+
+Prefer to build it yourself (or hacking on dbopt)? You'll need Rust, Node 18+ and `wasm-pack`:
 
 ```bash
 # Build the web UI first (it is embedded into the backend binary at compile time).
