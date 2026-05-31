@@ -1,144 +1,130 @@
 <p align="center">
-  <img src="web/public/logo.svg" alt="dbopt" width="96" height="96" />
+  <img src="web/public/logo.svg" width="104" height="104" alt="dbopt" />
 </p>
 
-# dbopt
+<h1 align="center">dbopt</h1>
 
-**Find and fix slow SQL _before_ it reaches production — statically, privately, and prescriptively.**
+<p align="center">
+  <b>Find and fix slow SQL <i>before</i> it reaches production — statically, privately, prescriptively.</b>
+</p>
 
-dbopt is a local-first database performance optimizer. It reads your T-SQL, your
-execution plans, and your live server metrics, then tells you exactly what's
-going to hurt — and how to fix it, with the reasoning cited. Nothing leaves your
-machine unless you choose to send it.
+<p align="center">
+  <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
+  <img src="https://img.shields.io/badge/SQL%20Server-2014%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2014 to 2025" />
+  <img src="https://img.shields.io/badge/rules-59-d4ff4e?style=flat-square&labelColor=0a0d12" alt="59 rules" />
+  <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
+  <img src="https://img.shields.io/badge/local--first-no%20cloud-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
+  <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20React-7e879b?style=flat-square&labelColor=0a0d12" alt="Rust + React" />
+</p>
 
-> **SQL Server is the product today** — comprehensive and fully tested.
-> PostgreSQL and MySQL are on the roadmap (future, not yet implemented). The
-> engine seam is in place so they slot in without disturbing the SQL Server core.
-
-> **Free and open.** No per-seat cost, no paywalled features. The goal is to give
-> SQL developers and DBAs what the commercial tools do — without monetizing their pain.
-
-## Documentation
-
-- **[Who is dbopt for?](docs/WHO-IS-DBOPT-FOR.md)** — what it does for SQL developers, DBAs, and platform teams (start here).
-- **[Access & Permissions](docs/ACCESS.md)** — exactly what database access each capability needs, with a least-privilege grant script and a per-platform matrix (self-managed / RDS / Azure).
-- **[Roadmap to "complete"](docs/ROADMAP-TO-COMPLETE.md)** — honest gap analysis vs the commercial field and the prioritized plan to close it.
+<p align="center">
+  <a href="https://dbopt.org"><b>dbopt.org</b></a>
+  &nbsp;·&nbsp; <a href="docs/WHO-IS-DBOPT-FOR.md">Who it's for</a>
+  &nbsp;·&nbsp; <a href="docs/ACCESS.md">Access &amp; permissions</a>
+  &nbsp;·&nbsp; <a href="docs/ROADMAP-TO-COMPLETE.md">Roadmap</a>
+</p>
 
 ---
 
-## Why this exists
+**dbopt** reads your T-SQL, your execution plans, and your live server metrics — then tells you exactly
+what's going to hurt and **how to fix it, with the reasoning cited**. It analyzes statically and from the
+*estimated* plan, so there's **no execution, no locks, no load on production**. Nothing leaves your machine
+unless you explicitly choose a cloud model.
 
-Slow SQL is the silent tax on every data-heavy company: the query "that's been
-running since last night," the 2 a.m. incident, the cloud bill that keeps
-climbing. The usual ways to fight it are unsatisfying:
+> **SQL Server is the product today** — comprehensive and fully tested. PostgreSQL and MySQL are on the
+> roadmap; the engine seam is already in place so they slot in without disturbing the SQL Server core.
+>
+> **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
+> monetizing your pain.
+
+---
+
+## Why it exists
+
+Slow SQL is the silent tax on every data-heavy company: the query "that's been running since last night,"
+the 2 a.m. incident, the cloud bill that keeps climbing. The usual fixes disappoint —
 
 - **Expensive, SQL-Server-locked enterprise suites** that cost more than the problem.
 - **Tools that only react _after_ a query runs** — by then the damage is done.
-- **Raw DMV dumps** that tell you _what_ is slow but not _why_ or _what to do_.
-- **Cloud SaaS** that wants you to ship your queries and schema off-box — a
-  non-starter for pharma, finance, and healthcare.
+- **Raw DMV dumps** that tell you *what* is slow but not *why* or *what to do*.
+- **Cloud SaaS** that wants your queries and schema off-box — a non-starter for pharma, finance, healthcare.
 
 dbopt takes the opposite stance on all four.
 
-## What dbopt gives you
+## What you get
 
-- **Shift-left analysis.** Catch the anti-pattern _before_ the query runs.
-  dbopt analyzes statically and from the *estimated* plan — **no execution, no
-  locks, no load on production.** It will happily dissect a query you'd never
-  dare run. (We've pointed it at 100M+ row tables and optimized a multi-hour
-  query without executing it once.)
-- **Prescriptive + cited fixes.** Not just "here's a finding" — the concrete
-  rewrite *and* the engine-level reasoning behind it. 59 rules, each with a
-  recommendation.
-- **Three lenses, one tool.** Static T-SQL analysis · execution-plan cost
-  breakdown · live DMV + continuous monitoring. Most tools do one.
-- **Local-first and private.** A single Rust binary. SQLite for storage. An
-  optional **local** LLM (Ollama) for AI help. Your SQL and schema never leave
-  the box unless you explicitly pick a cloud model.
-- **Continuous sentinel.** A lightweight daemon polls your instance, builds a
-  time-series, and surfaces a weekly **pain report** — top waits, regressions,
-  unused indexes — so you catch trouble early instead of at 2 a.m.
-- **Grounded AI assistant.** The assistant gets your SQL *and* the static
-  findings injected as context, so it explains and rewrites with real grounding
-  — and you can fan the same prompt out to several models to compare.
+### 🔭 Three lenses, one tool
 
-## Who it's for
+|   | Lens | What it does |
+|---|------|--------------|
+| **01** | **Static** | A token-level T-SQL analyzer — **59 rules** across hygiene, sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb, statistics and index design. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
+| **02** | **Plan** | Fetches the *estimated* plan (`SET SHOWPLAN_XML`, compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, and spill risk. |
+| **03** | **Live** | Pulls DMVs (index usage, missing indexes, sizes) on demand, and the **sentinel** daemon polls Query Store, waits, deadlocks and index usage into a local SQLite time-series → a weekly **pain report**. |
 
-DBAs and senior backend/data engineers — especially teams **without** a
-dedicated performance expert, and regulated shops that **can't** send data to a
-cloud service.
+### 🛠 Prescriptive &amp; cited fixes
 
----
+Not just "here's a finding" — the concrete **rewrite** *and* the engine-level **reasoning** behind it.
+Every rule ships a recommendation, and the grounded **AI assistant** gets your SQL *and* the findings as
+context (fan one prompt out to several models to compare). Everything is **version-aware (2014 → 2025)** —
+a 2022+ rewrite is never suggested against a 2014 target.
 
-## How it works
+### 🔒 Local-first &amp; private
 
-dbopt looks at your workload through three complementary lenses:
+A single **Rust binary**. SQLite for storage. An optional **local** LLM (Ollama). No telemetry, no account,
+no upload — it'll happily dissect a query you'd never dare run. Estimated plans are compile-only and DDL is
+preview-only (Safe-Apply never auto-runs a change).
 
-1. **Static analysis** — a token-level T-SQL analyzer (59 rules across hygiene,
-   sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb,
-   statistics, and index design). Runs in-browser via WebAssembly or as a native
-   CLI. No connection required.
-2. **Execution-plan analysis** — fetches the *estimated* plan (`SET SHOWPLAN_XML`,
-   compile-only) and breaks down operator cost, scans vs. seeks, and spill risk.
-3. **Live + continuous** — pulls DMVs (index usage, missing indexes, sizes) on
-   demand, and the **sentinel** daemon polls Query Store, waits, deadlocks, live
-   requests, index usage, and sizes into a local SQLite time-series.
+## Quality bar — proven, not promised
 
-Everything is version-aware (SQL Server 2014 → 2025): a 2022+ rewrite is never
-suggested against a 2014 target.
+- **135 eval scenarios** · precision = recall = **F1 = 1.000** (target ≥ 0.95).
+- **100% positive and 100% negative coverage** — every rule has a scenario that proves it fires when it
+  should *and* stays silent when it shouldn't.
+- Rust unit + HTTP integration tests and a Playwright UI suite.
+
+```bash
+cargo run -p eval -- --html   # → target/eval-report.html  (the live board)
+```
 
 ## Quick start
 
 ```bash
-# Build the web UI first (it is embedded into the backend binary at compile
-# time). Requires Node 18+ and wasm-pack (`cargo install wasm-pack`).
+# Build the web UI first (it is embedded into the backend binary at compile time).
+# Requires Node 18+ and wasm-pack (`cargo install wasm-pack`).
 wasm-pack build crates/analyzer-wasm --target web --out-dir ../../web/src/wasm --release
 cd web && npm install && npm run build && cd ..
 
-# Then build the Rust workspace (single workspace, no external services needed).
-# Skipping the web build above just makes the backend serve a placeholder page;
-# the CLI and analysis engine work regardless.
+# Build the Rust workspace (single workspace, no external services needed).
 cargo build --release
 
 # 1) Analyze a script statically — no DB connection needed
 ./target/release/sqlopt path/to/query.sql
 
-# 2) Run the web observatory (serves the UI + API on :3690)
-./target/release/sqlopt-backend
-#    then open http://127.0.0.1:3690
+# 2) Run the web observatory (UI + API on :3690)
+./target/release/sqlopt-backend          # then open http://127.0.0.1:3690
 
-# 3) Continuous monitoring (reads connection from env; SQL auth)
+# 3) Continuous monitoring (SQL auth via env)
 SQLOPT_SERVER="host,1433" SQLOPT_USER="..." SQLOPT_PASSWORD="..." \
   ./target/release/sqlopt-sentinel run
-
-# 4) The rule-quality eval, with an HTML report
-cargo run -p eval -- --html   # → target/eval-report.html
 ```
 
-For UI development: `cd web && npm install && npm run dev` (proxies the API to
-the backend on :3690).
+For UI development: `cd web && npm install && npm run dev` (proxies the API to the backend on :3690).
 
 ## Authentication
 
-dbopt connects to SQL Server with **SQL Server authentication** (username +
-password) out of the box — this is the default and needs no special build.
-
-For **Windows / integrated (Kerberos) authentication**, rebuild with the
-`integrated-auth` feature, which links GSSAPI on Linux:
+SQL Server authentication (username + password) works out of the box. For **Windows / integrated
+(Kerberos) auth**, rebuild with the `integrated-auth` feature (links GSSAPI on Linux):
 
 ```bash
 cargo build --release -p backend  --features integrated-auth
 cargo build --release -p sentinel --features integrated-auth
 ```
 
-It is off by default because the GSSAPI/Kerberos system libraries it links are
-not present on every build host (and are not used on Windows targets). When the
-feature is enabled and you connect without a username/password, dbopt uses the
-current Windows identity; otherwise SQL authentication is used.
+It's off by default because those system libraries aren't on every build host (and aren't used on Windows
+targets). With the feature on and no username/password supplied, dbopt uses the current Windows identity.
 
 ## Architecture
 
-A Rust workspace plus a React/Vite/TypeScript front end:
+A Rust workspace plus a React / Vite / TypeScript front end:
 
 | Crate | Role |
 |---|---|
@@ -147,42 +133,23 @@ A Rust workspace plus a React/Vite/TypeScript front end:
 | `analyzer-cli`  | `sqlopt` — analyze a `.sql` / `.sqlplan` / bundle from the shell |
 | `backend`       | `sqlopt-backend` — axum API + embedded web UI, LLM proxy, durable logs |
 | `sentinel`      | `sqlopt-sentinel` — continuous DMV poller → SQLite → pain report |
-| `eval`          | the rule-quality harness (precision/recall/F1 + HTML report) |
+| `eval`          | the rule-quality harness (precision / recall / F1 + HTML report) |
 | `web/`          | the "observatory" UI (analysis, plans, charts, AI, monitoring) |
 
-Storage and config live under `~/.sqlopt/` (override with `SQLOPT_DATA_DIR`).
-No external services are required to run dbopt.
+Storage and config live under `~/.sqlopt/` (override with `SQLOPT_DATA_DIR`). No external services required.
 
-## Quality bar
+## Roadmap — one brand, every engine
 
-dbopt holds itself to a measurable accuracy target and proves it:
+**SQL Server (2014 → 2025) is the product** — complete and tested: static analysis, estimated-plan
+analysis, live DMVs, continuous sentinel, AI assistant, web UI.
 
-- **135 eval scenarios**, precision = recall = **F1 = 1.000** (target ≥ 0.95).
-- **100% positive and 100% negative rule coverage** — every rule has a scenario
-  that proves it fires when it should *and* stays silent when it shouldn't.
-- Rust unit + HTTP integration tests and a Playwright UI suite —
-  `cargo test --workspace` and `npm run test:e2e` both green.
-
-Run `cargo run -p eval -- --html` and open the report to see the live board.
-
-## Status & roadmap
-
-**SQL Server (2014 → 2025) — the product. Complete and tested.** Static analysis,
-estimated-plan analysis, live DMVs, continuous sentinel, AI assistant, web UI.
-This is where the focus is and where it stays sharp.
-
-**Future (roadmap, not yet started) — multi-engine.** PostgreSQL and MySQL are a
-deliberate *later*. The `Engine` seam already exists (the analyzer accepts a
-target engine and filters rules), so adding them never destabilizes the SQL
-Server core. The abstraction that unlocks them:
-
-- an `Engine` trait for connection, catalog/metric queries, plan capture, and
-  version model (SQL Server's `sys.dm_*` / `SHOWPLAN_XML` → Postgres
-  `pg_stat_*` / `EXPLAIN (FORMAT JSON)`, etc.);
-- a per-rule engine tag (many rules are universal; some are dialect-specific);
-- engine-parameterized API + UI.
+**PostgreSQL and MySQL are a deliberate _later_.** The `Engine` seam already exists (the analyzer accepts a
+target engine and filters rules), so adding them never destabilizes the SQL Server core — one master brand,
+a small per-engine flavor tag (`dbopt · SQL Server` → `PostgreSQL` → `MySQL`).
 
 ---
 
-dbopt is local-first by design: your queries, schema, and metrics stay on your
-infrastructure. The web is at **dbopt.org**.
+<p align="center">
+  <sub>Local-first by design — your queries, schema, and metrics stay on your infrastructure.</sub><br>
+  <sub><a href="https://dbopt.org">dbopt.org</a></sub>
+</p>
