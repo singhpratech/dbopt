@@ -434,11 +434,16 @@ async function consumeSse(r: Response, onToken: (s: string) => void) {
       const frame = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
       let evt = "message";
-      let data = "";
+      const dataParts: string[] = [];
       for (const line of frame.split("\n")) {
         if (line.startsWith("event:")) evt = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).replace(/^ /, "");
+        else if (line.startsWith("data:")) dataParts.push(line.slice(5).replace(/^ /, ""));
       }
+      // Per the SSE spec an event's payload is its `data:` fields joined by "\n".
+      // A content delta containing newlines arrives as several `data:` lines, so we
+      // MUST rejoin with "\n" — concatenating with "" silently destroyed every code
+      // block, heading, list and table in AI responses (turned them into one wall).
+      const data = dataParts.join("\n");
       if (evt === "done") return;
       if (evt === "error") throw new Error(data || "stream error");
       if (data) onToken(data);

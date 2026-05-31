@@ -456,7 +456,7 @@ export function App() {
     <div className={`app${railExpanded ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="brand">
-          <span className="mark">▣</span>
+          <img className="mark" src="/logo.svg" alt="dbopt" width="26" height="26" />
           <span className="name">dbopt<span className="dim">/observatory</span></span>
           <span className="tag">v0.1</span>
         </div>

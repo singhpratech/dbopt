@@ -15,6 +15,7 @@ import { useState } from "react";
  * arrives and the parse settles.
  */
 
+type Align = "left" | "center" | "right" | null;
 type Block =
   | { type: "code"; lang: string; content: string }
   | { type: "heading"; level: number; text: string }
@@ -22,6 +23,7 @@ type Block =
   | { type: "ul"; items: string[] }
   | { type: "ol"; items: string[] }
   | { type: "quote"; text: string }
+  | { type: "table"; header: string[]; align: Align[]; rows: string[][] }
   | { type: "p"; text: string };
 
 const RE_FENCE = /^```(.*)$/;
@@ -30,6 +32,29 @@ const RE_HR = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const RE_UL = /^\s*[-*+]\s+/;
 const RE_OL = /^\s*\d+[.)]\s+/;
 const RE_QUOTE = /^\s*>\s?/;
+// A GFM table separator row, e.g. `| --- | :--: | --: |` (dashes/colons/pipes only).
+const RE_TSEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+/** Split one `| a | b |` table row into trimmed cells (tolerates missing edge pipes). */
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+/** Column alignment from a separator cell (`:--` left, `:-:` center, `--:` right). */
+function cellAlign(sep: string): Align {
+  const s = sep.trim();
+  const l = s.startsWith(":");
+  const r = s.endsWith(":");
+  return l && r ? "center" : r ? "right" : l ? "left" : null;
+}
+
+/** A table starts where a row containing `|` is immediately followed by a separator row. */
+function isTableStart(lines: string[], i: number): boolean {
+  return i + 1 < lines.length && lines[i].includes("|") && RE_TSEP.test(lines[i + 1]);
+}
 
 function isBlockStart(line: string): boolean {
   return (
@@ -113,9 +138,33 @@ function parseBlocks(src: string): Block[] {
       continue;
     }
 
+    // GFM table: header row + `|---|` separator, then rows until a blank/other block.
+    if (isTableStart(lines, i)) {
+      const header = splitRow(lines[i]);
+      const align = splitRow(lines[i + 1]).map(cellAlign);
+      i += 2;
+      const rows: string[][] = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() !== "" &&
+        lines[i].includes("|") &&
+        !isBlockStart(lines[i])
+      ) {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", header, align, rows });
+      continue;
+    }
+
     // Paragraph: gather until a blank line or the start of another block.
     const buf: string[] = [];
-    while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i])) {
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !isBlockStart(lines[i]) &&
+      !isTableStart(lines, i)
+    ) {
       buf.push(lines[i]);
       i++;
     }
@@ -253,6 +302,33 @@ function renderBlock(b: Block, key: number): React.ReactNode {
         <blockquote key={key} className="md-quote">
           {renderMultiline(b.text)}
         </blockquote>
+      );
+    case "table":
+      return (
+        <div key={key} className="md-table-wrap">
+          <table className="md-table">
+            <thead>
+              <tr>
+                {b.header.map((h, j) => (
+                  <th key={j} style={b.align[j] ? { textAlign: b.align[j]! } : undefined}>
+                    {renderInline(h)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {b.rows.map((row, r) => (
+                <tr key={r}>
+                  {b.header.map((_, c) => (
+                    <td key={c} style={b.align[c] ? { textAlign: b.align[c]! } : undefined}>
+                      {renderInline(row[c] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       );
     case "p":
       return (
