@@ -108,22 +108,23 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          # cargo-wix needs WiX Toolset v3 (candle.exe/light.exe) on PATH —
-          # recent windows-latest images no longer ship it, so install it.
-          choco install wixtoolset -y --no-progress
+          # WiX v3 (candle/light) ships on windows-latest; ensure it's on PATH
+          # (install only if a future image drops it).
           $wix = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset v*" -Directory |
                  Sort-Object Name -Descending | Select-Object -First 1
-          if ($wix) {
-            $bin = Join-Path $wix.FullName "bin"
-            "$bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append   # later steps
-            $env:PATH = "$bin;$env:PATH"                                          # this step
-            Write-Host "WiX bin on PATH: $bin"
-          } else {
-            Write-Warning "WiX Toolset not found after choco install"
+          if (-not $wix) {
+            choco install wixtoolset -y --no-progress
+            $wix = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset v*" -Directory |
+                   Sort-Object Name -Descending | Select-Object -First 1
           }
+          if ($wix) { $env:PATH = "$($wix.FullName)\bin;$env:PATH"; Write-Host "WiX bin: $($wix.FullName)\bin" }
+          else { Write-Warning "WiX Toolset not found" }
           cargo install cargo-wix --locked
-          cargo wix init -p backend --force
-          cargo wix -p backend --no-build --target ${{ matrix.target }} --nocapture --output dbopt-windows-x86_64.msi
+          # Build from the committed wix/ manifest (stable UpgradeCode). Run from
+          # inside the crate so the relative 'wix\License.rtf' paths resolve.
+          Push-Location crates/backend
+          cargo wix --no-build --target ${{ matrix.target }} --nocapture --output "$env:GITHUB_WORKSPACE\dbopt-windows-x86_64.msi"
+          Pop-Location
           if (Test-Path dbopt-windows-x86_64.msi) {
             Write-Host "MSI built: $((Get-Item dbopt-windows-x86_64.msi).Length) bytes"
           } else {
