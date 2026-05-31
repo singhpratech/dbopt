@@ -143,6 +143,8 @@
                           Description='Open dbopt — local-first database optimizer (opens 127.0.0.1:3690)'
                           Target='[#exe0]'
                           WorkingDirectory='Bin'
+                          Icon='ProductICO'
+                          IconIndex='0'
                           Show='minimized'/>
                 <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
                 <RegistryValue Root='HKCU' Key='Software\dbopt' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
@@ -180,14 +182,11 @@
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
         
-        <!--
-          Uncomment the following `Icon` and `Property` tags to change the product icon.
-
-          The product icon is the graphic that appears in the Add/Remove
-          Programs control panel for the application.
-        -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
+        <!-- dbopt brand icon: shown in Add/Remove Programs (ARPPRODUCTICON) and
+             reused by the Start-menu shortcut above (Icon='ProductICO').
+             SourceFile is resolved relative to the crate dir by cargo-wix. -->
+        <Icon Id='ProductICO' SourceFile='wix\dbopt.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         
         <!--

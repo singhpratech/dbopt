@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
+import * as P from "../store/persist";
 import * as backend from "../api/backend";
 import type { LiveMetrics, LiveSession } from "../api/backend";
 
@@ -42,7 +43,9 @@ function fmtDur(ms: number): string {
 export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
   const connected = !!conn.server && (conn.auth_mode !== "sql" || !!conn.user);
   const [running, setRunning] = useState(true);
-  const [intervalMs, setIntervalMs] = useState(2000);
+  // Refresh cadence persists across tab close/reopen — pick 2s once and it stays
+  // 2s. Stored in localStorage (the same dbopt.* namespace as every other setting).
+  const [intervalMs, setIntervalMs] = useState<number>(() => P.load<number>("live_interval_ms", 2000));
   const [series, setSeries] = useState<Pt[]>([]);
   const [latest, setLatest] = useState<LiveMetrics | null>(null);
   const [rates, setRates] = useState<{ batch: number; txn: number; ioBytes: number }>({
@@ -147,7 +150,11 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
           )}
           <select
             value={intervalMs}
-            onChange={(e) => setIntervalMs(Number(e.target.value))}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setIntervalMs(v);
+              P.save("live_interval_ms", v); // remember the choice across sessions
+            }}
             title="Refresh interval"
           >
             <option value={1000}>1s</option>

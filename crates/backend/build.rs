@@ -32,6 +32,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", dist.display());
     println!("cargo:rerun-if-changed={}", index.display());
 
+    // Stamp the brand icon onto the Windows .exe (no-op off Windows). Done
+    // before the UI-bundle early-return so it always runs.
+    embed_windows_icon();
+
     // Decide whether a REAL bundle is present. A real Vite index.html can be
     // small, so we don't use size — we detect our own placeholder by an explicit
     // marker. Any index.html WITHOUT the marker is treated as a real (or
@@ -61,6 +65,27 @@ fn main() {
         println!("cargo:warning=================================================================");
     }
 }
+
+// Embed the dbopt brand icon into the Windows executable so it shows up in
+// Explorer, the taskbar, and the Start-menu shortcut instead of the generic
+// default .exe icon. The `winresource` build-dep is target-gated to
+// `cfg(windows)`, and this code path is host-gated to `cfg(windows)`. Our
+// release pipeline builds the Windows binary on a Windows runner (host ==
+// target == windows), so the icon is embedded there; Linux/macOS builds compile
+// the no-op below and never reference `winresource`.
+#[cfg(windows)]
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=wix/dbopt.ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("wix/dbopt.ico");
+    if let Err(e) = res.compile() {
+        // Don't fail the build over a cosmetic icon — warn and ship anyway.
+        println!("cargo:warning=dbopt: could not embed Windows icon: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
 
 /// Sentinel embedded in the placeholder so we can recognise (and safely
 /// overwrite) our own page without ever clobbering a real bundle.

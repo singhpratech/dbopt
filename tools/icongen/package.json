@@ -1,0 +1,11 @@
+{
+  "name": "dbopt-icongen",
+  "private": true,
+  "type": "module",
+  "description": "Rasterizes web/public/logo.svg into the app-icon assets (.ico/.icns/.png) wired into the Windows MSI, macOS .app, and Linux AppImage. Run: npm install && node gen.mjs",
+  "dependencies": {
+    "@fiahfy/icns": "^0.0.7",
+    "png-to-ico": "^2.1.8",
+    "sharp": "^0.33.5"
+  }
+}

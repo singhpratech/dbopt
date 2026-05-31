@@ -91,13 +91,17 @@ jobs:
           VER="${VER#v}"          # strip leading v from e.g. v0.2.0
           VER="${VER:-0.0.0}"     # fall back if somehow empty
           mkdir -p dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS
+          mkdir -p dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Resources
           cp staging/dbopt dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
           chmod +x dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
+          # Brand icon for the dock / Finder (CFBundleIconFile -> Resources/dbopt.icns).
+          cp assets/dbopt.icns dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Resources/dbopt.icns
           cat > dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Info.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>CFBundleExecutable</key><string>dbopt</string>
+            <key>CFBundleIconFile</key><string>dbopt</string>
             <key>CFBundleIdentifier</key><string>dev.dbopt.observatory</string>
             <key>CFBundleName</key><string>dbopt</string>
             <key>CFBundlePackageType</key><string>APPL</string>
@@ -155,7 +159,8 @@ jobs:
           Categories=Development;Database;
           Terminal=true
           EOF
-          touch dbopt.AppDir/dbopt.png
+          # Real brand icon (was an empty `touch`ed file -> blank AppImage icon).
+          cp assets/dbopt-256.png dbopt.AppDir/dbopt.png
           cat > dbopt.AppDir/AppRun <<'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
