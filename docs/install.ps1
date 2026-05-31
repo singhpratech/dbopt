@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo  = 'singhpratech/dbopt'
-$asset = 'sqlopt-windows-x86_64.zip'
+$asset = 'dbopt-windows-x86_64.zip'
 $url   = "https://github.com/$repo/releases/latest/download/$asset"
 $dest  = Join-Path $env:LOCALAPPDATA 'dbopt'
 
@@ -15,11 +15,6 @@ $zip = Join-Path $env:TEMP $asset
 Invoke-WebRequest -Uri $url -OutFile $zip
 Expand-Archive -Path $zip -DestinationPath $dest -Force
 Remove-Item $zip -Force
-
-# Install as dbopt.exe
-if (Test-Path (Join-Path $dest 'sqlopt.exe')) {
-  Move-Item -Force (Join-Path $dest 'sqlopt.exe') (Join-Path $dest 'dbopt.exe')
-}
 
 # Add to the user PATH if missing
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

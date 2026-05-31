@@ -13,12 +13,12 @@ arch="$(uname -m)"
 case "$os" in
   Linux)
     case "$arch" in
-      x86_64|amd64) asset="sqlopt-linux-x86_64.tar.gz" ;;
+      x86_64|amd64) asset="dbopt-linux-x86_64.tar.gz" ;;
       *) echo "dbopt: unsupported Linux arch '$arch'. See https://github.com/$REPO/releases" >&2; exit 1 ;;
     esac ;;
   Darwin)
     case "$arch" in
-      arm64|aarch64) asset="sqlopt-macos-arm64.tar.gz" ;;
+      arm64|aarch64) asset="dbopt-macos-arm64.tar.gz" ;;
       *) echo "dbopt: macOS requires Apple Silicon (arm64); Intel Macs are not supported." >&2; exit 1 ;;
     esac ;;
   *)
@@ -36,7 +36,7 @@ curl -fsSL "$url" -o "$tmp/pkg.tar.gz"
 tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 
 mkdir -p "$DEST"
-mv "$tmp/sqlopt" "$DEST/$BIN"
+mv "$tmp/dbopt" "$DEST/$BIN"
 chmod +x "$DEST/$BIN"
 
 echo "dbopt: installed to $DEST/$BIN"
