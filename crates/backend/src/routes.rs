@@ -16,6 +16,7 @@ pub fn router() -> Router {
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
         .route("/version", get(version))
+        .route("/shutdown", post(shutdown))
         .route("/connect", post(connect))
         .route("/databases", post(databases))
         .route("/advise", post(advise))
@@ -86,6 +87,22 @@ async fn version() -> impl IntoResponse {
         "platform": std::env::consts::OS,    // "windows" | "macos" | "linux"
         "arch": std::env::consts::ARCH,       // "x86_64" | "aarch64" | …
     }))
+}
+
+/// Gracefully stop the server so an installer isn't blocked by the running
+/// binary — the "Quit dbopt" step of the in-app update flow. On Windows the MSI
+/// does an in-place major upgrade, which needs `dbopt.exe` not to be locked;
+/// macOS/Linux just want the old process gone before the new files land.
+///
+/// The server binds 127.0.0.1 only, so this is reachable solely from the local
+/// machine. We flush the 200 response first, then exit the whole process (which
+/// also stops any in-process Sentinel poller) a beat later.
+async fn shutdown() -> impl IntoResponse {
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        std::process::exit(0);
+    });
+    Json(serde_json::json!({ "stopping": true }))
 }
 
 #[derive(Debug, Deserialize)]

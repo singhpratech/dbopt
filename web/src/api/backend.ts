@@ -68,6 +68,19 @@ export async function appVersion(): Promise<VersionInfo | null> {
   }
 }
 
+/** Ask the local backend to stop itself — the "Quit dbopt" step of the update
+ *  flow, so an installer isn't blocked by the running binary. The server exits
+ *  ~350ms after replying, so this resolves true on a clean 200 (and the backend
+ *  goes away moments later). Returns false if the request can't be made. */
+export async function shutdownBackend(): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/shutdown`, { method: "POST" });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function connect(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/connect`, {
     method: "POST",

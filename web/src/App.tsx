@@ -19,7 +19,8 @@ import { HelpPanel } from "./components/HelpPanel";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import * as P from "./store/persist";
 import * as backend from "./api/backend";
-import { checkForUpdates } from "./api/updates";
+import { checkForUpdates, RELEASES_PAGE } from "./api/updates";
+import { UpdateModal } from "./components/UpdateModal";
 import * as ailog from "./store/ailog";
 import * as runlog from "./store/runlog";
 
@@ -156,12 +157,16 @@ export function App() {
   // the on-launch update check. The check is opt-out (auto_check_updates) and
   // remembers a dismissed version so it never nags about the same release twice.
   const [appVer, setAppVer] = useState<string | null>(null);
+  const [appPlatform, setAppPlatform] = useState<string>("");
   const [updateAvail, setUpdateAvail] = useState<{ latest: string; url: string; assetUrl: string | null } | null>(null);
+  // Opens the guided update flow (download → quit → install → reopen).
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
   useEffect(() => {
     let live = true;
     backend.appVersion().then((v) => {
       if (!live || !v) return;
       setAppVer(v.version);
+      setAppPlatform(v.platform);
       if (!P.load<boolean>("auto_check_updates", true)) return;
       checkForUpdates(v.version, v.platform).then((u) => {
         if (!live || u.status !== "update") return;
@@ -171,6 +176,38 @@ export function App() {
     });
     return () => { live = false; };
   }, []);
+
+  // Manual update check fired from the prominent topbar button. If we already
+  // know an update is out, the button is a one-click download; otherwise it
+  // re-checks live and briefly flashes "up to date" when current. An explicit
+  // click ignores the dismissed-version memory — a deliberate check should
+  // always tell the truth, even about a release the user dismissed before.
+  const [updChecking, setUpdChecking] = useState(false);
+  const [updCurrent, setUpdCurrent] = useState(false);
+  async function runUpdateCheckFromTopbar() {
+    if (updateAvail) {
+      setShowUpdateModal(true);
+      return;
+    }
+    setUpdChecking(true);
+    setUpdCurrent(false);
+    try {
+      const v = await backend.appVersion();
+      if (!v) { window.open(RELEASES_PAGE, "_blank", "noopener,noreferrer"); return; }
+      const u = await checkForUpdates(v.version, v.platform);
+      if (u.status === "update") {
+        setUpdateAvail({ latest: u.latest, url: u.url, assetUrl: u.assetUrl });
+      } else if (u.status === "current") {
+        setUpdCurrent(true);
+        window.setTimeout(() => setUpdCurrent(false), 3200);
+      } else {
+        // unknown version / GitHub error — let the user judge from the releases page.
+        window.open(RELEASES_PAGE, "_blank", "noopener,noreferrer");
+      }
+    } finally {
+      setUpdChecking(false);
+    }
+  }
 
   // ── Onboarding + help ───────────────────────────────
   // First-run gate: show the welcome → connect wizard until the user has
@@ -476,40 +513,15 @@ export function App() {
   // ── Render ──────────────────────────────────────────
   return (
     <div className={`app${railExpanded ? " rail-expanded" : ""}`}>
-      {updateAvail && (
-        <div className="update-banner" role="status">
-          <span className="update-banner-msg">
-            <span className="update-banner-icon" aria-hidden>↑</span>
-            <strong>Update available</strong> — dbopt v{updateAvail.latest} is out
-            {appVer ? <> (you have v{appVer})</> : null}.
-          </span>
-          <a
-            className="update-banner-btn"
-            href={updateAvail.assetUrl ?? updateAvail.url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Download
-          </a>
-          <a className="update-banner-link" href={updateAvail.url} target="_blank" rel="noopener noreferrer">
-            Release notes ↗
-          </a>
-          <button
-            className="update-banner-link"
-            onClick={() => { P.save("auto_check_updates", false); setUpdateAvail(null); }}
-            title="Stop checking for updates automatically (you can still check from Help)"
-          >
-            Stop auto-checking
-          </button>
-          <button
-            className="update-banner-x"
-            aria-label="Dismiss"
-            title="Dismiss until the next release"
-            onClick={() => { P.save("dismissed_update_version", updateAvail.latest); setUpdateAvail(null); }}
-          >
-            ✕
-          </button>
-        </div>
+      {showUpdateModal && updateAvail && (
+        <UpdateModal
+          current={appVer}
+          latest={updateAvail.latest}
+          platform={appPlatform}
+          url={updateAvail.url}
+          assetUrl={updateAvail.assetUrl}
+          onClose={() => setShowUpdateModal(false)}
+        />
       )}
       <header className="topbar">
         <div className="brand">
@@ -571,6 +583,32 @@ export function App() {
         </div>
 
         <div className="topbar-controls">
+          <button
+            className={`update-toggle${updateAvail ? " has-update" : ""}${updCurrent ? " is-current" : ""}`}
+            title={
+              updateAvail
+                ? `Update available — dbopt v${updateAvail.latest}${appVer ? ` (you have v${appVer})` : ""}. Click to download.`
+                : updChecking
+                ? "Checking for updates…"
+                : updCurrent
+                ? `You're on the latest version${appVer ? ` (v${appVer})` : ""}`
+                : `${appVer ? `You're on v${appVer}. ` : ""}Click to check for software updates`
+            }
+            aria-label="Check for software updates"
+            onClick={runUpdateCheckFromTopbar}
+            disabled={updChecking}
+          >
+            <span className="glyph">{updateAvail ? "↑" : updChecking ? "…" : updCurrent ? "✓" : "⟳"}</span>
+            <span className="lbl">
+              {updateAvail
+                ? `UPDATE → v${updateAvail.latest}`
+                : updChecking
+                ? "CHECKING…"
+                : updCurrent
+                ? "UP TO DATE"
+                : "UPDATES"}
+            </span>
+          </button>
           <button
             className={`mode-toggle mode-${ui.mode}`}
             title={

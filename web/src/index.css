@@ -348,6 +348,48 @@ body {
 .topbar-controls .mode-toggle .glyph { font-size: 11px; line-height: 1; color: var(--signal); }
 .topbar-controls .mode-toggle .lbl { color: inherit; font-weight: 600; }
 
+/* Software-updates button: always visible at the top so the update path is
+   never buried in Help. Neutral while you're current; the moment a newer
+   release exists it flips to a filled acid-chartreuse pill with a soft glow
+   pulse — impossible to miss, one click to download. */
+.topbar-controls .update-toggle {
+  padding: 0 13px;
+  height: 100%;
+  display: flex; align-items: center; gap: 7px;
+  font: 11px var(--f-tech);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-controls .update-toggle:hover { color: var(--signal); background: var(--signal-faint); }
+.topbar-controls .update-toggle .glyph { font-size: 12px; line-height: 1; color: var(--signal); }
+.topbar-controls .update-toggle .lbl { color: inherit; font-weight: 600; }
+.topbar-controls .update-toggle:disabled { cursor: default; }
+.topbar-controls .update-toggle.is-current .glyph { color: var(--signal); }
+
+/* Highlighted call-to-action: filled accent, dark text, gentle glow pulse. */
+.topbar-controls .update-toggle.has-update {
+  background: var(--signal);
+  color: var(--bg-void);
+  border-right-color: var(--signal);
+  animation: update-glow 2.1s ease-in-out infinite;
+}
+.topbar-controls .update-toggle.has-update .glyph,
+.topbar-controls .update-toggle.has-update .lbl { color: var(--bg-void); }
+.topbar-controls .update-toggle.has-update:hover { background: var(--signal); filter: brightness(1.08); }
+@keyframes update-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--signal-glow); }
+  50%      { box-shadow: 0 0 11px 1px var(--signal-glow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topbar-controls .update-toggle.has-update { animation: none; }
+}
+
 /* ── Left rail ────────────────────────────────────── */
 .rail {
   grid-area: rail;
@@ -3956,52 +3998,89 @@ kbd {
   cursor: pointer;
 }
 
-/* On-launch "update available" banner (top of the app shell) ------------- */
-.update-banner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 8px 16px;
-  background: linear-gradient(90deg, rgba(212, 255, 78, 0.14), rgba(212, 255, 78, 0.05));
-  border-bottom: 1px solid var(--signal);
-  font: 12px var(--f-sans);
-  color: var(--text);
+/* Guided update flow (download → quit → install → reopen) ---------------- */
+.upd-modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 8, 0.72);
+  backdrop-filter: blur(3px);
+  animation: upd-fade 0.16s ease-out;
 }
-.update-banner-msg { display: inline-flex; align-items: center; gap: 6px; }
-.update-banner-msg strong { color: var(--text-strong); }
-.update-banner-icon { color: var(--signal); font-weight: 700; }
-.update-banner-btn {
-  padding: 4px 12px;
-  border-radius: 4px;
-  background: var(--signal);
-  color: var(--bg-void);
-  font: 600 11px var(--f-mono);
-  text-decoration: none;
-  cursor: pointer;
+@keyframes upd-fade { from { opacity: 0; } to { opacity: 1; } }
+.upd-modal {
+  width: min(560px, 100%);
+  max-height: 90vh; overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--signal);
+  border-radius: 8px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 255, 78, 0.06);
+  padding: 22px 24px 24px;
 }
-.update-banner-btn:hover { filter: brightness(1.08); }
-.update-banner-link {
-  background: none;
-  border: 0;
-  color: var(--text-dim);
-  font: 11px var(--f-sans);
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 2px 4px;
+.upd-modal-head { display: flex; align-items: flex-start; gap: 14px; }
+.upd-modal-glyph {
+  flex-shrink: 0;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--signal); color: var(--bg-void);
+  border-radius: 50%; font-weight: 800; font-size: 16px;
 }
-.update-banner-link:hover { color: var(--text); }
-.update-banner-x {
-  margin-left: auto;
-  background: none;
-  border: 0;
-  color: var(--text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  padding: 2px 6px;
-  line-height: 1;
+.upd-modal-glyph.big { width: 44px; height: 44px; font-size: 22px; margin: 0 auto 6px; }
+.upd-modal-glyph.warn { background: var(--warn); }
+.upd-modal-title { margin: 0; font: 600 18px var(--f-sans); color: var(--text-strong); letter-spacing: -0.01em; }
+.upd-modal-sub { margin: 4px 0 0; font: 12.5px var(--f-sans); color: var(--text-dim); }
+.upd-modal-sub strong { color: var(--text); }
+.upd-modal-x {
+  margin-left: auto; flex-shrink: 0;
+  background: none; border: 0; color: var(--text-dim);
+  font-size: 14px; cursor: pointer; padding: 2px 6px; line-height: 1;
 }
-.update-banner-x:hover { color: var(--text); }
+.upd-modal-x:hover { color: var(--text); }
+
+.upd-steps { list-style: none; margin: 20px 0 0; padding: 0; }
+.upd-step { display: flex; gap: 13px; padding: 14px 0; border-top: 1px solid var(--line); }
+.upd-step:first-child { border-top: 0; }
+.upd-step-n {
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; font: 600 12px var(--f-mono);
+  border: 1px solid var(--line); color: var(--text-dim); background: var(--bg-sunk);
+}
+.upd-step.active .upd-step-n { border-color: var(--signal); color: var(--signal); }
+.upd-step.done .upd-step-n { background: var(--signal); color: var(--bg-void); border-color: var(--signal); }
+.upd-step.pending { opacity: 0.62; }
+.upd-step-body { flex: 1; min-width: 0; }
+.upd-step-title { font: 600 13.5px var(--f-sans); color: var(--text); }
+.upd-step-note { margin: 5px 0 0; font: 12px var(--f-sans); color: var(--text-dim); line-height: 1.5; }
+.upd-step-note code { font: 11px var(--f-mono); color: var(--text); background: var(--bg-sunk); padding: 1px 5px; border-radius: 3px; }
+.upd-step-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+.upd-modal-final { text-align: center; padding: 14px 6px 6px; }
+.upd-modal-final .upd-modal-title { margin-top: 6px; }
+.upd-final-list {
+  text-align: left; display: inline-block; margin: 14px auto 0; padding-left: 20px;
+  font: 13px var(--f-sans); color: var(--text); line-height: 1.7;
+}
+.upd-final-list code { font: 11px var(--f-mono); background: var(--bg-sunk); padding: 1px 5px; border-radius: 3px; }
+.upd-modal-foot { margin: 16px 0 0; font: 11.5px var(--f-sans); color: var(--text-dim); }
+.upd-linkbtn {
+  background: none; border: 0; padding: 0;
+  color: var(--text-dim); font: inherit; cursor: pointer; text-decoration: underline;
+}
+.upd-linkbtn:hover { color: var(--text); }
+.upd-foot-done { color: var(--signal); }
+.upd-spinner {
+  display: inline-block; width: 26px; height: 26px; margin-bottom: 4px;
+  border: 2.5px solid var(--line); border-top-color: var(--signal);
+  border-radius: 50%; animation: upd-spin 0.8s linear infinite;
+}
+@keyframes upd-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .upd-modal-overlay { animation: none; }
+  .upd-spinner { animation-duration: 2s; }
+}
 
 /* ============================================================
    Live activity monitor (WATCH ▸ LIVE) — real-time vitals.

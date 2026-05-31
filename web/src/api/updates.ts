@@ -5,10 +5,11 @@
  * the latest published release and compares it to the running binary's version.
  *
  * HONESTY NOTE: this module is the ONLY place dbopt makes a non-localhost
- * request, and it fires solely when the user clicks "Check for updates" — never
- * automatically, never on boot. The request is an anonymous public GET to
- * api.github.com with no identifiers, no telemetry, and no body. Nothing about
- * the connected database, queries, or config is ever sent. See docs/DATA-HANDLING.md.
+ * request. It fires when the user clicks "Check for updates" AND once on launch
+ * (opt-out via the `auto_check_updates` setting) — never silently beyond that.
+ * The request is an anonymous public GET to api.github.com with no identifiers,
+ * no telemetry, and no body. Nothing about the connected database, queries, or
+ * config is ever sent. See docs/DATA-HANDLING.md.
  */
 
 const REPO = "singhpratech/dbopt";
