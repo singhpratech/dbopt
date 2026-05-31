@@ -14,6 +14,8 @@ version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/singhpratech/dbopt"
+authors = ["dbopt"]
+description = "Local-first database performance optimizer"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
