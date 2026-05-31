@@ -166,21 +166,59 @@ pub async fn enumerate_modules(req: &ConnectReq) -> anyhow::Result<Vec<DbModule>
 
 /// List user databases on the connected server. System DBs (master/tempdb/
 /// model/msdb) are excluded by `database_id > 4`. Ordered alphabetically.
-pub async fn list_databases(req: &ConnectReq) -> anyhow::Result<Vec<String>> {
+/// One row of the live `sys.databases` list, with enough context for the UI to
+/// group and gate the picker: system vs user, the lifecycle state, and whether
+/// the *current login* can actually open it.
+#[derive(serde::Serialize)]
+pub struct DatabaseInfo {
+    pub name: String,
+    /// `database_id <= 4` — master/tempdb/model/msdb.
+    pub system: bool,
+    /// `state_desc`: ONLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT,
+    /// EMERGENCY, OFFLINE, COPYING, OFFLINE_SECONDARY.
+    pub state: String,
+    /// `HAS_DBACCESS(name) = 1` — the connected login can USE this database.
+    pub accessible: bool,
+}
+
+/// List EVERY database on the server — system and user, online or not.
+///
+/// Earlier this filtered `database_id > 4 AND state_desc = 'ONLINE'`, which
+/// silently dropped the four system databases (a DBA legitimately wants `msdb`
+/// for Agent/backup analysis) and made restoring/offline/suspect databases
+/// vanish with no explanation. We now return them all with metadata so the UI
+/// can group System vs User and disable the ones that can't be opened, instead
+/// of hiding them. Ordered system-last, then alphabetical.
+pub async fn list_databases(req: &ConnectReq) -> anyhow::Result<Vec<DatabaseInfo>> {
     let mut client = open(req).await?;
     let stream = client
         .simple_query(
-            "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE' ORDER BY name",
+            "SELECT name, \
+                    CAST(database_id AS int) AS dbid, \
+                    state_desc, \
+                    CAST(CASE WHEN HAS_DBACCESS(name) = 1 THEN 1 ELSE 0 END AS int) AS has_access \
+             FROM sys.databases \
+             ORDER BY CASE WHEN database_id <= 4 THEN 1 ELSE 0 END, name",
         )
         .await?;
     let rows = stream.into_first_result().await?;
-    let mut names = Vec::with_capacity(rows.len());
+    let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        if let Some(n) = r.get::<&str, _>(0) {
-            names.push(n.to_string());
-        }
+        let name = match r.get::<&str, _>(0) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let dbid: i32 = r.get::<i32, _>(1).unwrap_or(0);
+        let state = r.get::<&str, _>(2).unwrap_or("UNKNOWN").to_string();
+        let has_access: i32 = r.get::<i32, _>(3).unwrap_or(0);
+        out.push(DatabaseInfo {
+            name,
+            system: dbid <= 4,
+            state,
+            accessible: has_access == 1,
+        });
     }
-    Ok(names)
+    Ok(out)
 }
 
 /// Fetch the estimated plan XML for the given T-SQL via SET SHOWPLAN_XML ON.

@@ -132,7 +132,7 @@ async fn monitor_live(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 
 async fn databases(Json(req): Json<ConnectReq>) -> impl IntoResponse {
     match sqlserver::list_databases(&req).await {
-        Ok(names) => (StatusCode::OK, Json(serde_json::json!({ "databases": names }))).into_response(),
+        Ok(dbs) => (StatusCode::OK, Json(serde_json::json!({ "databases": dbs }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }

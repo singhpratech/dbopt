@@ -117,7 +117,18 @@ export async function scanDatabase(info: ConnectionInfo, server_version: number)
   return r.json();
 }
 
-export async function listDatabases(info: ConnectionInfo): Promise<string[]> {
+/** One database on the connected server, with grouping/gating metadata. */
+export interface DatabaseInfo {
+  name: string;
+  /** master/tempdb/model/msdb (database_id <= 4). */
+  system: boolean;
+  /** ONLINE, RESTORING, RECOVERING, SUSPECT, OFFLINE, EMERGENCY, … */
+  state: string;
+  /** The connected login can actually open this database. */
+  accessible: boolean;
+}
+
+export async function listDatabases(info: ConnectionInfo): Promise<DatabaseInfo[]> {
   const r = await fetch(`${BASE}/databases`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -127,8 +138,14 @@ export async function listDatabases(info: ConnectionInfo): Promise<string[]> {
     const e = (await r.json().catch(() => ({}))) as { error?: string };
     throw new Error(e.error ?? `database list failed (${r.status})`);
   }
-  const body = (await r.json()) as { databases?: string[] };
-  return body.databases ?? [];
+  const body = (await r.json()) as { databases?: (string | DatabaseInfo)[] };
+  // Tolerate an older backend that still returns a bare string[] (e.g. a stale
+  // dev process on the port): treat each as an accessible, online user DB.
+  return (body.databases ?? []).map((d) =>
+    typeof d === "string"
+      ? { name: d, system: false, state: "ONLINE", accessible: true }
+      : d,
+  );
 }
 
 export type RecommendationKind =

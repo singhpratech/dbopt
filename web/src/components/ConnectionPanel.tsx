@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SqlConnectionConfig, ServerProfile } from "../store/persist";
 import * as backend from "../api/backend";
-import type { ScanResult } from "../api/backend";
+import type { ScanResult, DatabaseInfo } from "../api/backend";
 
 /**
  * Connection is configured at SERVER scope (host, auth, cert trust), then a
@@ -34,7 +34,7 @@ export function ConnectionPanel({
 }) {
   const [status, setStatus] = useState<{ msg: string; ok: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [databases, setDatabases] = useState<string[] | null>(null);
+  const [databases, setDatabases] = useState<DatabaseInfo[] | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [scan, setScan] = useState<ScanResult | null>(null);
   // What THIS backend binary can actually honor. Windows auth has two flavors:
@@ -177,7 +177,12 @@ export function ConnectionPanel({
       setServerVersion(ping.server_version?.replace(/\s+/g, " ").slice(0, 110) ?? null);
       const dbs = await backend.listDatabases(serverPayload());
       setDatabases(dbs);
-      setStatus({ msg: `Connected · ${dbs.length} user database${dbs.length === 1 ? "" : "s"} available`, ok: true });
+      const userCount = dbs.filter((d) => !d.system).length;
+      const sysCount = dbs.length - userCount;
+      setStatus({
+        msg: `Connected · ${dbs.length} database${dbs.length === 1 ? "" : "s"} visible (${userCount} user · ${sysCount} system)`,
+        ok: true,
+      });
     } catch (e: any) {
       setStatus({ msg: `Failed · ${e.message}`, ok: false });
     } finally {
@@ -418,17 +423,16 @@ export function ConnectionPanel({
                 spellCheck={false}
               />
             ) : databases.length === 0 ? (
-              <div className="form-status err">No user databases visible on this server (system DBs are hidden).</div>
+              <div className="form-status err">
+                No databases returned — the login may lack VIEW ANY DATABASE permission, or can't
+                see even <code>master</code>.
+              </div>
             ) : (
-              <select
+              <DatabasePicker
+                databases={databases}
                 value={conn.database ?? ""}
-                onChange={(e) => patch("database", e.target.value)}
-              >
-                <option value="">— select —</option>
-                {databases.map((d) => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
+                onChange={(v) => patch("database", v)}
+              />
             )}
           </div>
         </div>
@@ -499,6 +503,63 @@ export function ConnectionPanel({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The database dropdown. Shows EVERY database on the server, grouped into User
+ * and System, instead of silently hiding system/offline ones. Databases that
+ * can't be opened (not ONLINE, or no access for this login) are listed but
+ * disabled with their reason, so the user sees they exist rather than wondering
+ * why they're "missing".
+ */
+function DatabasePicker({
+  databases,
+  value,
+  onChange,
+}: {
+  databases: DatabaseInfo[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const userDbs = databases.filter((d) => !d.system);
+  const sysDbs = databases.filter((d) => d.system);
+  // Only an ONLINE database the login can open is scannable.
+  const usable = (d: DatabaseInfo) => d.state === "ONLINE" && d.accessible;
+  const optionLabel = (d: DatabaseInfo) => {
+    if (d.state !== "ONLINE") return `${d.name} · ${d.state.toLowerCase().replace(/_/g, " ")}`;
+    if (!d.accessible) return `${d.name} · no access`;
+    return d.name;
+  };
+  // If the active/saved database isn't in the live list (renamed, dropped, or
+  // belongs to another server profile), keep it selectable rather than silently
+  // dropping the user's choice.
+  const known = new Set(databases.map((d) => d.name));
+  const orphan = value && !known.has(value) ? value : null;
+
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— select —</option>
+      {orphan && <option value={orphan}>{orphan} · not on this server</option>}
+      {userDbs.length > 0 && (
+        <optgroup label="User databases">
+          {userDbs.map((d) => (
+            <option key={d.name} value={d.name} disabled={!usable(d)}>
+              {optionLabel(d)}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {sysDbs.length > 0 && (
+        <optgroup label="System databases">
+          {sysDbs.map((d) => (
+            <option key={d.name} value={d.name} disabled={!usable(d)}>
+              {optionLabel(d)}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </select>
   );
 }
 
