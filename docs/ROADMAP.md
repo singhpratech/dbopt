@@ -6,7 +6,7 @@ the headline work toward v1.0 is making it genuinely multi-engine.
 ## v0.1 — SQL Server (shipped)
 
 - 52 token-level T-SQL rules (hygiene, sargability, deprecated, modern, plan-shape,
-  locking, tempdb, statistics, index design), version-gated 2014 → 2025.
+  locking, tempdb, statistics, index design), version-gated 2019 → 2025.
 - Estimated-plan analysis (`SET SHOWPLAN_XML`, compile-only — no execution, no locks).
 - Live DMV pull (index usage, missing indexes, sizes) + `/api/scan/database` schema sweep.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
@@ -55,7 +55,7 @@ Mapping per engine:
 | Plan capture   | `SET SHOWPLAN_XML ON`              | `EXPLAIN (FORMAT JSON)`             | `EXPLAIN FORMAT=JSON`              |
 | Metrics        | `sys.dm_db_*`, Query Store         | `pg_stat_*`, `pg_statio_*`          | `performance_schema`, `sys.*`      |
 | Missing index  | `sys.dm_db_missing_index_*`        | (heuristic from plan + pg_stat)     | (heuristic)                        |
-| Version model  | 2014–2025 (`@@VERSION`)            | server_version_num                  | VERSION()                          |
+| Version model  | 2019–2025 (`@@VERSION`)            | server_version_num                  | VERSION()                          |
 | Catalog        | `sys.objects`/`sys.sql_modules`    | `information_schema`/`pg_proc`      | `information_schema`               |
 
 ### 2. Per-rule engine tags

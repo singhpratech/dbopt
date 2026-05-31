@@ -110,7 +110,7 @@ for monitoring. See [ACCESS.md](ACCESS.md).
 (copy-paste script in [ACCESS.md](ACCESS.md)) → run `./dbopt` and open `http://127.0.0.1:3690`.
 
 **Deployment matrix & exact grants:** see [ACCESS.md](ACCESS.md). Works against self-managed SQL
-Server 2014–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
+Server 2019–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
 
 ---
 
@@ -119,7 +119,7 @@ Server 2014–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
 
 - **Trust:** verified live against SQL Server **2019, 2022, and 2025**; static-rule **F1 = 1.000**
   across 113 tagged scenarios; **never reads your data**; never auto-executes changes.
-- **Coverage:** version-aware 2014→2025 (a 2022 rewrite is never suggested against a 2014 target).
+- **Coverage:** version-aware 2019→2025 (a 2022 rewrite is never suggested against a 2019 target).
 - **Adoption is low-friction:** a developer can get value with **zero database access** (static
   analysis) on day one, then opt into deeper, connection-backed analysis as access is granted.
 

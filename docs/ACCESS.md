@@ -16,7 +16,7 @@ dbopt is **read-only**. It never executes DDL, never changes a setting, and — 
 
 | Tier | Access required | What dbopt can do | Result quality |
 |---|---|---|---|
-| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (52 rules: sargability, plan shape, deprecated syntax, hygiene, index design…). Version-aware (2014→2025). | Full, instantly. Great for code review / CI. |
+| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (59 rules: sargability, plan shape, deprecated syntax, hygiene, index design…). Version-aware (2019→2025). | Full, instantly. Great for code review / CI. |
 | **1 — Connect + read metadata** | A login that can connect, plus `VIEW DEFINITION` and `SHOWPLAN` | Reads object/index definitions; fetches **estimated** execution plans (compile-only, query is *not* run); database-scoped index analysis (usage, missing indexes, table sizes) where `VIEW DATABASE STATE` is granted. | Strong for a single database. |
 | **2 — Server state**  ⭐ | Tier 1 **+ `VIEW SERVER STATE`** | Unlocks server-scoped signals: **wait statistics, top queries by duration, blocking, I/O, the full Advisor depth, and the Health score's reliability lane.** | **This is the "real, full picture" tier.** |
 | **3 — Continuous monitoring** | Tier 2 **+ Query Store enabled** on each DB | The **Sentinel** daemon polls Query Store, wait deltas, deadlocks (`system_health`), live blocking, index usage, and sizes into a local time-series → weekly pain report + regression detection. | Trend/regression analysis over time. |
@@ -55,7 +55,7 @@ and **nothing else** — it cannot see your table data, change anything, or run 
 
 | Platform | Auth | Full results (Tier 2/3) achievable? | Notes |
 |---|---|---|---|
-| **Self-managed SQL Server 2014–2025** (Windows or Linux) | SQL auth ✅ *(verified live: 2019, 2022, 2025)*; Windows/integrated ⚠️ *(build with `--features integrated-auth`; needs an AD domain)* | **Yes — 100%.** | The primary, fully-tested target. |
+| **Self-managed SQL Server 2019–2025** (Windows or Linux) | SQL auth ✅ *(verified live: 2019, 2022, 2025)*; Windows/integrated ⚠️ *(build with `--features integrated-auth`; needs an AD domain)* | **Yes — 100%.** | The primary, fully-tested target. |
 | **AWS RDS for SQL Server** | SQL auth (RDS master user) ✅; AWS Managed AD ⚠️ | **Yes.** RDS is the *real* engine. The master user is not `sysadmin`, but it **can grant `VIEW SERVER STATE`** — which is all dbopt needs. `system_health` and Query Store are available. | Use the RDS endpoint `:1433`; trust-cert or the RDS CA bundle for TLS. Not yet live-tested by us, but engine-identical to the verified self-managed builds. |
 | **Azure SQL Managed Instance** | SQL auth ✅; Entra ID (Azure AD) ❌ *(not yet supported)* | **Mostly yes.** Near-full instance; `VIEW SERVER STATE` is grantable. | Not yet live-tested. |
 | **Azure SQL Database** (single DB / elastic pool) | SQL auth ✅; Entra ID ❌ | **Partial.** It's a different PaaS engine: some server-scoped DMVs don't exist (e.g. `sys.dm_os_wait_stats` → `sys.dm_db_wait_stats`), and there's no `system_health` session. DB-scoped index analysis + Query Store work. | Static analysis + per-DB advisor work; server-wide signals are limited by the platform, not dbopt. |

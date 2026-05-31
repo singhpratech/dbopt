@@ -217,7 +217,7 @@ export type Mode = "developer" | "dba";
 
 export interface UiPrefs {
   workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
-  server_version: 2014 | 2016 | 2017 | 2019 | 2022 | 2025;
+  server_version: 2019 | 2022 | 2025;
   theme: Theme;
   mode: Mode;
   draft_sql: string;

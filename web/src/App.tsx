@@ -858,9 +858,6 @@ export function App() {
             value={ui.server_version}
             onChange={(e) => setUi({ ...ui, server_version: Number(e.target.value) as any })}
           >
-            <option value={2014}>SQL Server 2014</option>
-            <option value={2016}>SQL Server 2016</option>
-            <option value={2017}>SQL Server 2017</option>
             <option value={2019}>SQL Server 2019</option>
             <option value={2022}>SQL Server 2022</option>
             <option value={2025}>SQL Server 2025</option>

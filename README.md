@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
-  <img src="https://img.shields.io/badge/SQL%20Server-2014%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2014 to 2025" />
+  <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
   <img src="https://img.shields.io/badge/rules-59-d4ff4e?style=flat-square&labelColor=0a0d12" alt="59 rules" />
   <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
   <img src="https://img.shields.io/badge/local--first-no%20cloud-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
@@ -26,13 +26,15 @@
 
 ---
 
-**dbopt** reads your T-SQL, your execution plans, and your live server metrics — then tells you exactly
-what's going to hurt and **how to fix it, with the reasoning cited**. It analyzes statically and from the
-*estimated* plan, so there's **no execution, no locks, no load on production**. Nothing leaves your machine
-unless you explicitly choose a cloud model.
+**dbopt** is a **database performance optimizer**. Point it at a database and it reads your queries, your
+execution plans, and your live server metrics — then tells you exactly what's going to hurt and **how to
+fix it, with the reasoning cited**. It works statically and from the *estimated* plan, so there's **no
+execution, no locks, no load on production**. Nothing leaves your machine unless you explicitly choose a
+cloud model.
 
-> **SQL Server is the product today** — comprehensive and fully tested. PostgreSQL and MySQL are on the
-> roadmap; the engine seam is already in place so they slot in without disturbing the SQL Server core.
+> **One product, many engines.** **SQL Server is the first engine** — comprehensive and fully tested
+> (2019 → 2025). PostgreSQL and MySQL are next; the engine seam is already in place, so each new database is
+> a *flavor* of the same tool, not a separate product.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
 > monetizing your pain.
@@ -65,8 +67,8 @@ dbopt takes the opposite stance on all four.
 
 Not just "here's a finding" — the concrete **rewrite** *and* the engine-level **reasoning** behind it.
 Every rule ships a recommendation, and the grounded **AI assistant** gets your SQL *and* the findings as
-context (fan one prompt out to several models to compare). Everything is **version-aware (2014 → 2025)** —
-a 2022+ rewrite is never suggested against a 2014 target.
+context (fan one prompt out to several models to compare). Everything is **version-aware (2019 → 2025)** —
+a 2022+ rewrite is never suggested against a 2019 target.
 
 ### 🔒 Local-first &amp; private
 
@@ -140,7 +142,7 @@ Storage and config live under `~/.sqlopt/` (override with `SQLOPT_DATA_DIR`). No
 
 ## Roadmap — one brand, every engine
 
-**SQL Server (2014 → 2025) is the product** — complete and tested: static analysis, estimated-plan
+**SQL Server (2019 → 2025) is the product** — complete and tested: static analysis, estimated-plan
 analysis, live DMVs, continuous sentinel, AI assistant, web UI.
 
 **PostgreSQL and MySQL are a deliberate _later_.** The `Engine` seam already exists (the analyzer accepts a
