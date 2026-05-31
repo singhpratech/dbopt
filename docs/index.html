@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>dbopt — find &amp; fix slow SQL before production</title>
-<meta name="description" content="dbopt is a free, local-first SQL Server performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Nothing leaves your machine." />
+<meta name="description" content="dbopt is a free, local-first SQL Server performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Local by default; the only egress is a cloud AI model you opt into." />
 <meta property="og:title" content="dbopt — find & fix slow SQL before production" />
 <meta property="og:description" content="Free, local-first SQL Server performance optimizer. Static + plan + live analysis, prescriptive cited fixes, a single private binary." />
 <meta property="og:type" content="website" />
@@ -300,7 +300,7 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
         <div class="row"><div class="n">→</div><div><h4>The concrete rewrite</h4><p>Every rule ships a copy-paste fix, not just a warning — plus a one-click "send to the analyze editor."</p></div></div>
         <div class="row"><div class="n">→</div><div><h4>The engine-level reasoning</h4><p>Each finding cites the <em>why</em> — what the optimizer does, and how the rewrite changes the plan.</p></div></div>
         <div class="row"><div class="n">→</div><div><h4>Version-aware (2019 → 2025)</h4><p>A 2022+ rewrite is never suggested against a 2019 target. Defaults to SQL Server 2025.</p></div></div>
-        <div class="row"><div class="n">→</div><div><h4>Grounded AI assistant</h4><p>The assistant gets your SQL <em>and</em> the findings as context — and you can fan one prompt out to several models to compare.</p></div></div>
+        <div class="row"><div class="n">→</div><div><h4>Grounded AI assistant</h4><p>The assistant gets your SQL <em>and</em> the findings as context. Run it fully local (Ollama / web-llm) — nothing leaves — or fan one prompt out to several cloud providers to compare.</p></div></div>
       </div>
     </div>
   </div>
@@ -310,10 +310,10 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
   <div class="wrap">
     <div class="private bracket reveal">
       <span class="kicker">Local-first by design</span>
-      <h2 style="font:600 clamp(26px,3.4vw,38px)/1.1 var(--sans);letter-spacing:-.025em;color:var(--strong);margin:14px 0 6px;max-width:640px">Your queries and schema never leave the box.</h2>
-      <p style="color:var(--muted);max-width:620px;font-size:16px">A single Rust binary. SQLite for storage. An optional <b style="color:var(--text);font-weight:500">local</b> LLM. Built for pharma, finance and healthcare — shops that <em>can't</em> ship their data to a cloud service.</p>
+      <h2 style="font:600 clamp(26px,3.4vw,38px)/1.1 var(--sans);letter-spacing:-.025em;color:var(--strong);margin:14px 0 6px;max-width:640px">Your data stays on the box — until you say otherwise.</h2>
+      <p style="color:var(--muted);max-width:620px;font-size:16px">A single Rust binary, SQLite for storage. The analyzer never phones home. The AI assistant runs on a <b style="color:var(--text);font-weight:500">local</b> model (Ollama / web-llm) so nothing leaves — or a <b style="color:var(--text);font-weight:500">cloud</b> model if you want one, sending only your prompt. Built for pharma, finance and healthcare — shops that <em>can't</em> ship their data anywhere by accident.</p>
       <div class="priv-grid">
-        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><h4>Nothing phones home</h4><p>No telemetry, no account, no upload. It'll happily analyze a query you'd never dare run.</p></div>
+        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><h4>Nothing phones home</h4><p>No telemetry, no account, no analytics — ever. The only data that leaves is a prompt you deliberately hand to a cloud AI model.</p></div>
         <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 13h6"/></svg><h4>One static binary</h4><p>Linux, macOS, Windows. No runtime, no external services, web UI embedded inside.</p></div>
         <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg><h4>Read-only &amp; safe</h4><p>Estimated plans compile-only. DDL is preview-only — Safe-Apply never auto-runs a change.</p></div>
         <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M19 5l-3 3M8 16l-3 3"/></svg><h4>Free &amp; open</h4><p>No per-seat cost, no paywalled features — what the commercial tools do, without monetizing your pain.</p></div>
@@ -374,7 +374,7 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
   <div class="wrap foot">
     <div>
       <div class="b"><img class="logo" src="./logo.svg" alt="" /> db<span style="color:var(--signal)">opt</span></div>
-      <p style="margin-top:10px">Local-first by design — your queries, schema and metrics stay on your infrastructure.</p>
+      <p style="margin-top:10px">Local-first by design — your data stays on your infrastructure unless you opt into a cloud AI model.</p>
     </div>
     <div class="links">
       <a href="https://github.com/singhpratech/dbopt" target="_blank" rel="noopener">GitHub</a>

@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
   <img src="https://img.shields.io/badge/rules-59-d4ff4e?style=flat-square&labelColor=0a0d12" alt="59 rules" />
   <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
-  <img src="https://img.shields.io/badge/local--first-no%20cloud-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
+  <img src="https://img.shields.io/badge/local--first-by%20default-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20React-7e879b?style=flat-square&labelColor=0a0d12" alt="Rust + React" />
 </p>
 
@@ -96,9 +96,14 @@ a 2022+ rewrite is never suggested against a 2019 target.
 
 ### 🔒 Local-first &amp; private
 
-A single **Rust binary**. SQLite for storage. An optional **local** LLM (Ollama). No telemetry, no account,
-no upload — it'll happily dissect a query you'd never dare run. Estimated plans are compile-only and DDL is
-preview-only (Safe-Apply never auto-runs a change).
+A single **Rust binary** with SQLite for storage. The analyzer never phones home — **no telemetry, no
+account, no upload, ever** — so it'll happily dissect a query you'd never dare send anywhere. Estimated
+plans are compile-only and DDL is preview-only (Safe-Apply never auto-runs a change).
+
+**AI is your call.** Run a **local** model (Ollama / web-llm) and *nothing* leaves the machine. Want a
+frontier model instead? Pick a **cloud** provider (Anthropic, OpenAI, Azure, Bedrock, OpenRouter) and only
+your prompt — the SQL plus its findings — is sent, and only when you choose it. The one egress is yours to
+make.
 
 ## Quality bar — proven, not promised
 
