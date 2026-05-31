@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 196 48" role="img" aria-label="dbopt"><title>dbopt</title><rect x="0.75" y="0.75" width="46.5" height="46.5" rx="11" fill="#0a0d12" stroke="#1c2230" stroke-width="1.5"/>
+  <path d="M16.5 31.6 Q18 32.6 18.4 33.6 Q18.8 35 12.4 36.2 L31.6 36.2 Q25.2 35 25.6 33.6 Q26 32.6 27.5 31.6 Z" fill="#2E63E8"/>
+  <ellipse cx="22" cy="36.3" rx="9.6" ry="2" fill="#2E63E8"/>
+  <ellipse cx="22" cy="32" rx="11" ry="2.4" fill="#2E63E8"/>
+  <path d="M28 30.6 L40.5 31.1 Q42 32 40.5 32.9 L28 33.4 Z" fill="#2E63E8"/>
+  <ellipse cx="22" cy="30.6" rx="11" ry="2.6" fill="#2E63E8"/><path d="M13.5 14 A8.5 4.5 0 0 1 30.5 14 L30.5 31 L13.5 31 Z" fill="#2E63E8"/><line x1="14.3" y1="19" x2="29.7" y2="19" stroke="#EEF2FF" stroke-width="1.9" stroke-linecap="round"/><line x1="14.3" y1="23" x2="29.7" y2="23" stroke="#EEF2FF" stroke-width="1.9" stroke-linecap="round"/><line x1="14.3" y1="27" x2="29.7" y2="27" stroke="#EEF2FF" stroke-width="1.9" stroke-linecap="round"/><ellipse cx="22" cy="23" rx="1.8" ry="1.5" fill="#E5392F"/><text x="58" y="33" font-family="'IBM Plex Mono',ui-monospace,monospace" font-size="30" font-weight="700" letter-spacing="-1" fill="currentColor">dbopt</text></svg>
