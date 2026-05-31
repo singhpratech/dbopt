@@ -29,17 +29,40 @@ export async function backendHealthy(): Promise<boolean> {
   }
 }
 
-export type Capabilities = { integrated_auth: boolean };
+export type Capabilities = {
+  /** Can do Windows integrated (current-user / trusted) auth on this build. */
+  integrated_auth: boolean;
+  /** Can authenticate with an explicit Windows account + password (NTLM). */
+  windows_account_auth: boolean;
+  platform?: string;
+  version?: string;
+};
+
+const CAPS_FALLBACK: Capabilities = { integrated_auth: false, windows_account_auth: false };
 
 /** What this backend binary actually supports. Defaults to the safe assumption
- *  (no integrated auth) if the call fails, so the UI never offers a dead end. */
+ *  (no Windows auth) if the call fails, so the UI never offers a dead end. */
 export async function capabilities(): Promise<Capabilities> {
   try {
     const r = await fetch(`${BASE}/capabilities`, { method: "GET" });
-    if (!r.ok) return { integrated_auth: false };
-    return await r.json();
+    if (!r.ok) return CAPS_FALLBACK;
+    return { ...CAPS_FALLBACK, ...(await r.json()) };
   } catch {
-    return { integrated_auth: false };
+    return CAPS_FALLBACK;
+  }
+}
+
+export type VersionInfo = { version: string; platform: string; arch: string };
+
+/** The running binary's version + platform/arch (purely local — reads compile-
+ *  time constants, makes no network call). Used by the in-app update check. */
+export async function appVersion(): Promise<VersionInfo | null> {
+  try {
+    const r = await fetch(`${BASE}/version`, { method: "GET" });
+    if (!r.ok) return null;
+    return (await r.json()) as VersionInfo;
+  } catch {
+    return null;
   }
 }
 

@@ -54,7 +54,10 @@ export function setOnboarded(value: boolean): void {
   save<boolean>("onboarded", value);
 }
 
-export type AuthMode = "integrated" | "sql";
+// "sql"        → SQL Server login (user + password)
+// "integrated" → Windows integrated, current logged-in user (no password)
+// "windows"    → explicit Windows account: DOMAIN\user (or user@domain) + password
+export type AuthMode = "integrated" | "sql" | "windows";
 
 export interface SqlConnectionConfig {
   server: string;

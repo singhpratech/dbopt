@@ -70,6 +70,8 @@ export interface ConnectionInfo {
   user?: string;
   password?: string;
   trust_cert?: boolean;
+  /** "sql" | "integrated" | "windows". Absent ⇒ backend infers from `user`. */
+  auth_mode?: string;
 }
 
 /* ============================================================

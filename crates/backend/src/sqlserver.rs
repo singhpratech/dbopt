@@ -45,20 +45,7 @@ async fn open(req: &ConnectReq) -> anyhow::Result<Client<tokio_util::compat::Com
         config.port(1433);
     }
     if let Some(db) = req.database.as_deref() { config.database(db); }
-    match (req.user.as_deref(), req.password.as_deref()) {
-        (Some(u), Some(p)) if !u.is_empty() => config.authentication(AuthMethod::sql_server(u, p)),
-        _ => {
-            #[cfg(feature = "integrated-auth")]
-            { config.authentication(AuthMethod::Integrated); }
-            #[cfg(not(feature = "integrated-auth"))]
-            {
-                return Err(anyhow::anyhow!(
-                    "Integrated (Windows) auth requires the backend to be built with `--features integrated-auth` (uses GSSAPI/Kerberos on Linux). \
-Either rebuild with that feature, or switch to SQL authentication and provide a user + password."
-                ));
-            }
-        }
-    }
+    apply_auth(&mut config, req)?;
     if req.trust_cert.unwrap_or(false) {
         config.trust_cert();
     }
@@ -71,6 +58,61 @@ Either rebuild with that feature, or switch to SQL authentication and provide a 
         .await
         .map_err(|e| safe_connect_err(&e))?;
     Ok(client)
+}
+
+/// Apply the requested authentication method to `config`. Three modes:
+///   - `"sql"`        → SQL Server login (user + password). Works on every build.
+///   - `"integrated"` → Windows integrated / current logged-in user (trusted
+///                      connection, no password). Available on the Windows
+///                      release build (winauth/SSPI) or a Linux build made with
+///                      `--features integrated-auth` (Kerberos/GSSAPI ticket).
+///   - `"windows"`    → an explicit Windows account: `DOMAIN\user` (or
+///                      `user@domain`) + password, over NTLM. Windows builds only.
+///
+/// The mode defaults to `"sql"` when a username is supplied and `"integrated"`
+/// otherwise, so older callers that omit `auth_mode` keep their prior behaviour.
+/// A request for a Windows mode on a build that can't honor it returns a clear,
+/// actionable error rather than a confusing transport failure.
+fn apply_auth(config: &mut Config, req: &ConnectReq) -> anyhow::Result<()> {
+    let has_user = req.user.as_deref().map(|u| !u.is_empty()).unwrap_or(false);
+    let mode = req.auth_mode.as_deref().unwrap_or(if has_user { "sql" } else { "integrated" });
+    match mode {
+        "sql" => match (req.user.as_deref(), req.password.as_deref()) {
+            (Some(u), Some(p)) if !u.is_empty() => { config.authentication(AuthMethod::sql_server(u, p)); }
+            _ => anyhow::bail!("SQL authentication needs a login and a password."),
+        },
+        "windows" | "integrated" => {
+            // We always compile `tiberius/winauth`; tiberius target-gates that
+            // crate to `cfg(windows)`, so `AuthMethod::windows`/`Integrated`
+            // exist exactly when we're building for Windows — hence `cfg(windows)`
+            // (NOT a crate feature flag) is the correct gate here.
+            #[cfg(windows)]
+            {
+                match (req.user.as_deref(), req.password.as_deref()) {
+                    // Explicit account: DOMAIN\user (or user@domain) + password → NTLM.
+                    (Some(u), Some(p)) if !u.is_empty() => { config.authentication(AuthMethod::windows(u, p)); }
+                    // No credentials → current logged-in Windows user (SSPI / trusted connection).
+                    _ => { config.authentication(AuthMethod::Integrated); }
+                }
+                return Ok(());
+            }
+            #[cfg(all(unix, feature = "integrated-auth"))]
+            {
+                // Kerberos/GSSAPI integrated auth uses the caller's existing
+                // ticket; an explicit user/password is not applicable here.
+                config.authentication(AuthMethod::Integrated);
+                return Ok(());
+            }
+            #[cfg(not(any(windows, all(unix, feature = "integrated-auth"))))]
+            {
+                anyhow::bail!(
+                    "Windows authentication isn't available in this build. The official dbopt build for Windows supports it natively; on Linux/macOS use SQL authentication (a login + password), or build with `--features integrated-auth` for Kerberos."
+                );
+            }
+        }
+        other => anyhow::bail!("unknown authentication mode '{other}' (expected sql, windows, or integrated)"),
+    }
+    Ok(())
 }
 
 pub async fn ping(req: &ConnectReq) -> anyhow::Result<String> {

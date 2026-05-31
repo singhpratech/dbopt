@@ -39,9 +39,15 @@ read.** (See ACCESS.md for the least-privilege grants this needs.)
   localStorage** (and `~/.dbopt` for the sentinel config). On-disk secrets are
   written `0600`.
 
-## What can leave your machine — AI providers only
+## What can leave your machine
 
-The AI features are the **only** outbound internet path. There are two kinds:
+Two outbound internet paths exist, and **both are things you choose**: cloud AI
+providers (below), and a manual "Check for updates" click (further below). With
+neither in use, dbopt talks **only** to your SQL Server.
+
+### Cloud AI providers
+
+The AI features are the main outbound path. There are two kinds:
 
 | Provider | Where it runs | Does your prompt leave? |
 |---|---|---|
@@ -59,10 +65,21 @@ any dbopt server (there isn't one).
 web-llm).** The deterministic analyzer/health/scan never needs AI at all — AI only
 rephrases findings the engine already produced.
 
+### The update check (Help ▸ Check for updates)
+
+dbopt can tell you when a newer release exists. This is **manual only** — it fires
+when you click "Check for updates" in the Help panel, never automatically and never
+on startup. The request is an anonymous public `GET` from your **browser** to
+`api.github.com` (the dbopt releases endpoint). It carries no identifiers, no
+telemetry, and no body — nothing about your databases, queries, or config is sent.
+The local backend is not involved in this call. If you never click it, dbopt never
+contacts GitHub. The code is one self-contained file: `web/src/api/updates.ts`.
+
 ## How to verify this yourself
 
-- Watch the network: with only the analyzer in use (no cloud AI), the backend
-  makes outbound connections **only** to your SQL Server.
+- Watch the network: with only the analyzer in use (no cloud AI, no update check),
+  the backend makes outbound connections **only** to your SQL Server.
 - Grep the source: the only `https://` egress in the backend is in
-  `crates/backend/src/providers/*` and `ollama.rs` — i.e. the AI providers.
+  `crates/backend/src/providers/*` and `ollama.rs` — i.e. the AI providers. The
+  update check is browser-side and lives only in `web/src/api/updates.ts`.
 - There are no analytics/tracking libraries anywhere in the codebase.

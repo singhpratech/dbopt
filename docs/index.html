@@ -357,10 +357,10 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
   <div class="wrap">
     <span class="kicker reveal" style="justify-content:center">Ready when you are</span>
     <h2 class="reveal" style="transition-delay:.06s;margin-top:16px">Stop guessing.<br>Start <span class="hl">seeing</span>.</h2>
-    <div class="cta-row reveal" style="transition-delay:.12s;justify-content:center;margin-top:30px;flex-wrap:wrap">
-      <a class="btn btn-primary" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg">macOS · Apple Silicon</a>
-      <a class="btn btn-ghost" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.zip">Windows</a>
-      <a class="btn btn-ghost" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.AppImage">Linux</a>
+    <div class="cta-row reveal" id="dl-row" style="transition-delay:.12s;justify-content:center;margin-top:30px;flex-wrap:wrap">
+      <a class="btn btn-primary" data-os="macos" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg">macOS · Apple Silicon</a>
+      <a class="btn btn-ghost" data-os="windows" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi">Windows · installer</a>
+      <a class="btn btn-ghost" data-os="linux" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz">Linux</a>
     </div>
     <p class="reveal" style="transition-delay:.18s;text-align:center;margin-top:20px;font:12px var(--mono);color:var(--dim)">
       one self-contained binary · run it, open <span style="color:var(--muted)">127.0.0.1:3690</span> &nbsp;·&nbsp;
@@ -400,6 +400,29 @@ const cu=new IntersectionObserver((es)=>es.forEach(e=>{
   requestAnimationFrame(step);
 }),{threshold:.5});
 document.querySelectorAll('[data-count]').forEach(el=>cu.observe(el));
+// platform auto-detect: promote the visitor's OS to the primary download button
+(function(){
+  const row=document.getElementById('dl-row'); if(!row) return;
+  const ua=navigator.userAgent||'';
+  const plat=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';
+  let os=null;
+  if(/Win/i.test(ua)||/Win/i.test(plat)) os='windows';
+  else if(/Mac/i.test(ua)||/Mac/i.test(plat)||/iPhone|iPad|iPod/i.test(ua)) os='macos';
+  else if(/Linux|X11|CrOS/i.test(ua)||/Linux/i.test(plat)) os='linux';
+  const label={windows:'Windows',macos:'macOS · Apple Silicon',linux:'Linux'};
+  const btns=Array.prototype.slice.call(row.querySelectorAll('a[data-os]'));
+  btns.forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');});
+  const match=btns.filter(b=>b.getAttribute('data-os')===os)[0];
+  if(match){
+    match.classList.remove('btn-ghost');match.classList.add('btn-primary');
+    match.textContent='Download for '+label[os]+' →';
+    row.insertBefore(match,row.firstChild);
+  } else {
+    // unknown OS — keep a clear primary CTA (macOS first, else the first button)
+    const m=btns.filter(b=>b.getAttribute('data-os')==='macos')[0]||btns[0];
+    if(m){m.classList.remove('btn-ghost');m.classList.add('btn-primary');}
+  }
+})();
 </script>
 </body>
 </html>

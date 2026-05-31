@@ -46,20 +46,22 @@ pub async fn open(info: &ConnectionInfo) -> anyhow::Result<SqlClient> {
         if !db.is_empty() { config.database(db); }
     }
     match (info.user.as_deref(), info.password.as_deref()) {
-        (Some(u), Some(p)) if !u.is_empty() => config.authentication(AuthMethod::sql_server(u, p)),
+        (Some(u), Some(p)) if !u.is_empty() => { config.authentication(AuthMethod::sql_server(u, p)); }
         _ => {
-            // No SQL credentials supplied → fall back to integrated (Windows /
-            // Kerberos) auth, but only when built with that feature, mirroring
-            // the backend. GSSAPI on Linux requires the `integrated-auth`
-            // feature, so a default build returns an actionable rebuild hint
-            // instead of a confusing connection error.
-            #[cfg(feature = "integrated-auth")]
+            // No SQL credentials supplied → fall back to integrated (current
+            // Windows user) auth, mirroring the backend. On the Windows build
+            // this is native SSPI (winauth); on Linux it needs the Kerberos/
+            // GSSAPI `integrated-auth` feature, so a default Linux build returns
+            // an actionable hint instead of a confusing connection error.
+            #[cfg(windows)]
             { config.authentication(AuthMethod::Integrated); }
-            #[cfg(not(feature = "integrated-auth"))]
+            #[cfg(all(unix, feature = "integrated-auth"))]
+            { config.authentication(AuthMethod::Integrated); }
+            #[cfg(not(any(windows, all(unix, feature = "integrated-auth"))))]
             {
                 anyhow::bail!(
-                    "sentinel needs SQL authentication (user + password). For Windows/integrated auth, \
-rebuild sentinel with `--features integrated-auth` (GSSAPI/Kerberos on Linux)."
+                    "sentinel needs SQL authentication (user + password). Windows integrated auth is \
+available on the Windows build; on Linux, rebuild sentinel with `--features integrated-auth` (GSSAPI/Kerberos)."
                 );
             }
         }

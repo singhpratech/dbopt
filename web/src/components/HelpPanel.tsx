@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GLOSSARY } from "../glossary";
+import { appVersion } from "../api/backend";
+import { checkForUpdates, RELEASES_PAGE, type UpdateCheck } from "../api/updates";
 
 /**
  * The "?" help slide-over. Two sections:
@@ -16,7 +18,7 @@ export const HELP_STEPS: { n: string; title: string; body: string }[] = [
   {
     n: "①",
     title: "Connect your SQL Server",
-    body: "Point dbopt at an instance (host, login, database). Nothing leaves your machine — it talks to your server directly.",
+    body: "Point dbopt at an instance (host, login, database). The analyzer talks only to your server — your data leaves the box only if you pick a cloud AI model or click “check for updates”.",
   },
   {
     n: "②",
@@ -61,6 +63,11 @@ export function HelpPanel({
   focusTerm?: string;
 }) {
   const [q, setQ] = useState("");
+  // Software-update check. `upd` is "idle" until the user clicks the button —
+  // the GitHub request is NEVER fired automatically. `curVer` is read locally
+  // from the backend when the panel opens (no egress) just to show the version.
+  const [curVer, setCurVer] = useState<string | null>(null);
+  const [upd, setUpd] = useState<UpdateCheck | "idle" | "checking">("idle");
   const bodyRef = useRef<HTMLDivElement>(null);
   const focusRowRef = useRef<HTMLDivElement>(null);
   const rubricRef = useRef<HTMLElement>(null);
@@ -74,6 +81,27 @@ export function HelpPanel({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Read the running version locally when the panel opens (no network call).
+  useEffect(() => {
+    if (!open || curVer) return;
+    let live = true;
+    appVersion().then((v) => { if (live && v) setCurVer(v.version); });
+    return () => { live = false; };
+  }, [open, curVer]);
+
+  // User-triggered ONLY: this is the single place dbopt reaches the network on
+  // its own. Reads the local version, then asks the GitHub releases API.
+  async function runUpdateCheck() {
+    setUpd("checking");
+    const v = await appVersion();
+    if (!v) {
+      setUpd({ status: "error", message: "couldn't read the running version — is the dbopt backend running?" });
+      return;
+    }
+    setCurVer(v.version);
+    setUpd(await checkForUpdates(v.version, v.platform));
+  }
 
   // When opened with a focusTerm, scroll it into view. The rubric anchor and
   // the two grade slugs both resolve to the rubric section; any other slug
@@ -205,6 +233,32 @@ export function HelpPanel({
             </p>
           </section>
 
+          {/* Software updates — the cross-platform analog of Notepad++'s
+              "Update Notepad++". Manual, transparent, GitHub-Releases based. */}
+          <section className="help-updates" aria-label="Software updates">
+            <h3 className="help-section-title">Software updates</h3>
+            <p className="help-sentinel-lead">
+              dbopt is a single self-contained binary
+              {curVer ? <> — you’re running <strong>v{curVer}</strong></> : null}. Checking asks the
+              public GitHub releases page for the latest version and compares it. This is the{" "}
+              <strong>only</strong> time dbopt reaches the network on its own, and only when you
+              click below — nothing about your databases, queries, or config is ever sent.
+            </p>
+            <div className="help-update-actions">
+              <button
+                className="btn primary"
+                onClick={runUpdateCheck}
+                disabled={upd === "checking"}
+              >
+                {upd === "checking" ? "Checking…" : "Check for updates"}
+              </button>
+              <a className="btn" href={RELEASES_PAGE} target="_blank" rel="noopener noreferrer">
+                All releases ↗
+              </a>
+            </div>
+            <UpdateResult upd={upd} />
+          </section>
+
           <section className="help-glossary">
             <div className="help-glossary-head">
               <h3 className="help-section-title">Glossary</h3>
@@ -255,5 +309,55 @@ export function HelpPanel({
         </div>
       </aside>
     </>
+  );
+}
+
+/** Renders the outcome of a "Check for updates" click. Nothing until the user
+ *  has actually run a check. */
+function UpdateResult({ upd }: { upd: UpdateCheck | "idle" | "checking" }) {
+  if (upd === "idle" || upd === "checking") return null;
+
+  if (upd.status === "current") {
+    return (
+      <div className="help-update-status ok">
+        ✓ You’re up to date — v{upd.current} is the latest release.
+      </div>
+    );
+  }
+
+  if (upd.status === "update") {
+    return (
+      <div className="help-update-status update">
+        <div>
+          ⬆ <strong>Update available:</strong> v{upd.latest}{" "}
+          <span className="help-update-have">(you have v{upd.current})</span>
+        </div>
+        <div className="help-update-links">
+          {upd.assetUrl && (
+            <a className="btn primary" href={upd.assetUrl}>
+              Download v{upd.latest}
+              {upd.assetName ? <span className="help-update-asset"> · {upd.assetName}</span> : null}
+            </a>
+          )}
+          <a className="btn" href={upd.url} target="_blank" rel="noopener noreferrer">
+            Release notes ↗
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (upd.status === "unknown") {
+    return (
+      <div className="help-update-status">
+        Couldn’t compare versions (running v{upd.current}, latest “{upd.latest}”).{" "}
+        <a href={upd.url} target="_blank" rel="noopener noreferrer">Open releases ↗</a>
+      </div>
+    );
+  }
+
+  // error
+  return (
+    <div className="help-update-status err">Couldn’t check for updates · {upd.message}</div>
   );
 }

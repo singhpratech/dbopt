@@ -15,6 +15,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
+        .route("/version", get(version))
         .route("/connect", post(connect))
         .route("/databases", post(databases))
         .route("/advise", post(advise))
@@ -49,12 +50,37 @@ pub fn router() -> Router {
 async fn health() -> &'static str { "ok" }
 
 /// What THIS binary can actually do. The UI gates connection options on this so
-/// it never offers a path the build can't honor (e.g. Integrated/Windows auth,
-/// which is only compiled in with `--features integrated-auth` + Kerberos libs
-/// and is absent from every standard release build).
+/// it never offers a path the build can't honor.
+///
+/// Windows authentication has two flavors, with different build requirements:
+///   - integrated (current user / trusted connection): the Windows release build
+///     (winauth/SSPI) OR a Linux build made with `--features integrated-auth`
+///     (Kerberos/GSSAPI).
+///   - explicit Windows account (DOMAIN\user + password, NTLM): Windows + winauth
+///     only.
 async fn capabilities() -> impl IntoResponse {
+    let integrated_auth = cfg!(windows) || cfg!(all(unix, feature = "integrated-auth"));
+    let windows_account_auth = cfg!(windows);
     Json(serde_json::json!({
-        "integrated_auth": cfg!(feature = "integrated-auth"),
+        // Kept under its original key for UI back-compat: "can do Windows
+        // integrated (current-user) auth on this build".
+        "integrated_auth": integrated_auth,
+        // Can authenticate with an explicit Windows account + password (NTLM).
+        "windows_account_auth": windows_account_auth,
+        "platform": std::env::consts::OS,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// The running binary's identity — used by the in-app "Check for updates" flow
+/// to compare against the latest GitHub release. Purely local: it reads compile-
+/// time constants only and makes NO network call (the update check itself is a
+/// browser→GitHub request the user triggers explicitly).
+async fn version() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS,    // "windows" | "macos" | "linux"
+        "arch": std::env::consts::ARCH,       // "x86_64" | "aarch64" | …
     }))
 }
 
@@ -65,6 +91,10 @@ pub struct ConnectReq {
     pub user: Option<String>,
     pub password: Option<String>,
     pub trust_cert: Option<bool>,
+    /// `"sql"` | `"integrated"` | `"windows"`. Absent ⇒ inferred from whether a
+    /// username is present (see `sqlserver::apply_auth`).
+    #[serde(default)]
+    pub auth_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

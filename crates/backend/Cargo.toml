@@ -29,9 +29,13 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 mime_guess = "2"
 open = "5"
 portpicker = "0.1"
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
-# When `integrated-auth` is enabled at build time, add winauth/GSSAPI Kerberos support.
-# We expose this through our own feature flag below.
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "winauth"] }
+# `winauth` is the pure-SSPI Windows authentication path. The underlying crate is
+# target-gated to `cfg(windows)` inside tiberius, so enabling the feature here is a
+# no-op on Linux/macOS (it does NOT pull GSSAPI/Kerberos and cannot break those
+# builds) yet gives Windows release binaries real Windows Authentication —
+# AuthMethod::Integrated (current user) and AuthMethod::windows (explicit account).
+# The separate `integrated-auth` flag below is ONLY the Linux/Kerberos (GSSAPI) path.
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"

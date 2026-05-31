@@ -184,6 +184,20 @@ jobs:
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} out/ \;
           (cd out && sha256sum * > SHA256SUMS)
           ls -la out
+          # Guard against a SILENTLY incomplete release. The per-OS binary jobs
+          # use `continue-on-error` for the MSI (and best-effort AppImage), so a
+          # broken installer would otherwise just vanish — the release would
+          # publish without it and the website's download link would 404. Fail
+          # the publish here instead. (AppImage is intentionally NOT required.)
+          missing=""
+          for f in dbopt-linux-x86_64.tar.gz dbopt-macos-arm64.dmg dbopt-macos-arm64.tar.gz dbopt-windows-x86_64.msi dbopt-windows-x86_64.zip; do
+            [ -f "out/$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::release is missing required assets:$missing"
+            exit 1
+          fi
+          echo "All required release assets present."
       - name: gh release
         uses: softprops/action-gh-release@v2
         with:

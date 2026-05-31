@@ -3905,6 +3905,48 @@ kbd {
 .help-sentinel-why strong { color: var(--warn); }
 .help-sentinel-why .health-signal-eye { flex: none; }
 
+/* Software updates section ------------------------------------------------ */
+.help-updates { margin-top: 22px; }
+.help-updates .help-section-title { margin-bottom: 8px; }
+.help-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.help-update-status {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font: 12px/1.5 var(--f-sans);
+  color: var(--text);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+}
+.help-update-status.ok {
+  color: var(--ok, #76c893);
+  border-left-color: var(--ok, #76c893);
+  background: rgba(118, 200, 147, 0.08);
+}
+.help-update-status.update {
+  border-left-color: var(--signal);
+  background: rgba(212, 255, 78, 0.07);
+}
+.help-update-status.err {
+  color: var(--err);
+  border-left-color: var(--err);
+  background: rgba(239, 71, 111, 0.08);
+}
+.help-update-have { color: var(--text-dim); }
+.help-update-asset { color: var(--text-dim); font: 11px var(--f-mono); }
+.help-update-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 /* ============================================================
    Live activity monitor (WATCH ▸ LIVE) — real-time vitals.
    ============================================================ */

@@ -37,23 +37,42 @@ export function ConnectionPanel({
   const [databases, setDatabases] = useState<string[] | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [scan, setScan] = useState<ScanResult | null>(null);
-  // Whether THIS backend binary was built with integrated/Windows auth. Standard
-  // release builds are not, so the UI must not offer it as a working option.
-  const [integratedAuthOk, setIntegratedAuthOk] = useState(false);
+  // What THIS backend binary can actually honor. Windows auth has two flavors:
+  //   integrated_auth      → current Windows user (trusted connection)
+  //   windows_account_auth → explicit DOMAIN\user + password (NTLM)
+  // Both are available on the official Windows build; Linux/macOS builds offer
+  // neither (unless built with --features integrated-auth for Kerberos), so the
+  // UI must not present a mode the build can't honor.
+  const [caps, setCaps] = useState<{ integrated_auth: boolean; windows_account_auth: boolean; platform: string }>({
+    integrated_auth: false,
+    windows_account_auth: false,
+    platform: "",
+  });
+
+  const platformLabel = () => {
+    switch (caps.platform) {
+      case "macos": return "macOS";
+      case "linux": return "Linux";
+      case "windows": return "Windows";
+      default: return "this OS";
+    }
+  };
 
   function patch<K extends keyof SqlConnectionConfig>(k: K, v: SqlConnectionConfig[K]) {
     setConn({ ...conn, [k]: v });
   }
 
   // Ask the backend what it can actually do, and auto-heal a profile that is
-  // stuck on integrated auth this build can't honor (otherwise the user is
-  // trapped on a "Failed · Integrated auth requires…" dead end after a reload).
+  // stuck on a Windows mode this build can't honor (otherwise the user is
+  // trapped on a "Failed · Windows auth isn't available…" dead end after a reload).
   useEffect(() => {
     let live = true;
-    backend.capabilities().then((caps) => {
+    backend.capabilities().then((c) => {
       if (!live) return;
-      setIntegratedAuthOk(caps.integrated_auth);
-      if (!caps.integrated_auth && conn.auth_mode === "integrated") {
+      setCaps({ integrated_auth: c.integrated_auth, windows_account_auth: c.windows_account_auth, platform: c.platform ?? "" });
+      if (conn.auth_mode === "integrated" && !c.integrated_auth) {
+        setConn({ ...conn, auth_mode: "sql" });
+      } else if (conn.auth_mode === "windows" && !c.windows_account_auth) {
         setConn({ ...conn, auth_mode: "sql" });
       }
     });
@@ -123,11 +142,16 @@ export function ConnectionPanel({
   // Payload that targets the SERVER (no database). DB-specific calls add it back.
   function serverPayload() {
     const auth = conn.auth_mode;
+    // SQL and explicit-Windows-account modes both carry a login + password;
+    // integrated (current Windows user) carries neither. auth_mode is always
+    // sent so the backend never has to guess.
+    const sendCreds = auth === "sql" || auth === "windows";
     return {
       server: conn.server,
-      user: auth === "sql" ? conn.user : undefined,
-      password: auth === "sql" ? conn.password : undefined,
+      user: sendCreds ? conn.user : undefined,
+      password: sendCreds ? conn.password : undefined,
       trust_cert: conn.trust_cert,
+      auth_mode: auth,
     };
   }
 
@@ -285,39 +309,51 @@ export function ConnectionPanel({
           <div className="form-row full">
             <label>Authentication</label>
             <select value={conn.auth_mode} onChange={(e) => patch("auth_mode", e.target.value as any)}>
-              <option value="sql">SQL Server (user + password)</option>
-              <option value="integrated" disabled={!integratedAuthOk}>
-                {integratedAuthOk
-                  ? "Windows (Integrated)"
-                  : "Windows (Integrated) — not available in this build"}
+              <option value="sql">SQL Server login (user + password)</option>
+              <option value="integrated" disabled={!caps.integrated_auth}>
+                {caps.integrated_auth
+                  ? "Windows — current user (integrated)"
+                  : "Windows — current user · needs the Windows build"}
+              </option>
+              <option value="windows" disabled={!caps.windows_account_auth}>
+                {caps.windows_account_auth
+                  ? "Windows — specify an account"
+                  : "Windows — specify an account · needs the Windows build"}
               </option>
             </select>
             <p className="form-hint">
-              {conn.auth_mode === "sql" ? (
-                integratedAuthOk ? (
-                  <>SQL auth needs a login + password (e.g. <code>sa</code>).</>
-                ) : (
-                  <>
-                    SQL auth needs a login + password (e.g. <code>sa</code>). Windows/Integrated
-                    auth isn’t compiled into this build, so it’s disabled above.
-                  </>
-                )
-              ) : (
+              {conn.auth_mode === "integrated" ? (
                 <>
-                  Windows / Integrated uses your current Windows credentials — no password needed.
+                  Connects as the Windows user running dbopt (a trusted connection) — no password
+                  needed. This is the classic “Windows Authentication” login.
                 </>
+              ) : conn.auth_mode === "windows" ? (
+                <>
+                  Authenticate as a specific Windows account. Enter the user as{" "}
+                  <code>DOMAIN\\user</code> (or <code>user@domain</code>) and its password.
+                </>
+              ) : !caps.integrated_auth && !caps.windows_account_auth ? (
+                <>
+                  SQL auth needs a login + password (e.g. <code>sa</code>). Windows authentication
+                  is available in the Windows build — this build runs on{" "}
+                  {platformLabel()}, so it’s disabled above.
+                </>
+              ) : (
+                <>SQL auth needs a login + password (e.g. <code>sa</code>).</>
               )}
             </p>
           </div>
-          {conn.auth_mode === "sql" && (
+          {(conn.auth_mode === "sql" || conn.auth_mode === "windows") && (
             <>
               <div className="form-row">
-                <label>User</label>
+                <label>{conn.auth_mode === "windows" ? "Windows account" : "User"}</label>
                 <input
                   value={conn.user ?? ""}
                   onChange={(e) => patch("user", e.target.value)}
-                  placeholder="sa"
+                  placeholder={conn.auth_mode === "windows" ? "CONTOSO\\jdoe" : "sa"}
                   spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
                   autoComplete="username"
                 />
               </div>
