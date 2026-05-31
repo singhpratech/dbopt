@@ -155,6 +155,42 @@ fn type_has_paren_arg(tokens: &[Token<'_>], type_idx: usize, end: usize) -> bool
     n < end && tokens[n].text == "("
 }
 
+/// Split an identifier into lowercase word segments on BOTH snake_case (`_`) and
+/// camelCase / PascalCase boundaries. `TotalAmount` -> ["total","amount"],
+/// `unit_price` -> ["unit","price"], `BitRate` -> ["bit","rate"],
+/// `AmountOfSubstance` -> ["amount","of","substance"]. Digits start a new run.
+///
+/// This is the core fix for the `float_for_money` substring false positives:
+/// matching a money keyword as a *whole segment* (rather than `str::contains`)
+/// stops "rate" matching BitRate/HeartRate, "fee" matching Coffee, "cost"
+/// matching Costume, "price" matching Caprice, "tax" matching Taxonomy, etc.
+fn name_segments(name: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = name.chars().collect();
+    for (idx, &c) in chars.iter().enumerate() {
+        if c == '_' || c == ' ' || c == '$' {
+            if !cur.is_empty() { segs.push(std::mem::take(&mut cur)); }
+            continue;
+        }
+        // camelCase boundary: lower/digit -> Upper, e.g. "tFoo".
+        if c.is_ascii_uppercase() {
+            let prev = if idx > 0 { Some(chars[idx - 1]) } else { None };
+            // Also split on the last capital of an acronym run before a new word,
+            // e.g. "HTTPServer" -> ["http","server"].
+            let next_lower = chars.get(idx + 1).map(|n| n.is_ascii_lowercase()).unwrap_or(false);
+            let prev_upper = prev.map(|p| p.is_ascii_uppercase()).unwrap_or(false);
+            let prev_word = prev.map(|p| p.is_ascii_alphanumeric()).unwrap_or(false);
+            if !cur.is_empty() && (!prev_upper || (prev_upper && next_lower)) && prev_word {
+                segs.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c.to_ascii_lowercase());
+    }
+    if !cur.is_empty() { segs.push(cur); }
+    segs
+}
+
 // =====================================================================================
 // (a) (n)varchar / (n)char declared with NO length -> surprising default (1, or 30
 //     for CAST/CONVERT). Fires on CREATE TABLE / DECLARE TABLE column types.
@@ -174,16 +210,40 @@ pub fn implicit_string_length_ddl(ctx: &RuleCtx) -> Vec<Finding> {
             if type_has_paren_arg(tokens, type_idx, e) { continue; }
             let col = bare_name(&tokens[name_idx]).to_string();
             let ty = ty_tok.text.to_ascii_lowercase();
+            // A bare `char`/`nchar` defaults to length 1, which for a deliberate
+            // single-character flag (Y/N, M/F, status code) is exactly the intended
+            // width — nothing is truncated. So for the fixed-length char types we
+            // soften to Info and DROP the "truncates data" claim; we keep the
+            // Warning + truncation language only for the variable-length and binary
+            // types, where defaulting to 1 is almost never intended.
+            let is_fixed_char = ty == "char" || ty == "nchar";
+            let (sev, message, rec) = if is_fixed_char {
+                (
+                    Severity::Info,
+                    format!(
+                        "Column `{col}` is declared `{ty}` with no length, which defaults to `{ty}(1)` — a single character. That is fine for a deliberate one-character flag, but state the length explicitly so the intent is unambiguous.",
+                    ),
+                    format!(
+                        "Make the width explicit.\n  before: {col} {ty}\n  after:  {col} {ty}(1)    -- if a single character is intended\n     or:  {col} {ty}(10)   -- pick the real fixed width",
+                    ),
+                )
+            } else {
+                (
+                    Severity::Warning,
+                    format!(
+                        "Column `{col}` is declared `{ty}` with no length. In a column definition this silently defaults to `{ty}(1)` — a single character — which truncates data.",
+                    ),
+                    format!(
+                        "Always state the length explicitly.\n  before: {col} {ty}\n  after:  {col} {ty}(100)   -- pick the real max length\nUse (MAX) only for genuinely large values; a bounded length stays in-row and can be indexed.",
+                    ),
+                )
+            };
             out.push(finding(
                 "datatype.implicit_string_length",
-                Severity::Warning,
-                format!(
-                    "Column `{col}` is declared `{ty}` with no length. In a column definition this silently defaults to `{ty}(1)` — a single character — which truncates data.",
-                ),
+                sev,
+                message,
                 Some(make_loc(ty_tok)),
-                Some(format!(
-                    "Always state the length explicitly.\n  before: {col} {ty}\n  after:  {col} {ty}(100)   -- pick the real max length\nUse (MAX) only for genuinely large values; a bounded length stays in-row and can be indexed.",
-                )),
+                Some(rec),
             ));
         }
     }
@@ -209,6 +269,11 @@ pub fn implicit_string_length_cast(ctx: &RuleCtx) -> Vec<Finding> {
             // Next significant token must be ',' (no length) — if it is '(' the length is explicit.
             let after = skip_comments(tokens, ty + 1);
             if after < tokens.len() && tokens[after].text == "," {
+                // 3-argument CONVERT(<type>, <expr>, <style>) is a *styled* conversion:
+                // every date/datetime/money/numeric style code produces a bounded,
+                // well-under-30-char result (ISO 120 -> 19/23 chars, money style 1 ->
+                // small), so the default length 30 cannot truncate. Suppress.
+                if convert_has_style_arg(tokens, after, lp) { continue; }
                 let name = tokens[ty].text.to_ascii_lowercase();
                 out.push(finding(
                     "datatype.implicit_string_length_cast",
@@ -281,6 +346,31 @@ fn preceded_by_cast(tokens: &[Token<'_>], as_idx: usize) -> bool {
     false
 }
 
+/// Given the index of the first top-level comma inside a `CONVERT( <type> ,` call
+/// (`first_comma`) and the index of the call's opening `(` (`open_paren`), return
+/// true if there is a SECOND top-level comma before the matching `)` — i.e. a
+/// style argument is present: `CONVERT(<type>, <expr>, <style>)`.
+fn convert_has_style_arg(tokens: &[Token<'_>], first_comma: usize, open_paren: usize) -> bool {
+    let mut depth = 1i32; // we are already inside the CONVERT '('
+    let _ = open_paren;
+    let mut k = first_comma + 1;
+    while k < tokens.len() {
+        let t = &tokens[k];
+        match t.text {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 { return false; } // closed CONVERT, only 2 args
+            }
+            "," if depth == 1 => return true, // second top-level comma => style arg
+            ";" if depth <= 1 => return false, // statement boundary safety net
+            _ => {}
+        }
+        k += 1;
+    }
+    false
+}
+
 // =====================================================================================
 // (b) FLOAT / REAL used for a money-ish column -> DECIMAL. Fires only when the
 //     column NAME clearly denotes money (amount/price/cost/...), keeping FP risk low.
@@ -288,9 +378,16 @@ fn preceded_by_cast(tokens: &[Token<'_>], as_idx: usize) -> bool {
 pub fn float_for_money(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    // Unambiguous currency words. These are matched as a *whole trailing segment*
+    // of the column name (see `name_segments`), never as a raw substring, so
+    // "Coffee"/"Costume"/"Caprice"/"Taxonomy"/"BalanceForce" no longer trip the
+    // "fee"/"cost"/"price"/"tax"/"balance" hints. We deliberately DROP the highly
+    // ambiguous "rate"/"total"/"fee"/"tax"/"balance" hints entirely: BitRate,
+    // HeartRate, SampleRate, RecordTotal and TotalCount are physical/engineering
+    // measurements that are correctly stored as float/real.
     const MONEY_HINTS: &[&str] = &[
-        "amount", "amt", "price", "cost", "salary", "wage", "balance", "total",
-        "fee", "rate", "revenue", "payment", "subtotal", "discount", "tax",
+        "amount", "amt", "price", "cost", "salary", "wage",
+        "revenue", "payment", "subtotal", "discount",
     ];
     for (open, close) in table_bodies(tokens) {
         for (s, e) in split_column_list(tokens, open, close) {
@@ -298,8 +395,11 @@ pub fn float_for_money(ctx: &RuleCtx) -> Vec<Finding> {
             let Some((name_idx, type_idx)) = column_name_and_type(tokens, s, e) else { continue };
             let ty_tok = &tokens[type_idx];
             if !is_any_type_keyword(ty_tok, &["float", "real"]) { continue; }
-            let col_l = bare_name(&tokens[name_idx]).to_ascii_lowercase();
-            let money_like = MONEY_HINTS.iter().any(|h| col_l.contains(h));
+            let segs = name_segments(bare_name(&tokens[name_idx]));
+            // Fire only when a money word is the FINAL segment (or the whole name):
+            // "TotalAmount"/"UnitPrice"/"AnnualSalary" end in money; but
+            // "AmountOfSubstance" ends in "substance", "CapriceFactor" in "factor".
+            let money_like = segs.last().map(|last| MONEY_HINTS.contains(&last.as_str())).unwrap_or(false);
             if !money_like { continue; }
             let col = bare_name(&tokens[name_idx]).to_string();
             let ty = ty_tok.text.to_ascii_lowercase();
@@ -358,13 +458,12 @@ pub fn datetime_legacy_type(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn sysname_as_general_string(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    // Column names that legitimately ARE object-name metadata — don't flag those.
+    // Other common catalog-view columns that legitimately ARE object metadata and
+    // are correctly typed `sysname` when shadowing/staging from `sys.*` views.
+    // `*name` / `*_name` columns are handled generically below (covers `name`,
+    // `role_name`, `sequence_name`, `parameter_name`, `partition_name`, ...).
     const META_NAMES: &[&str] = &[
-        "object_name", "objectname", "table_name", "tablename", "column_name",
-        "columnname", "schema_name", "schemaname", "db_name", "dbname",
-        "database_name", "databasename", "index_name", "indexname", "proc_name",
-        "procedure_name", "constraint_name", "trigger_name", "view_name",
-        "login_name", "user_name", "principal_name", "server_name",
+        "type_desc", "definition", "data_type",
     ];
     for (open, close) in table_bodies(tokens) {
         for (s, e) in split_column_list(tokens, open, close) {
@@ -373,6 +472,11 @@ pub fn sysname_as_general_string(ctx: &RuleCtx) -> Vec<Finding> {
             let ty_tok = &tokens[type_idx];
             if !is_type_keyword(ty_tok, "sysname") { continue; }
             let col_l = bare_name(&tokens[name_idx]).to_ascii_lowercase();
+            // `sysname` is *the* matching type for any object-identifier column, so
+            // suppress whenever the column name is, or ends in, "name" — this is the
+            // single most common metadata column and the source of the FP wave
+            // (name/type_name/role_name/sequence_name/parameter_name/partition_name).
+            if col_l == "name" || col_l.ends_with("name") || col_l.ends_with("_name") { continue; }
             if META_NAMES.iter().any(|m| col_l == *m) { continue; }
             let col = bare_name(&tokens[name_idx]).to_string();
             out.push(finding(
@@ -507,5 +611,109 @@ mod tests {
         let f = run(sysname_as_general_string,
             "CREATE TABLE dbo.AuditLog (Id INT, object_name sysname, table_name sysname);");
         assert!(f.is_empty(), "object-name metadata columns may use sysname: {f:?}");
+    }
+
+    // =============================================================================
+    // FALSE-POSITIVE regression tests (fp_flags.json, pack=datatype_smells)
+    // =============================================================================
+
+    // ---- float_for_money: substring hits on engineering / scientific names ----
+
+    #[test]
+    fn float_for_money_fp_engineering_rates_do_not_fire() {
+        // EMPIRICAL FP: "rate" as a substring tripped every *Rate column. These are
+        // continuous physical/sensor measurements, correctly stored as float/real.
+        let f = run(float_for_money,
+            "CREATE TABLE Telemetry (BitRate float, SampleRate real, ErrorRate float, \
+             FlowRate real, HeartRate float, DecayRate float, GrowthRate real, SamplingRate float);");
+        assert!(f.is_empty(), "engineering *Rate columns must not fire: {f:?}");
+    }
+
+    #[test]
+    fn float_for_money_fp_accidental_substring_names_do_not_fire() {
+        // EMPIRICAL FP: tax in Taxonomy, fee in Coffee/Feeder, balance in Balance/Unbalanced,
+        // cost in Costume, amount in AmountOfSubstance, price in Caprice, total in RecordTotal.
+        let f = run(float_for_money,
+            "CREATE TABLE t (TaxonomyScore float, CoffeeTemp real, FeederSpeed float, \
+             BalanceForce float, UnbalancedMass real, CostumeWeight float, \
+             AmountOfSubstance float, CapriceFactor real, RecordTotal float, TotalCount real);");
+        assert!(f.is_empty(), "accidental-substring science/physics columns must not fire: {f:?}");
+    }
+
+    #[test]
+    fn float_for_money_still_fires_on_real_money_segments() {
+        // Guard against over-suppression: genuine money columns (money word is the
+        // final segment) must STILL fire, in both PascalCase and snake_case.
+        let f = run(float_for_money,
+            "CREATE TABLE t (TotalAmount float, UnitPrice real, AnnualSalary float, \
+             shipping_cost float, item_price real);");
+        assert_eq!(f.len(), 5, "money-named float/real columns must still fire: {f:?}");
+        assert!(f.iter().all(|x| x.rule.0 == "datatype.float_for_money"));
+    }
+
+    // ---- sysname_general_string: catalog/staging metadata columns ----
+
+    #[test]
+    fn sysname_fp_catalog_staging_columns_do_not_fire() {
+        // EMPIRICAL FP: temp/staging tables that shadow sys.* catalog views correctly
+        // use sysname for name / *_name / type_desc columns. None should fire.
+        let f = run(sysname_as_general_string,
+            "CREATE TABLE #objs (id INT, name sysname, type_desc sysname, parameter_name sysname, \
+             type_name sysname, role_name sysname, sequence_name sysname, partition_name sysname);");
+        assert!(f.is_empty(), "catalog metadata columns may use sysname: {f:?}");
+    }
+
+    #[test]
+    fn sysname_still_fires_on_non_metadata_column() {
+        // Guard against over-suppression: a clearly non-metadata column still fires.
+        let f = run(sysname_as_general_string,
+            "CREATE TABLE dbo.Cfg (Id INT, Label sysname, Comment sysname);");
+        assert_eq!(f.len(), 2, "ordinary string columns typed sysname should still fire: {f:?}");
+    }
+
+    // ---- implicit_string_length_cast: styled CONVERT ----
+
+    #[test]
+    fn implicit_cast_fp_styled_convert_does_not_fire() {
+        // EMPIRICAL FP: CONVERT(VARCHAR, <date/money>, <style>) is a bounded styled
+        // conversion (ISO 120 -> 19/23 chars, money style 1 -> small); never truncates.
+        let f = run(implicit_string_length_cast,
+            "SELECT CONVERT(VARCHAR, GETDATE(), 120), CONVERT(NVARCHAR, @money, 1);");
+        assert!(f.is_empty(), "3-arg styled CONVERT must not fire: {f:?}");
+    }
+
+    #[test]
+    fn implicit_cast_unstyled_two_arg_convert_still_fires() {
+        // Guard against over-suppression: a 2-arg no-length CONVERT still fires.
+        let f = run(implicit_string_length_cast,
+            "SELECT CONVERT(VARCHAR, @x), CONVERT(NVARCHAR, t.col) FROM t;");
+        assert_eq!(f.len(), 2, "2-arg no-length CONVERT should still fire: {f:?}");
+        assert!(f.iter().all(|x| x.rule.0 == "datatype.implicit_string_length_cast"));
+    }
+
+    // ---- implicit_string_length (DDL): bare char/nchar single-char flag ----
+
+    #[test]
+    fn implicit_string_length_fp_char_flag_is_info_no_truncation_claim() {
+        // EMPIRICAL FP: `Active char` defaults to char(1), which is the intended width
+        // for a Y/N flag — nothing is truncated. Downgrade to Info and drop the
+        // "truncates data" claim for the fixed-length char types.
+        let f = run(implicit_string_length_ddl,
+            "CREATE TABLE t (Active char CHECK (Active IN ('Y','N')), Gender char);");
+        assert_eq!(f.len(), 2, "bare char still advised, but as Info: {f:?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Info),
+            "bare char/nchar must be Info, not Warning: {f:?}");
+        assert!(f.iter().all(|x| !x.message.contains("truncates")),
+            "char/nchar message must not claim truncation: {f:?}");
+    }
+
+    #[test]
+    fn implicit_string_length_varchar_stays_warning_truncation() {
+        // Guard: variable-length types keep the Warning + truncation message.
+        let f = run(implicit_string_length_ddl,
+            "CREATE TABLE t (Note varchar, Bio nvarchar);");
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Warning), "{f:?}");
+        assert!(f.iter().all(|x| x.message.contains("truncates")), "{f:?}");
     }
 }

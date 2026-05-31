@@ -1,663 +1,844 @@
-// Set-based anti-patterns: existence-via-COUNT, correlated scalar subquery in
-// the SELECT list, UNION where UNION ALL is likely intended, and SELECT DISTINCT
-// over a wide column list (wrong-grain smell).
-//
-// These are deliberately conservative. The lexer already strips whitespace and
-// keeps comments / strings / bracket-quoted identifiers as their own token kinds,
-// so `is_word` never matches a keyword that lives inside `'...'`, `--...`,
-// `/*...*/`, or `[col]`. Each rule fires only on a high-confidence token shape and
-// drops out the moment the shape is ambiguous.
-//
-// NOTE: `NOT IN (subquery)` (the nullable-trap) is intentionally NOT implemented
-// here — it is already owned by `sargability::not_in_subquery`
-// (id `sarg.not_in_nullable`). We do not duplicate it.
+//! Query-shape antipatterns: idioms that are *syntactically* valid but usually
+//! signal a more efficient / more correct rewrite.
+//!
+//! Every rule here is heavily false-positive-sensitive because the shapes it
+//! looks for (UNION, COUNT(*), DISTINCT, scalar subqueries) all have entirely
+//! legitimate uses. The guards below are deliberately conservative: when in
+//! doubt we stay silent rather than nag on correct, idiomatic T-SQL.
 
-use super::{finding, is_word, make_loc, RuleCtx};
+use super::{finding, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
-use crate::tokens::{Token, TokKind};
+use crate::tokens::{TokKind, Token, word_eq_ci};
 
-/// Next non-comment token index at or after `from`.
-fn skip_comments(tokens: &[Token<'_>], from: usize) -> usize {
-    let mut k = from;
-    while k < tokens.len() && tokens[k].kind == TokKind::Comment {
-        k += 1;
+/// Stricter keyword test than the shared `super::is_word`.
+///
+/// The shared helper *strips* surrounding `[]` before comparing, which means a
+/// delimited identifier deliberately named after a reserved word — e.g. the
+/// column `[UNION]` or `[COUNT]` — matches the keyword check and produces a
+/// false positive. A bracket- or double-quote-delimited token is, by
+/// definition, an *identifier*, never a keyword, so we reject it outright.
+fn kw(t: &Token, keyword: &str) -> bool {
+    if t.kind != TokKind::Word {
+        return false;
     }
-    k
+    // Delimited identifiers can never be keywords.
+    if t.text.starts_with('[') || t.text.starts_with('"') {
+        return false;
+    }
+    // Variables / temp tables (`@x`, `#t`) are not keywords either.
+    if t.text.starts_with('@') || t.text.starts_with('#') {
+        return false;
+    }
+    word_eq_ci(t.text, keyword)
 }
 
-/// Given the index of the opening `(`, return the index of its matching `)`.
-/// Returns `None` if unbalanced (truncated input).
-fn matching_paren(tokens: &[Token<'_>], open: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut i = open;
-    while i < tokens.len() {
-        match tokens[i].text {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
+/// Strip surrounding `[]`/`"` from a (possibly delimited) identifier token.
+fn ident_text<'a>(t: &Token<'a>) -> &'a str {
+    t.text
+        .trim_matches(|c| c == '[' || c == ']' || c == '"')
+}
+
+/// Index of the next non-comment token at or after `i`.
+fn skip_comments(tokens: &[Token], mut i: usize) -> usize {
+    while i < tokens.len() && tokens[i].kind == TokKind::Comment {
         i += 1;
     }
-    None
+    i
 }
 
 // ---------------------------------------------------------------------------
-// (b) COUNT(*) compared to 0/1 purely to test existence.
-//
-//   IF (SELECT COUNT(*) FROM Orders WHERE CustomerId = @c) > 0 ...
-//   WHERE (SELECT COUNT(*) FROM ...) = 0
-//
-// Shape required (all high-confidence):
-//   '(' SELECT ... COUNT '(' <*|1|col> ')' ... ')' <cmp> <0|1>
-// We anchor on the COUNT token, require it to sit inside a parenthesised
-// SELECT subquery, and require the closing paren of that subquery to be
-// immediately followed by a comparison against the literal 0 or 1. Plain
-// `HAVING COUNT(*) > 0` (legitimate grouping filter, no subquery) does NOT
-// match because there is no enclosing `( SELECT`.
+// UNION should (usually) be UNION ALL
 // ---------------------------------------------------------------------------
-pub fn count_for_existence(ctx: &RuleCtx) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let tokens = ctx.tokens;
 
-    for (i, t) in tokens.iter().enumerate() {
-        if !is_word(t, "COUNT") {
-            continue;
-        }
-        // Must be a call: COUNT '('
-        let lp = skip_comments(tokens, i + 1);
-        if lp >= tokens.len() || tokens[lp].text != "(" {
-            continue;
-        }
-        // Find the enclosing parenthesised SELECT. Walk left counting paren depth;
-        // the first '(' we exit to (depth goes from 0 to -1) is the subquery open.
-        let mut depth = 0i32;
-        let mut j = i;
-        let mut sub_open: Option<usize> = None;
-        while j > 0 {
-            j -= 1;
-            match tokens[j].text {
-                ")" => depth += 1,
-                "(" => {
-                    if depth == 0 {
-                        sub_open = Some(j);
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-        let Some(open) = sub_open else { continue };
-        // The token right after the opening paren must be SELECT (a scalar
-        // count subquery), tolerating comments.
-        let after_open = skip_comments(tokens, open + 1);
-        if after_open >= tokens.len() || !is_word(&tokens[after_open], "SELECT") {
-            continue;
-        }
-        // The COUNT must be the first projected expression of that SELECT
-        // (i.e. it really is `(SELECT COUNT(*) ...)`), not COUNT buried in a
-        // deeper construct. after_open -> SELECT, then next non-comment is COUNT.
-        let proj = skip_comments(tokens, after_open + 1);
-        if proj != i {
-            continue;
-        }
-        // Closing paren of the subquery.
-        let Some(close) = matching_paren(tokens, open) else { continue };
-        // Token after the close must be a comparison op against 0 or 1.
-        let cmp = skip_comments(tokens, close + 1);
-        if cmp >= tokens.len() {
-            continue;
-        }
-        let op = tokens[cmp].text;
-        let is_cmp = matches!(op, ">" | "=" | "<" | ">=" | "<=" | "<>" | "!=")
-            // tokenizer emits ">=" etc. as single Punct? It emits punctuation one
-            // byte at a time, so handle the two-token forms below too.
-            || op == "!";
-        if !is_cmp {
-            continue;
-        }
-        // Operand: the next number must be 0 or 1 (possibly after a second
-        // punctuation char like the '=' in ">=").
-        let mut operand = skip_comments(tokens, cmp + 1);
-        if operand < tokens.len()
-            && tokens[operand].kind == TokKind::Punct
-            && matches!(tokens[operand].text, "=" | ">" | "<")
-        {
-            operand = skip_comments(tokens, operand + 1);
-        }
-        if operand >= tokens.len() || tokens[operand].kind != TokKind::Number {
-            continue;
-        }
-        let lit = tokens[operand].text;
-        if lit != "0" && lit != "1" {
-            continue;
-        }
-
-        out.push(finding(
-            "antipattern.count_for_existence",
-            Severity::Warning,
-            "COUNT(*) in a subquery compared to 0/1 is being used only to test for existence — it counts every matching row before answering a yes/no question.",
-            Some(make_loc(t)),
-            Some(
-                "Use EXISTS, which can stop at the first matching row:\n  \
-                 -- before\n  \
-                 IF (SELECT COUNT(*) FROM Orders WHERE CustomerId = @c) > 0 ...\n  \
-                 -- after\n  \
-                 IF EXISTS (SELECT 1 FROM Orders WHERE CustomerId = @c) ...\n\n  \
-                 -- before (= 0 means \"none\")\n  \
-                 WHERE (SELECT COUNT(*) FROM Orders o WHERE o.CustomerId = c.Id) = 0\n  \
-                 -- after\n  \
-                 WHERE NOT EXISTS (SELECT 1 FROM Orders o WHERE o.CustomerId = c.Id)"
-                    .into(),
-            ),
-        ));
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// (c) Correlated scalar subquery in the SELECT list.
-//
-//   SELECT c.Id,
-//          (SELECT MAX(o.Total) FROM Orders o WHERE o.CustomerId = c.Id) AS LastTotal
-//   FROM Customers c;
-//
-// A scalar subquery in the projection that has its own WHERE is almost always
-// correlated and runs once per outer row. We fire only when:
-//   * we are inside the projection (between SELECT and the matching FROM),
-//   * we find `( SELECT ... )` whose body contains a top-level WHERE,
-//   * the subquery is NOT itself an EXISTS/IN argument (those are handled
-//     elsewhere / are legitimate),
-//   * the subquery returns a single value (no top-level comma in the projection
-//     of the inner SELECT — i.e. it really is scalar).
-// To stay conservative we require the inner SELECT's first projected item to be
-// a single expression (no top-level comma before its FROM).
-// ---------------------------------------------------------------------------
-pub fn correlated_scalar_subquery_in_select(ctx: &RuleCtx) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let tokens = ctx.tokens;
-    let mut i = 0;
-
-    while i < tokens.len() {
-        if !is_word(&tokens[i], "SELECT") {
-            i += 1;
-            continue;
-        }
-        let select_idx = i;
-        // Locate the matching top-level FROM for this SELECT (depth 0 relative to
-        // the SELECT). The projection is (select_idx, from_idx).
-        let mut depth = 0i32;
-        let mut k = select_idx + 1;
-        let mut from_idx: Option<usize> = None;
-        while k < tokens.len() {
-            match tokens[k].text {
-                "(" => depth += 1,
-                ")" => {
-                    depth -= 1;
-                    if depth < 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    if depth == 0 {
-                        if is_word(&tokens[k], "FROM") {
-                            from_idx = Some(k);
-                            break;
-                        }
-                        // A bare SELECT with no FROM (e.g. SELECT @x = ...) — stop.
-                        if tokens[k].text == ";" {
-                            break;
-                        }
-                    }
-                }
-            }
-            k += 1;
-        }
-        let Some(from_i) = from_idx else {
-            i = select_idx + 1;
-            continue;
-        };
-
-        // Scan the projection for `( SELECT ... )` subqueries at depth 0.
-        let mut d = 0i32;
-        let mut p = select_idx + 1;
-        while p < from_i {
-            if tokens[p].text == "(" {
-                if d == 0 {
-                    // Is this a subquery? next non-comment token == SELECT.
-                    let inner = skip_comments(tokens, p + 1);
-                    if inner < from_i && is_word(&tokens[inner], "SELECT") {
-                        if let Some(close) = matching_paren(tokens, p) {
-                            // Guard: not an argument to EXISTS/IN/ANY/ALL/SOME — the
-                            // token before the '(' would be that keyword.
-                            let before = {
-                                let mut b = p;
-                                while b > select_idx + 1
-                                    && tokens[b - 1].kind == TokKind::Comment
-                                {
-                                    b -= 1;
-                                }
-                                b.checked_sub(1)
-                            };
-                            let arg_of_set_op = before
-                                .map(|bi| {
-                                    is_word(&tokens[bi], "EXISTS")
-                                        || is_word(&tokens[bi], "IN")
-                                        || is_word(&tokens[bi], "ANY")
-                                        || is_word(&tokens[bi], "ALL")
-                                        || is_word(&tokens[bi], "SOME")
-                                })
-                                .unwrap_or(false);
-
-                            if !arg_of_set_op
-                                && inner_is_scalar_with_where(tokens, inner, close)
-                            {
-                                out.push(finding(
-                                    "antipattern.correlated_scalar_subquery_in_select",
-                                    Severity::Warning,
-                                    "Correlated scalar subquery in the SELECT list — it is re-executed once per outer row, turning a set operation into a row-by-row loop.",
-                                    Some(make_loc(&tokens[p])),
-                                    Some(
-                                        "Rewrite as a JOIN, an OUTER APPLY, or a window function so the work happens once over the set:\n  \
-                                         -- before\n  \
-                                         SELECT c.Id,\n         \
-                                         (SELECT MAX(o.Total) FROM Orders o WHERE o.CustomerId = c.Id) AS MaxTotal\n  \
-                                         FROM Customers c;\n  \
-                                         -- after (OUTER APPLY keeps NULLs for customers with no orders)\n  \
-                                         SELECT c.Id, x.MaxTotal\n  \
-                                         FROM Customers c\n  \
-                                         OUTER APPLY (SELECT MAX(o.Total) AS MaxTotal FROM Orders o WHERE o.CustomerId = c.Id) x;\n  \
-                                         -- or as a window function when aggregating a joined set:\n  \
-                                         SELECT c.Id, MAX(o.Total) OVER (PARTITION BY c.Id) AS MaxTotal\n  \
-                                         FROM Customers c LEFT JOIN Orders o ON o.CustomerId = c.Id;"
-                                            .into(),
-                                    ),
-                                ));
-                            }
-                            // Skip past this subquery so nested ones aren't double-counted
-                            // for this projection-level pass.
-                            p = close + 1;
-                            continue;
-                        }
-                    }
-                }
-                d += 1;
-            } else if tokens[p].text == ")" {
-                d -= 1;
-            }
-            p += 1;
-        }
-
-        i = from_i + 1;
-    }
-    out
-}
-
-/// True if the inner SELECT (whose SELECT keyword is at `select_at`, closing
-/// paren of the subquery at `close`) projects a single scalar value AND has a
-/// top-level WHERE clause (strong correlation signal). Conservative: requires
-/// no top-level comma in the inner projection (so it really returns one column).
-fn inner_is_scalar_with_where(tokens: &[Token<'_>], select_at: usize, close: usize) -> bool {
-    // Find the inner top-level FROM.
-    let mut depth = 0i32;
-    let mut k = select_at + 1;
-    let mut inner_from: Option<usize> = None;
-    while k < close {
-        match tokens[k].text {
-            "(" => depth += 1,
-            ")" => depth -= 1,
-            _ => {
-                if depth == 0 && is_word(&tokens[k], "FROM") {
-                    inner_from = Some(k);
-                    break;
-                }
-            }
-        }
-        k += 1;
-    }
-    let Some(from_i) = inner_from else { return false };
-
-    // No top-level comma in the inner projection => single column => scalar.
-    let mut d = 0i32;
-    let mut j = select_at + 1;
-    while j < from_i {
-        match tokens[j].text {
-            "(" => d += 1,
-            ")" => d -= 1,
-            "," if d == 0 => return false,
-            _ => {}
-        }
-        j += 1;
-    }
-
-    // Require a top-level WHERE between FROM and close (correlation signal).
-    let mut d2 = 0i32;
-    let mut m = from_i + 1;
-    while m < close {
-        match tokens[m].text {
-            "(" => d2 += 1,
-            ")" => d2 -= 1,
-            _ => {
-                if d2 == 0 && is_word(&tokens[m], "WHERE") {
-                    return true;
-                }
-            }
-        }
-        m += 1;
-    }
-    false
-}
-
-// ---------------------------------------------------------------------------
-// (d) UNION where UNION ALL was likely intended.
-//
-// Plain UNION de-duplicates the combined result, which forces a distinct sort /
-// hash even when the inputs can't overlap. If duplicates are impossible (or
-// acceptable), UNION ALL is cheaper. Advisory only — we cannot prove duplicates
-// are impossible from text, so this is Info. We only flag UNION that is NOT
-// followed by ALL.
-// ---------------------------------------------------------------------------
-pub fn union_maybe_union_all(ctx: &RuleCtx) -> Vec<Finding> {
+/// `UNION` (without `ALL`) forces an implicit DISTINCT/sort to dedupe the
+/// combined result. When the inputs are already disjoint (very common) that is
+/// pure wasted work and `UNION ALL` is both faster and clearer.
+///
+/// Guards:
+/// * `[UNION]` / `"UNION"` delimited identifiers are *not* the keyword (the
+///   shared `is_word` would wrongly match them — see [`kw`]).
+/// * `UNION ALL` is already correct and never fires.
+pub fn union_should_be_union_all(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
-        if !is_word(t, "UNION") {
+        if !kw(t, "UNION") {
             continue;
         }
+        // Next non-comment token: if it's ALL, this is already UNION ALL.
         let n = skip_comments(tokens, i + 1);
-        let next_is_all = n < tokens.len() && is_word(&tokens[n], "ALL");
-        if next_is_all {
+        if tokens.get(n).map(|x| kw(x, "ALL")).unwrap_or(false) {
             continue;
         }
         out.push(finding(
             "antipattern.union_should_be_union_all",
             Severity::Info,
-            "Plain UNION removes duplicates across both inputs, which adds a distinct sort/hash. If the inputs can't overlap (or duplicates are acceptable), UNION ALL avoids that cost.",
+            "UNION (without ALL) performs an implicit DISTINCT — an extra sort/hash to remove duplicate rows across the inputs. When the branches are already disjoint this is wasted work.",
             Some(make_loc(t)),
-            Some(
-                "Confirm whether duplicate elimination is actually needed:\n  \
-                 -- before\n  \
-                 SELECT Id FROM ActiveUsers\n  \
-                 UNION\n  \
-                 SELECT Id FROM ArchivedUsers;\n  \
-                 -- after (when the two sets are disjoint, or dups are fine)\n  \
-                 SELECT Id FROM ActiveUsers\n  \
-                 UNION ALL\n  \
-                 SELECT Id FROM ArchivedUsers;\n  \
-                 Keep plain UNION only when you genuinely must de-duplicate overlapping rows."
-                    .into(),
-            ),
+            Some("If the combined inputs cannot produce duplicate rows, use UNION ALL — it skips the dedupe pass and is both faster and clearer. Reserve plain UNION for when you genuinely need cross-branch de-duplication.".into()),
         ));
     }
     out
 }
 
 // ---------------------------------------------------------------------------
-// (e) SELECT DISTINCT over a wide column list — a wrong-grain smell.
-//
-// DISTINCT spanning many columns is frequently a band-aid over a join that
-// fans out rows (a missing/incorrect join predicate). It also forces a sort/hash
-// over every projected column. We fire only when DISTINCT precedes a projection
-// with >= 5 top-level columns, and there is a FROM (so it's a real query). Info.
+// COUNT(*) used as an existence test
 // ---------------------------------------------------------------------------
+
+/// `IF (SELECT COUNT(*) …) > 0` (and equivalents) makes the engine count *every*
+/// matching row just to answer a yes/no question. `EXISTS` short-circuits on the
+/// first match.
+///
+/// Crucially we ONLY fire on operator/literal combinations that collapse to a
+/// boolean existence boundary:
+///   * "at least one":  `> 0`, `>= 1`, `<> 0`, `!= 0`
+///   * "none":          `= 0`, `< 1`, `<= 0`
+/// We deliberately do NOT fire on `= 1` (nor `<= 1`, `< 2`), which assert a
+/// specific *cardinality* (exactly/at-most one). `EXISTS` cannot express those,
+/// so the rewrite would silently change behavior — a real false positive.
+pub fn count_for_existence(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        // Look for COUNT ( * )
+        if !kw(t, "COUNT") {
+            continue;
+        }
+        let lp = skip_comments(tokens, i + 1);
+        if tokens.get(lp).map(|x| x.text == "(").unwrap_or(false) == false {
+            continue;
+        }
+        let star = skip_comments(tokens, lp + 1);
+        if tokens.get(star).map(|x| x.text == "*").unwrap_or(false) == false {
+            continue;
+        }
+        let rp = skip_comments(tokens, star + 1);
+        if tokens.get(rp).map(|x| x.text == ")").unwrap_or(false) == false {
+            continue;
+        }
+
+        // The comparison applies to the COUNT scalar, which is frequently
+        // wrapped in a scalar subquery: `(SELECT COUNT(*) FROM … WHERE …) > 0`.
+        // Walk forward from COUNT's `)` to the position just after the wrapping
+        // subquery closes (paren depth returns below the COUNT level), then read
+        // the comparison operator + literal. If COUNT(*) is bare (`COUNT(*) > 0`)
+        // the operator sits immediately after `rp`, depth never dips, so we also
+        // try `rp + 1` directly.
+        let after = forward_compare_pos(tokens, rp);
+        if let Some((op, lit)) = read_op_then_number(tokens, after) {
+            if is_existence_boundary(&op, &lit) {
+                push_count_existence(&mut out, t);
+                continue;
+            }
+        }
+        // Reverse form: `<number> <op> COUNT(*)`. Walk back from COUNT over the
+        // operator run to a leading number literal.
+        if let Some((op, lit)) = read_number_then_op_before(tokens, i) {
+            // Flip operator orientation: `0 < COUNT(*)` ≡ `COUNT(*) > 0`.
+            let flipped = flip_op(&op);
+            if is_existence_boundary(&flipped, &lit) {
+                push_count_existence(&mut out, t);
+                continue;
+            }
+        }
+    }
+    out
+}
+
+fn push_count_existence(out: &mut Vec<Finding>, t: &Token) {
+    out.push(finding(
+        "antipattern.count_for_existence",
+        Severity::Info,
+        "COUNT(*) compared to an existence boundary forces the engine to count every matching row just to answer a yes/no question.",
+        Some(make_loc(t)),
+        Some("Use IF EXISTS (SELECT 1 FROM …) / WHERE EXISTS (…). EXISTS short-circuits on the first matching row instead of scanning the whole set to build a count.".into()),
+    ));
+}
+
+/// Given the index of the `)` that closes `COUNT(*)`, return the token index at
+/// which the existence comparison should be read.
+///
+/// * Bare `COUNT(*) > 0` — the operator sits at `count_rp + 1`.
+/// * Wrapped `(SELECT COUNT(*) FROM … WHERE …) > 0` — we step over the rest of
+///   the enclosing scalar subquery to the token just past its closing `)`.
+///
+/// We scan forward tracking paren depth relative to `count_rp`. The first time
+/// depth drops below 0 (an unmatched `)` closing a paren opened *before* COUNT)
+/// the wrapping subquery has closed; the comparison follows it. If we hit a
+/// statement boundary or a comparison operator first, return that position.
+fn forward_compare_pos(tokens: &[Token], count_rp: usize) -> usize {
+    // Bare form: the operator is immediately after COUNT(*)'s `)`.
+    let next = skip_comments(tokens, count_rp + 1);
+    if tokens
+        .get(next)
+        .map(|tk| tk.kind == TokKind::Punct && matches!(tk.text, ">" | "<" | "=" | "!"))
+        .unwrap_or(false)
+    {
+        return next;
+    }
+
+    // Wrapped form: step over the rest of the enclosing scalar subquery to the
+    // token just past its closing `)`. Depth starts at 0; the first unmatched
+    // `)` (depth would go negative) closes the wrapping subquery. Operators seen
+    // before that belong to the subquery's own WHERE and must be ignored.
+    let mut j = count_rp + 1;
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        match tokens[j].text {
+            "(" => depth += 1,
+            ")" => {
+                if depth == 0 {
+                    return skip_comments(tokens, j + 1);
+                }
+                depth -= 1;
+            }
+            ";" if depth == 0 => return j,
+            _ => {}
+        }
+        j += 1;
+    }
+    count_rp + 1
+}
+
+/// Read a comparison operator run (`>`, `>=`, `<>`, `!=`, `=`, `<`, `<=`)
+/// starting at `start`, followed by a numeric literal. Returns the normalized
+/// operator string and the literal text.
+fn read_op_then_number(tokens: &[Token], start: usize) -> Option<(String, String)> {
+    let mut i = skip_comments(tokens, start);
+    let mut op = String::new();
+    let mut steps = 0;
+    while let Some(tk) = tokens.get(i) {
+        if tk.kind == TokKind::Comment {
+            i += 1;
+            continue;
+        }
+        if tk.kind == TokKind::Punct && matches!(tk.text, ">" | "<" | "=" | "!") {
+            op.push_str(tk.text);
+            i += 1;
+            steps += 1;
+            if steps > 2 {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    if op.is_empty() {
+        return None;
+    }
+    let ni = skip_comments(tokens, i);
+    let lit = tokens.get(ni)?;
+    if lit.kind != TokKind::Number {
+        return None;
+    }
+    Some((op, lit.text.to_string()))
+}
+
+/// For the reverse form `<number> <op> COUNT(*)`: walk back from the COUNT index
+/// over the operator run to a leading numeric literal.
+fn read_number_then_op_before(tokens: &[Token], count_idx: usize) -> Option<(String, String)> {
+    let mut i = count_idx;
+    // back up over comments
+    let mut op = String::new();
+    let mut steps = 0;
+    loop {
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+        let tk = tokens.get(i)?;
+        if tk.kind == TokKind::Comment {
+            continue;
+        }
+        if tk.kind == TokKind::Punct && matches!(tk.text, ">" | "<" | "=" | "!") {
+            // operators read right-to-left; prepend
+            op.insert_str(0, tk.text);
+            steps += 1;
+            if steps > 2 {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    if op.is_empty() {
+        return None;
+    }
+    let lit = tokens.get(i)?;
+    if lit.kind != TokKind::Number {
+        return None;
+    }
+    Some((op, lit.text.to_string()))
+}
+
+/// Mirror a comparison operator (left/right operand swap).
+fn flip_op(op: &str) -> String {
+    match op {
+        ">" => "<",
+        "<" => ">",
+        ">=" => "<=",
+        "<=" => ">=",
+        other => other, // `=`, `<>`, `!=` are symmetric
+    }
+    .to_string()
+}
+
+/// True only for operator/literal combos that collapse to a yes/no existence
+/// boundary. Notably `= 1` is rejected (that's a cardinality assertion).
+fn is_existence_boundary(op: &str, lit: &str) -> bool {
+    let n: f64 = match lit.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    match op {
+        // "at least one"
+        ">" => n == 0.0,
+        ">=" => n == 1.0,
+        "<>" | "!=" => n == 0.0,
+        // "none"
+        "<" => n == 1.0,
+        "<=" => n == 0.0,
+        "=" => n == 0.0, // `= 0` is "none"; `= 1` deliberately excluded
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SELECT DISTINCT over many columns
+// ---------------------------------------------------------------------------
+
+/// A wide `SELECT DISTINCT` (5+ projected columns) is frequently a band-aid
+/// masking a JOIN that fans rows out — the author slaps DISTINCT on the result
+/// to collapse the duplicates instead of fixing the join cardinality.
+///
+/// Guard: only fire when the FROM clause is *multi-table* (contains a JOIN /
+/// APPLY / comma-separated table list). A wide DISTINCT over a single table is
+/// legitimate set-semantics de-duplication (staging / dimension dedup) and must
+/// not fire.
 pub fn distinct_many_columns(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    const MIN_COLS: usize = 5;
-
-    let mut i = 0;
-    while i < tokens.len() {
-        if !is_word(&tokens[i], "SELECT") {
-            i += 1;
+    for (i, t) in tokens.iter().enumerate() {
+        if !kw(t, "SELECT") {
             continue;
         }
         let d = skip_comments(tokens, i + 1);
-        if d >= tokens.len() || !is_word(&tokens[d], "DISTINCT") {
-            i += 1;
+        if !tokens.get(d).map(|x| kw(x, "DISTINCT")).unwrap_or(false) {
             continue;
         }
-        // Locate the matching top-level FROM for this SELECT.
+
+        // Count top-level (depth-0) commas in the projection, from after
+        // DISTINCT up to the matching FROM of this SELECT.
+        let mut j = d + 1;
         let mut depth = 0i32;
-        let mut k = d + 1;
+        let mut commas = 0usize;
         let mut from_idx: Option<usize> = None;
-        while k < tokens.len() {
-            match tokens[k].text {
+        while j < tokens.len() {
+            let tk = &tokens[j];
+            match tk.text {
                 "(" => depth += 1,
                 ")" => {
+                    if depth == 0 {
+                        break;
+                    }
                     depth -= 1;
-                    if depth < 0 {
+                }
+                ";" if depth == 0 => break,
+                "," if depth == 0 => commas += 1,
+                _ => {
+                    if depth == 0 && kw(tk, "FROM") {
+                        from_idx = Some(j);
                         break;
                     }
                 }
-                _ => {
+            }
+            j += 1;
+        }
+        let cols = commas + 1; // N commas → N+1 columns
+        if cols < 5 {
+            continue;
+        }
+        let Some(from_idx) = from_idx else { continue };
+
+        // Inspect the FROM clause: is it multi-table?
+        if from_clause_is_multi_table(tokens, from_idx) {
+            out.push(finding(
+                "antipattern.distinct_many_columns",
+                Severity::Info,
+                format!("SELECT DISTINCT over {cols} columns combined with a multi-table FROM is often a band-aid hiding a join that fans rows out — DISTINCT then re-collapses the duplicates with a sort/hash."),
+                Some(make_loc(t)),
+                Some("Check whether a join is multiplying rows. Prefer fixing the join (e.g. EXISTS / a properly-keyed join) so the result is naturally unique, instead of masking duplicates with a wide DISTINCT.".into()),
+            ));
+        }
+    }
+    out
+}
+
+/// Starting at the FROM token index, decide whether the FROM clause lists more
+/// than one table source (JOIN / APPLY / a top-level comma between table refs)
+/// before the statement terminator.
+fn from_clause_is_multi_table(tokens: &[Token], from_idx: usize) -> bool {
+    let mut j = from_idx + 1;
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        let tk = &tokens[j];
+        match tk.text {
+            "(" => depth += 1,
+            ")" => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ";" if depth == 0 => break,
+            "," if depth == 0 => return true, // old-style comma join
+            _ => {
+                if depth == 0 {
+                    // Stop scanning once we leave the FROM clause.
+                    if kw(tk, "WHERE")
+                        || kw(tk, "GROUP")
+                        || kw(tk, "ORDER")
+                        || kw(tk, "HAVING")
+                        || kw(tk, "UNION")
+                        || kw(tk, "OPTION")
+                    {
+                        break;
+                    }
+                    if kw(tk, "JOIN") || kw(tk, "APPLY") {
+                        return true;
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Correlated scalar subquery in the SELECT list
+// ---------------------------------------------------------------------------
+
+/// A *correlated* scalar subquery in the projection re-executes once per output
+/// row of the outer query (RBAR). The fix is usually `OUTER APPLY` / a join.
+///
+/// The hard part is distinguishing a *correlated* subquery (references an outer
+/// alias → per-row re-execution) from an *uncorrelated* one (filters only on
+/// parameters / constants / its own columns → evaluated once and cached). Only
+/// the former is a problem. We fire ONLY when the inner WHERE contains a
+/// qualified `<alias>.<column>` reference whose leading alias is NOT a table
+/// source declared inside the subquery's own FROM — i.e. it resolves to the
+/// outer scope.
+pub fn correlated_scalar_subquery_in_select(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+
+    // Walk the projection region of each SELECT (between SELECT and its FROM)
+    // looking for `( SELECT … )` scalar subqueries.
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if !kw(t, "SELECT") {
+            i += 1;
+            continue;
+        }
+        // Find the projection's matching top-level FROM (end of the projection).
+        let mut j = i + 1;
+        let mut depth = 0i32;
+        let mut proj_end = tokens.len();
+        while j < tokens.len() {
+            let tk = &tokens[j];
+            match tk.text {
+                "(" => depth += 1,
+                ")" => {
                     if depth == 0 {
-                        if is_word(&tokens[k], "FROM") {
-                            from_idx = Some(k);
-                            break;
+                        proj_end = j;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                ";" if depth == 0 => {
+                    proj_end = j;
+                    break;
+                }
+                _ => {
+                    if depth == 0 && kw(tk, "FROM") {
+                        proj_end = j;
+                        break;
+                    }
+                }
+            }
+            j += 1;
+        }
+
+        // Scan the projection [i+1, proj_end) for `( SELECT` scalar subqueries.
+        let mut k = i + 1;
+        while k < proj_end {
+            let tk = &tokens[k];
+            if tk.text == "(" {
+                let inner = skip_comments(tokens, k + 1);
+                if tokens.get(inner).map(|x| kw(x, "SELECT")).unwrap_or(false) {
+                    // Find the matching close paren for this subquery.
+                    if let Some(close) = matching_paren(tokens, k) {
+                        if subquery_is_correlated(tokens, inner, close) {
+                            out.push(finding(
+                                "antipattern.correlated_scalar_subquery_in_select",
+                                Severity::Warning,
+                                "A correlated scalar subquery in the SELECT list re-executes once per output row of the outer query (RBAR) — its filter references an outer-query alias.",
+                                Some(make_loc(&tokens[inner])),
+                                Some("Rewrite as OUTER APPLY (or a LEFT JOIN to a pre-aggregated derived table) so the engine evaluates the lookup set-based, once, instead of row-by-row.".into()),
+                            ));
                         }
-                        if tokens[k].text == ";" {
-                            break;
-                        }
+                        // Skip past this subquery so we don't double-scan nested ones.
+                        k = close + 1;
+                        continue;
                     }
                 }
             }
             k += 1;
         }
-        let Some(from_i) = from_idx else {
-            i = d + 1;
-            continue;
-        };
 
-        // Count top-level commas in the projection (cols = commas + 1).
-        let mut dd = 0i32;
-        let mut commas = 0usize;
-        let mut p = d + 1;
-        while p < from_i {
-            match tokens[p].text {
-                "(" => dd += 1,
-                ")" => dd -= 1,
-                "," if dd == 0 => commas += 1,
-                _ => {}
-            }
-            p += 1;
-        }
-        let cols = commas + 1;
-        if cols >= MIN_COLS {
-            out.push(finding(
-                "antipattern.distinct_many_columns",
-                Severity::Info,
-                format!(
-                    "SELECT DISTINCT over {} columns — wide DISTINCT is often a band-aid for a join that fans out rows, and it forces a sort/hash over every projected column.",
-                    cols
-                ),
-                Some(make_loc(&tokens[d])),
-                Some(
-                    "Verify the join grain before reaching for DISTINCT:\n  \
-                     -- smell: DISTINCT hides a one-to-many join blow-up\n  \
-                     SELECT DISTINCT c.Id, c.Name, c.City, c.Region, c.Country\n  \
-                     FROM Customers c JOIN Orders o ON o.CustomerId = c.Id;\n  \
-                     -- fix: aggregate or use EXISTS so the grain stays at one row per customer\n  \
-                     SELECT c.Id, c.Name, c.City, c.Region, c.Country\n  \
-                     FROM Customers c\n  \
-                     WHERE EXISTS (SELECT 1 FROM Orders o WHERE o.CustomerId = c.Id);\n  \
-                     If DISTINCT is genuinely required (true set semantics), keep it — but confirm the duplicates are real."
-                        .into(),
-                ),
-            ));
-        }
-
-        i = from_i + 1;
+        i = proj_end.max(i + 1);
     }
     out
 }
 
-// ---------------------------------------------------------------------------
+/// Index of the `)` matching the `(` at `open`.
+fn matching_paren(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut j = open;
+    while j < tokens.len() {
+        match tokens[j].text {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// A scalar subquery spanning tokens `(inner_select_idx .. close)` is considered
+/// *correlated* iff its (top-level) WHERE contains a qualified `<a>.<b>`
+/// reference whose leading identifier `a` is NOT a table source / alias declared
+/// inside this subquery's own FROM clause. Such a reference must bind to the
+/// outer scope, which is the definition of correlation.
+fn subquery_is_correlated(tokens: &[Token], inner_select_idx: usize, close: usize) -> bool {
+    // 1. Collect the alias/table names introduced by THIS subquery's FROM/JOINs.
+    let mut local: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut where_idx: Option<usize> = None;
+    let mut depth = 0i32;
+    let mut j = inner_select_idx + 1;
+    while j < close {
+        let tk = &tokens[j];
+        match tk.text {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ => {
+                if depth == 0 {
+                    if kw(tk, "FROM") || kw(tk, "JOIN") || kw(tk, "APPLY") {
+                        // table name immediately follows; possibly schema.table
+                        collect_table_and_alias(tokens, j, close, &mut local);
+                    } else if kw(tk, "WHERE") {
+                        where_idx = Some(j);
+                        break;
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+
+    let Some(where_idx) = where_idx else {
+        // No WHERE → cannot be a per-row correlated filter we care about.
+        return false;
+    };
+
+    // 2. Scan the WHERE region [where_idx+1, close) for a qualified reference
+    //    `<ident> . <ident>` whose leading ident is not local.
+    let mut depth = 0i32;
+    let mut k = where_idx + 1;
+    while k < close {
+        let tk = &tokens[k];
+        match tk.text {
+            "(" => depth += 1,
+            ")" => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        // qualified ref: Word '.' Word, where the leading Word is an alias
+        if tk.kind == TokKind::Word
+            && !tk.text.starts_with('@')
+            && !tk.text.starts_with('#')
+        {
+            let dot = tokens.get(k + 1);
+            let col = tokens.get(k + 2);
+            if dot.map(|d| d.text == ".").unwrap_or(false)
+                && col.map(|c| c.kind == TokKind::Word).unwrap_or(false)
+            {
+                let alias = ident_text(tk).to_ascii_lowercase();
+                if !local.contains(&alias) {
+                    return true;
+                }
+            }
+        }
+        k += 1;
+    }
+    false
+}
+
+/// After a FROM/JOIN/APPLY keyword at `kw_idx`, record the table name and its
+/// alias (the local correlation names) into `local`.
+fn collect_table_and_alias(
+    tokens: &[Token],
+    kw_idx: usize,
+    close: usize,
+    local: &mut std::collections::HashSet<String>,
+) {
+    let mut p = skip_comments(tokens, kw_idx + 1);
+    if p >= close {
+        return;
+    }
+    // table reference: [schema .] name  (possibly delimited)
+    if tokens[p].kind != TokKind::Word {
+        return;
+    }
+    // consume schema.name chain
+    let mut last_name_idx = p;
+    loop {
+        let dot = p + 1;
+        let nxt = p + 2;
+        if tokens.get(dot).map(|d| d.text == ".").unwrap_or(false)
+            && tokens.get(nxt).map(|n| n.kind == TokKind::Word).unwrap_or(false)
+        {
+            p = nxt;
+            last_name_idx = p;
+        } else {
+            break;
+        }
+    }
+    // base table name is also a usable correlation name
+    local.insert(ident_text(&tokens[last_name_idx]).to_ascii_lowercase());
+
+    // optional alias: [AS] <ident>
+    let mut a = skip_comments(tokens, last_name_idx + 1);
+    if a < close && tokens[a].kind == TokKind::Word && kw(&tokens[a], "AS") {
+        a = skip_comments(tokens, a + 1);
+    }
+    if a < close
+        && tokens[a].kind == TokKind::Word
+        && !is_clause_kw(&tokens[a])
+        && !tokens[a].text.starts_with('@')
+    {
+        local.insert(ident_text(&tokens[a]).to_ascii_lowercase());
+    }
+}
+
+fn is_clause_kw(t: &Token) -> bool {
+    kw(t, "WHERE")
+        || kw(t, "GROUP")
+        || kw(t, "ORDER")
+        || kw(t, "HAVING")
+        || kw(t, "JOIN")
+        || kw(t, "INNER")
+        || kw(t, "LEFT")
+        || kw(t, "RIGHT")
+        || kw(t, "FULL")
+        || kw(t, "CROSS")
+        || kw(t, "OUTER")
+        || kw(t, "ON")
+        || kw(t, "APPLY")
+        || kw(t, "UNION")
+        || kw(t, "OPTION")
+}
+
+// ===========================================================================
 // Tests
-// ---------------------------------------------------------------------------
+// ===========================================================================
 #[cfg(test)]
 mod tests {
-    use crate::tokens::tokenize;
-    use crate::{Engine, Severity};
+    use crate::{analyze, AnalyzeInput};
+    use std::collections::HashSet;
 
-    fn run(sql: &str) -> Vec<crate::findings::Finding> {
-        let tokens = tokenize(sql);
-        let ctx = super::RuleCtx {
-            src: sql,
-            tokens: &tokens,
+    fn fired(sql: &str) -> HashSet<String> {
+        let input = AnalyzeInput {
+            sql: Some(sql.to_string()),
             server_version: Some(2025),
-            engine: Engine::SqlServer,
+            ..Default::default()
         };
-        let mut out = Vec::new();
-        out.extend(super::count_for_existence(&ctx));
-        out.extend(super::correlated_scalar_subquery_in_select(&ctx));
-        out.extend(super::union_maybe_union_all(&ctx));
-        out.extend(super::distinct_many_columns(&ctx));
-        out
+        analyze(&input)
+            .findings
+            .into_iter()
+            .map(|f| f.rule.0)
+            .collect()
     }
 
-    fn fired(sql: &str, id: &str) -> bool {
-        run(sql).iter().any(|f| f.rule.0 == id)
-    }
+    // -- union_should_be_union_all --------------------------------------
 
-    fn loc_set(sql: &str, id: &str) -> bool {
-        run(sql)
-            .iter()
-            .filter(|f| f.rule.0 == id)
-            .all(|f| f.location.is_some())
-            && fired(sql, id)
-    }
-
-    // ---- (b) count_for_existence ----
-
+    /// FP: a delimited identifier literally named `[UNION]` must NOT be treated
+    /// as the UNION keyword.
     #[test]
-    fn count_for_existence_fires_if_count_gt_zero() {
-        let sql = "IF (SELECT COUNT(*) FROM Orders WHERE CustomerId = @c) > 0 SET @x = 1;";
-        assert!(fired(sql, "antipattern.count_for_existence"));
-        assert!(loc_set(sql, "antipattern.count_for_existence"));
-        assert_eq!(
-            run(sql)
-                .iter()
-                .find(|f| f.rule.0 == "antipattern.count_for_existence")
-                .unwrap()
-                .severity,
-            Severity::Warning
+    fn fp_quoted_union_identifier_does_not_fire() {
+        let f = fired("SELECT [UNION] FROM dbo.Settings;");
+        assert!(
+            !f.contains("antipattern.union_should_be_union_all"),
+            "[UNION] is an identifier, not the keyword: {f:?}"
         );
     }
 
+    /// Positive: a real UNION (no ALL) between two SELECTs still fires.
     #[test]
-    fn count_for_existence_fires_when_eq_zero() {
-        let sql = "SELECT c.Id FROM Customers c WHERE (SELECT COUNT(*) FROM Orders o WHERE o.CustomerId = c.Id) = 0;";
-        assert!(fired(sql, "antipattern.count_for_existence"));
+    fn pos_plain_union_fires() {
+        let f = fired("SELECT a FROM t1 UNION SELECT a FROM t2;");
+        assert!(
+            f.contains("antipattern.union_should_be_union_all"),
+            "plain UNION should fire: {f:?}"
+        );
     }
 
+    /// UNION ALL is already correct and must not fire.
     #[test]
-    fn count_for_existence_fires_with_ge_two_token_op() {
-        // The lexer emits ">=" as two Punct tokens; the rule must still match.
-        let sql = "IF (SELECT COUNT(*) FROM Orders WHERE CustomerId = @c) >= 1 SET @x = 1;";
-        assert!(fired(sql, "antipattern.count_for_existence"));
+    fn neg_union_all_does_not_fire() {
+        let f = fired("SELECT a FROM t1 UNION ALL SELECT a FROM t2;");
+        assert!(
+            !f.contains("antipattern.union_should_be_union_all"),
+            "UNION ALL must not fire: {f:?}"
+        );
     }
 
+    // -- count_for_existence --------------------------------------------
+
+    /// FP: `COUNT(*) = 1` is a cardinality check ("exactly one"), NOT an
+    /// existence test — EXISTS cannot replace it, so the rule must stay silent.
     #[test]
-    fn count_for_existence_negative_having_count() {
-        // Legitimate grouping filter, not a subquery — must NOT fire.
-        let sql = "SELECT CustomerId FROM Orders GROUP BY CustomerId HAVING COUNT(*) > 0;";
-        assert!(!fired(sql, "antipattern.count_for_existence"));
+    fn fp_count_exactly_one_does_not_fire() {
+        let f = fired("IF (SELECT COUNT(*) FROM Users WHERE Email = @e) = 1 SET @ok = 1;");
+        assert!(
+            !f.contains("antipattern.count_for_existence"),
+            "COUNT(*) = 1 is a cardinality check, must not fire: {f:?}"
+        );
     }
 
+    /// Positive: `COUNT(*) > 0` is a genuine existence test.
     #[test]
-    fn count_for_existence_negative_count_compared_to_threshold() {
-        // Counting against a real threshold (not 0/1) is genuine counting — must NOT fire.
-        let sql = "IF (SELECT COUNT(*) FROM Orders WHERE CustomerId = @c) > 5 SET @x = 1;";
-        assert!(!fired(sql, "antipattern.count_for_existence"));
+    fn pos_count_greater_than_zero_fires() {
+        let f = fired("IF (SELECT COUNT(*) FROM Users WHERE Email = @e) > 0 SET @ok = 1;");
+        assert!(
+            f.contains("antipattern.count_for_existence"),
+            "COUNT(*) > 0 should fire: {f:?}"
+        );
     }
 
+    /// Positive: `COUNT(*) = 0` ("none") is an existence test.
     #[test]
-    fn count_for_existence_negative_in_comment_and_string() {
-        let sql = "SELECT 'IF (SELECT COUNT(*) FROM t) > 0' AS s; -- (SELECT COUNT(*) FROM t) > 0";
-        assert!(!fired(sql, "antipattern.count_for_existence"));
+    fn pos_count_equals_zero_fires() {
+        let f = fired("IF (SELECT COUNT(*) FROM Users WHERE Active = 1) = 0 RETURN;");
+        assert!(
+            f.contains("antipattern.count_for_existence"),
+            "COUNT(*) = 0 should fire: {f:?}"
+        );
     }
 
-    // ---- (c) correlated_scalar_subquery_in_select ----
-
+    /// Positive: `COUNT(*) >= 1` ("at least one") is an existence test.
     #[test]
-    fn correlated_scalar_subquery_fires() {
-        let sql = "SELECT c.Id, (SELECT MAX(o.Total) FROM Orders o WHERE o.CustomerId = c.Id) AS MaxTotal FROM Customers c;";
-        assert!(fired(sql, "antipattern.correlated_scalar_subquery_in_select"));
-        assert!(loc_set(sql, "antipattern.correlated_scalar_subquery_in_select"));
+    fn pos_count_ge_one_fires() {
+        let f = fired("IF (SELECT COUNT(*) FROM Users WHERE Active = 1) >= 1 RETURN;");
+        assert!(
+            f.contains("antipattern.count_for_existence"),
+            "COUNT(*) >= 1 should fire: {f:?}"
+        );
     }
 
+    // -- distinct_many_columns ------------------------------------------
+
+    /// FP: a wide SELECT DISTINCT over a SINGLE table is legitimate dedup.
     #[test]
-    fn correlated_scalar_subquery_negative_no_where() {
-        // Uncorrelated scalar subquery (constant) — no WHERE, must NOT fire.
-        let sql = "SELECT c.Id, (SELECT MAX(Total) FROM Orders) AS GlobalMax FROM Customers c;";
-        assert!(!fired(sql, "antipattern.correlated_scalar_subquery_in_select"));
+    fn fp_distinct_single_table_dedup_does_not_fire() {
+        let f = fired("SELECT DISTINCT Year, Quarter, Month, Week, Day FROM CalendarStaging;");
+        assert!(
+            !f.contains("antipattern.distinct_many_columns"),
+            "single-table wide DISTINCT is legit dedup, must not fire: {f:?}"
+        );
     }
 
+    /// Positive: a wide DISTINCT over a multi-table JOIN fires.
     #[test]
-    fn correlated_scalar_subquery_negative_exists_in_where() {
-        // EXISTS subquery in WHERE (not the SELECT list) — must NOT fire.
-        let sql = "SELECT c.Id FROM Customers c WHERE EXISTS (SELECT 1 FROM Orders o WHERE o.CustomerId = c.Id);";
-        assert!(!fired(sql, "antipattern.correlated_scalar_subquery_in_select"));
+    fn pos_distinct_many_columns_with_join_fires() {
+        let f = fired(
+            "SELECT DISTINCT a.c1, a.c2, b.c3, b.c4, b.c5 FROM A a JOIN B b ON b.aid = a.id;",
+        );
+        assert!(
+            f.contains("antipattern.distinct_many_columns"),
+            "wide DISTINCT over a JOIN should fire: {f:?}"
+        );
     }
 
+    /// Negative: wide DISTINCT over a comma-join (old style) also fires (multi-table).
     #[test]
-    fn correlated_scalar_subquery_negative_in_subquery_in_where() {
-        // Subquery used in a FROM-side derived table, not the projection — must NOT fire.
-        let sql = "SELECT x.Id FROM (SELECT Id FROM Customers WHERE Active = 1) x;";
-        assert!(!fired(sql, "antipattern.correlated_scalar_subquery_in_select"));
+    fn pos_distinct_many_columns_comma_join_fires() {
+        let f = fired("SELECT DISTINCT a.c1, a.c2, b.c3, b.c4, b.c5 FROM A a, B b WHERE b.aid = a.id;");
+        assert!(
+            f.contains("antipattern.distinct_many_columns"),
+            "wide DISTINCT over comma-join should fire: {f:?}"
+        );
     }
 
-    // ---- (d) union_maybe_union_all ----
+    // -- correlated_scalar_subquery_in_select ---------------------------
 
+    /// FP: uncorrelated scalar subquery whose WHERE filters only on a parameter.
     #[test]
-    fn union_fires_without_all() {
-        let sql = "SELECT Id FROM A UNION SELECT Id FROM B;";
-        assert!(fired(sql, "antipattern.union_should_be_union_all"));
-        assert!(loc_set(sql, "antipattern.union_should_be_union_all"));
+    fn fp_uncorrelated_param_where_does_not_fire() {
+        let f = fired(
+            "SELECT u.Id, (SELECT MAX(Price) FROM Products WHERE CategoryId = @cat) AS MaxInCat FROM Users u;",
+        );
+        assert!(
+            !f.contains("antipattern.correlated_scalar_subquery_in_select"),
+            "param-filtered (uncorrelated) subquery must not fire: {f:?}"
+        );
     }
 
+    /// FP: uncorrelated, filtered on a constant literal.
     #[test]
-    fn union_negative_union_all() {
-        let sql = "SELECT Id FROM A UNION ALL SELECT Id FROM B;";
-        assert!(!fired(sql, "antipattern.union_should_be_union_all"));
+    fn fp_uncorrelated_const_where_does_not_fire() {
+        let f = fired(
+            "SELECT l.Id, (SELECT SUM(Amount) FROM Ledger WHERE PostedYear = 2025) AS Tot FROM Lines l;",
+        );
+        assert!(
+            !f.contains("antipattern.correlated_scalar_subquery_in_select"),
+            "constant-filtered (uncorrelated) subquery must not fire: {f:?}"
+        );
     }
 
+    /// FP: uncorrelated subquery whose only qualified ref is its OWN alias.
     #[test]
-    fn union_negative_in_string_literal() {
-        let sql = "SELECT 'this UNION that' AS note FROM A;";
-        assert!(!fired(sql, "antipattern.union_should_be_union_all"));
+    fn fp_uncorrelated_own_alias_does_not_fire() {
+        let f = fired(
+            "SELECT u.Id, (SELECT MAX(p.Price) FROM Products p WHERE p.CategoryId = 7) AS M FROM Users u;",
+        );
+        assert!(
+            !f.contains("antipattern.correlated_scalar_subquery_in_select"),
+            "subquery referencing only its own alias is uncorrelated: {f:?}"
+        );
     }
 
-    // ---- (e) distinct_many_columns ----
-
+    /// Positive: a genuinely correlated scalar subquery (references outer alias `u`).
     #[test]
-    fn distinct_many_columns_fires() {
-        let sql = "SELECT DISTINCT c.Id, c.Name, c.City, c.Region, c.Country FROM Customers c JOIN Orders o ON o.CustomerId = c.Id;";
-        assert!(fired(sql, "antipattern.distinct_many_columns"));
-        assert!(loc_set(sql, "antipattern.distinct_many_columns"));
-    }
-
-    #[test]
-    fn distinct_negative_few_columns() {
-        let sql = "SELECT DISTINCT City, Country FROM Customers;";
-        assert!(!fired(sql, "antipattern.distinct_many_columns"));
-    }
-
-    #[test]
-    fn distinct_negative_no_distinct() {
-        let sql = "SELECT c.Id, c.Name, c.City, c.Region, c.Country, c.Phone FROM Customers c;";
-        assert!(!fired(sql, "antipattern.distinct_many_columns"));
-    }
-
-    #[test]
-    fn distinct_negative_count_distinct_call() {
-        // DISTINCT inside an aggregate (COUNT(DISTINCT col)) is not SELECT DISTINCT — must NOT fire.
-        let sql = "SELECT COUNT(DISTINCT CustomerId), SUM(Total), MAX(Total), MIN(Total), AVG(Total) FROM Orders;";
-        assert!(!fired(sql, "antipattern.distinct_many_columns"));
+    fn pos_correlated_subquery_fires() {
+        let f = fired(
+            "SELECT u.Id, (SELECT MAX(o.Total) FROM Orders o WHERE o.UserId = u.Id) AS MaxOrder FROM Users u;",
+        );
+        assert!(
+            f.contains("antipattern.correlated_scalar_subquery_in_select"),
+            "correlated subquery (refs outer u.Id) should fire: {f:?}"
+        );
     }
 }

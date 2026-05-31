@@ -234,6 +234,22 @@ pub fn dbcc_shrink(ctx: &RuleCtx) -> Vec<Finding> {
             None
         };
         if let Some(cmd) = cmd {
+            // Don't flag the legitimate maintenance forms: SHRINKFILE (..., EMPTYFILE)
+            // (emptying a file before removing it) and (..., TRUNCATEONLY) (releasing
+            // free space at the end of the file without moving pages → no
+            // fragmentation). Scan this DBCC statement's arguments for either option.
+            let mut k = j + 1;
+            let mut benign = false;
+            while k < tokens.len() && tokens[k].text != ";" && !is_word(&tokens[k], "DBCC") {
+                if is_word(&tokens[k], "EMPTYFILE") || is_word(&tokens[k], "TRUNCATEONLY") {
+                    benign = true;
+                    break;
+                }
+                k += 1;
+            }
+            if benign {
+                continue;
+            }
             out.push(finding(
                 "config.dbcc_shrink",
                 Severity::Warning,

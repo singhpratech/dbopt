@@ -365,14 +365,15 @@ fn plain_column_at(tokens: &[Token<'_>], start: usize, end: usize) -> Option<Str
 /// column-to-column comparisons, and IN/EXISTS subqueries are ignored (not
 /// errors — just not modeled as seekable keys).
 fn parse_where_predicates(tokens: &[Token<'_>], start: usize, end: usize) -> (Vec<ColRef>, Vec<ColRef>) {
-    // Bail on any depth-0 OR — a disjunction can't be served by one B-tree seek.
-    let mut depth = 0i32;
+    // Bail on ANY OR, at ANY paren depth — a disjunction anywhere in the WHERE
+    // makes a single-seek-key recommendation unsound. A parenthesized OR-group
+    // (`A = 1 AND (B = 2 OR C = 3)`) is depth-1, so a depth-0-only scan would
+    // miss it and the conjunct splitter would silently truncate `(B = 2 OR C =
+    // 3)` to a bare `B = 2` equality, fabricating an index key on a column that
+    // only appears inside a disjunction. Scanning every depth closes that class.
     let mut k = start;
     while k < end {
-        let t = &tokens[k];
-        if t.text == "(" { depth += 1; }
-        else if t.text == ")" { depth -= 1; }
-        else if depth == 0 && is_word(t, "OR") { return (Vec::new(), Vec::new()); }
+        if is_word(&tokens[k], "OR") { return (Vec::new(), Vec::new()); }
         k += 1;
     }
 
@@ -381,7 +382,7 @@ fn parse_where_predicates(tokens: &[Token<'_>], start: usize, end: usize) -> (Ve
 
     // Split into depth-0 AND-separated conjuncts.
     let mut conj: Vec<(usize, usize)> = Vec::new();
-    depth = 0;
+    let mut depth = 0i32;
     let mut cstart = start;
     k = start;
     while k < end {
@@ -518,13 +519,61 @@ fn parse_simple_predicate(tokens: &[Token<'_>], start: usize, end: usize) -> Opt
         || (rt.kind == TokKind::Word && is_known_constant_fn(rt.text));
     if !rhs_ok { return None; }
 
+    // End-of-conjunct assertion: the matched `col <op> <value>` must consume the
+    // ENTIRE conjunct. Anything left over means this wasn't a clean atomic
+    // predicate — e.g. a parenthesized OR-leg (`(B = 2 OR C = 3)` unwrapped to
+    // `B = 2 OR C = 3`), an arithmetic RHS (`col = 1 + 2`), `col = @x OR ...`,
+    // or other trailing junk. In every such case the column is NOT a sound
+    // single-seek key, so we drop the predicate rather than truncate it.
+    let value_end = rhs_value_end(tokens, r, e);
+    if skip_comments(tokens, value_end) < e { return None; }
+
     Some((col, is_range))
+}
+
+/// Given the first token of an RHS value at `start`, return the index just past
+/// the complete value token(s). A bare literal / @param / single word is one
+/// token. `N'..'` is the `N` word followed by a String. A constant function
+/// like `GETDATE()` / `DATEADD(day,1,@x)` spans the word plus its balanced
+/// `( ... )` argument list.
+fn rhs_value_end(tokens: &[Token<'_>], start: usize, end: usize) -> usize {
+    let r = skip_comments(tokens, start);
+    if r >= end { return end; }
+    let rt = &tokens[r];
+    // N'...': consume the `N` then the adjacent String literal.
+    if rt.kind == TokKind::Word && rt.text.eq_ignore_ascii_case("N") {
+        let s = skip_comments(tokens, r + 1);
+        if s < end && tokens[s].kind == TokKind::String { return s + 1; }
+        return r + 1;
+    }
+    // A word that is immediately followed by '(' is a function call -> consume
+    // its balanced parenthesis group (e.g. GETDATE(), DATEADD(...)).
+    if rt.kind == TokKind::Word {
+        let lp = skip_comments(tokens, r + 1);
+        if lp < end && tokens[lp].text == "(" {
+            let mut d = 0i32;
+            let mut m = lp;
+            while m < end {
+                if tokens[m].text == "(" { d += 1; }
+                else if tokens[m].text == ")" { d -= 1; if d == 0 { return m + 1; } }
+                m += 1;
+            }
+            return end; // unbalanced -> treat as consumed to the conjunct end
+        }
+    }
+    // Plain single-token value (Number / String / @param / bare word).
+    r + 1
 }
 
 /// RHS function-ish words we accept as "a constant value" so e.g.
 /// `created < GETDATE()` is still modeled. Conservative allowlist.
+///
+/// NOTE: NULL is deliberately NOT here. `Col = NULL` is the constant UNKNOWN
+/// under SET ANSI_NULLS ON and matches zero rows, so recommending an index to
+/// accelerate a predicate that can never return a row is a false positive
+/// (it's a code smell handled by a sargability/ANSI_NULLS rule, not by us).
 fn is_known_constant_fn(w: &str) -> bool {
-    const FNS: &[&str] = &["GETDATE", "GETUTCDATE", "SYSDATETIME", "SYSUTCDATETIME", "NULL", "DATEADD"];
+    const FNS: &[&str] = &["GETDATE", "GETUTCDATE", "SYSDATETIME", "SYSUTCDATETIME", "DATEADD"];
     FNS.iter().any(|f| name_eq_ci(w, f))
 }
 
@@ -918,6 +967,97 @@ mod tests {
             "must not fire when FROM is a derived table");
     }
 
+    // ---- FP regressions: parenthesized OR-group inside an AND chain ----------
+    // A disjunction wrapped in parens is depth-1, so the old depth-0-only OR
+    // bail missed it; the conjunct splitter then truncated `(B = 2 OR C = 3)`
+    // to a bare `B = 2` and fabricated an index key on an OR-leg column. These
+    // are correct, idiomatic T-SQL (kitchen-sink / optional-parameter filters)
+    // and must NOT produce an index recommendation.
+
+    #[test]
+    fn missing_index_does_not_fire_on_parenthesized_or_in_and_chain() {
+        let sql = "SELECT Id FROM dbo.T WHERE A = 1 AND (B = 2 OR C = 3) AND D = 4;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire: B/C only appear inside a disjunction, not a sound seek key");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_bare_parenthesized_or() {
+        let sql = "SELECT Id FROM dbo.T WHERE (A = 1 OR B = 2);";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire on a single parenthesized OR group");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_double_parenthesized_or() {
+        let sql = "SELECT Id FROM dbo.T WHERE ((A = 1 OR B = 2));";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire on a doubly-parenthesized OR group");
+    }
+
+    #[test]
+    fn missing_index_does_not_key_on_or_leg_with_leading_equality() {
+        // The leading equality (Tenant) is sound, but the parenthesized OR must
+        // still bail the whole WHERE so we don't emit IX_T_Tenant_A on an OR leg.
+        let sql = "SELECT Id FROM dbo.T WHERE Tenant = 1 AND (A = 1 OR B = 2);";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire / must not key on an OR-leg column when an OR is present");
+    }
+
+    // ---- FP regression: optional-parameter idiom (@p IS NULL OR Col = @p) ----
+    #[test]
+    fn missing_index_does_not_fire_on_optional_parameter_pattern() {
+        let sql = "SELECT Id FROM dbo.T WHERE (@p IS NULL OR Col = @p);";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire on the optional-parameter OR idiom");
+    }
+
+    // ---- FP regression: Col = NULL is the constant UNKNOWN, never a seek key --
+    #[test]
+    fn missing_index_does_not_fire_on_equals_null() {
+        let sql = "SELECT Id FROM dbo.T WHERE Col = NULL;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not recommend an index for `= NULL` (matches zero rows under ANSI_NULLS)");
+    }
+
+    // ---- FP regression: trailing-junk RHS must not be read as a clean key -----
+    #[test]
+    fn missing_index_does_not_fire_on_arithmetic_rhs() {
+        // `col = 1 + 2` — the old code read `Col = 1` and dropped `+ 2`.
+        let sql = "SELECT Id FROM dbo.T WHERE Col = 1 + 2;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not truncate an arithmetic RHS to a bare equality key");
+    }
+
+    // ---- guard: the fixes must NOT kill genuine true positives ---------------
+    #[test]
+    fn missing_index_still_fires_on_clean_equality_after_fixes() {
+        let sql = "SELECT Id FROM dbo.T WHERE A = 1 AND B = 2 AND D = 4;";
+        let f = fired(sql, "index.missing_index_from_predicate")
+            .expect("a pure-AND equality chain must still produce a recommendation");
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("[A]") && rec.contains("[B]") && rec.contains("[D]"),
+            "all three equality columns belong in the key: {rec}");
+    }
+
+    #[test]
+    fn missing_index_still_fires_with_getdate_range_after_fixes() {
+        // The end-of-conjunct check must still accept a function-valued RHS.
+        let sql = "SELECT Id FROM dbo.T WHERE TenantId = 5 AND CreatedAt > GETDATE();";
+        let f = fired(sql, "index.missing_index_from_predicate")
+            .expect("GETDATE() is a legitimate runtime constant for a range predicate");
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("[TenantId]") && rec.contains("[CreatedAt]"),
+            "key must include both filter columns: {rec}");
+    }
+
+    #[test]
+    fn missing_index_still_fires_with_dateadd_range_after_fixes() {
+        let sql = "SELECT Id FROM dbo.T WHERE TenantId = 5 AND CreatedAt > DATEADD(day, -7, GETDATE());";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_some(),
+            "DATEADD(...) with a balanced arg list is still a valid range constant");
+    }
+
     // ---- rule (b): order_by_forces_sort -------------------------------------
 
     #[test]
@@ -981,5 +1121,17 @@ mod tests {
         let sql = "SELECT Id, A, B, C, D FROM dbo.T WHERE CreatedAt > '2026-01-01';";
         assert!(fired(sql, "index.key_lookup_risk").is_none(),
             "must not fire when the predicate is a range");
+    }
+
+    // ---- FP regression (same root cause as rule (a)): parenthesized OR -------
+    // The OR truncation made eq_cols=[A,B] and a wide understood projection,
+    // so key_lookup_risk emitted a covering index keyed on the OR-leg column B.
+    // With the WHERE-parse now bailing on any OR, eq_cols is empty and the rule
+    // correctly stays silent.
+    #[test]
+    fn key_lookup_does_not_fire_on_parenthesized_or() {
+        let sql = "SELECT Id, A, B, C FROM dbo.T WHERE A = 1 AND (B = 2 OR C = 3);";
+        assert!(fired(sql, "index.key_lookup_risk").is_none(),
+            "must not build a covering index keyed on an OR-leg column");
     }
 }

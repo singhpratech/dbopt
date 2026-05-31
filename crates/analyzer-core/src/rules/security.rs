@@ -436,14 +436,51 @@ pub fn execute_as_without_revert(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// True when the OPENROWSET/OPENDATASOURCE provider name is a file/document
+/// provider (Excel/Access/Jet/text) rather than a SQL login connection. These
+/// take a file-path provider string, never a login, so they carry no embedded
+/// credential — whitelist them like the BULK form.
+fn is_file_provider(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    // ACE/Jet are the Excel/Access/text-file OLE DB providers; their provider
+    // string is a file path, never a SQL login. (MSDASQL/ODBC is intentionally
+    // NOT whitelisted — it can carry a real DSN-less login connection string.)
+    n.starts_with("microsoft.ace.oledb") || n.starts_with("microsoft.jet.oledb")
+}
+
+/// A string literal is a credential connection string if it actually names a
+/// user/password key. We require the `=` so that a query body merely mentioning
+/// the word "password" (e.g. `WHERE name = 'password='` as a *separate* literal)
+/// is never confused with a real `PWD=…`/`Password=…` connection-string token.
+/// (Such query text is also excluded by argument position — see the caller —
+/// but this keeps the check honest on its own.)
+fn looks_like_inline_credential(inner: &str) -> bool {
+    let lc = inner.to_ascii_lowercase();
+    lc.contains("pwd=")
+        || lc.contains("password=")
+        || lc.contains("user id=")
+        || lc.contains("uid=")
+}
+
 /// `OPENROWSET( … )` / `OPENDATASOURCE( … )` carrying an inline SQL login +
 /// password. These ad-hoc connectors embed credentials in plaintext in the
-/// query (and the plan cache). We fire when, inside the call's parens, we see a
-/// provider-style connection string OR a bare `'login';'password'` pair where
-/// the second string looks like a password placeholder. To stay conservative we
-/// require at least TWO string literals inside the parens AND the function name
-/// match — a parameterized OPENROWSET(BULK …) with a single file path won't
-/// fire.
+/// query (and the plan cache).
+///
+/// Argument shapes we must distinguish:
+///   * `OPENROWSET('provider', 'connstr', 'query')`     — the LAST string is the
+///     remote query, NOT a credential. Only the connection string (the args
+///     before the query) may hold a secret.
+///   * `OPENROWSET('provider','datasource','password','query')` — rare 4-string
+///     positional form; the password sits at index 2, the query at index 3.
+///   * `OPENDATASOURCE('provider', 'init-string')`      — both args are
+///     connection material; there is no query argument.
+///
+/// We therefore scan ONLY the connection-string arguments for credential
+/// keywords and never the trailing remote-query argument, and we only apply the
+/// positional-secret fallback to the genuine 4-string positional form. A
+/// trusted/integrated connection (`Trusted_Connection=yes`, `Integrated
+/// Security=SSPI`) carries no uid/pwd, so it never fires. File providers
+/// (ACE/Jet) and the `OPENROWSET(BULK …)` form are whitelisted outright.
 pub fn openrowset_inline_credentials(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -481,7 +518,7 @@ pub fn openrowset_inline_credentials(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         }
 
-        // Collect string literals inside the parens.
+        // Collect string literals inside the parens, in order.
         let mut strings: Vec<&Token> = Vec::new();
         for k in (lp + 1)..close {
             if tokens[k].kind == TokKind::String {
@@ -495,33 +532,53 @@ pub fn openrowset_inline_credentials(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         }
 
-        // Heuristic for an inline credential:
-        //   (a) any string literal contains a provider connection-string token
-        //       carrying a password / uid, e.g. "...;PWD=...", "...;Password=...",
-        //       "...User ID=...;Password=..." ; OR
-        //   (b) there are >= 2 separate string literals (provider/datasource,
-        //       then 'login','password' positional args) AND one of the later
-        //       ones is non-empty (a real secret, not '').
+        // File/document providers (ACE/Jet/Excel/Access) take a file path, not a
+        // login connection string — whitelist them like BULK.
+        if let Some(provider) = strings.first() {
+            if is_file_provider(&string_inner(provider)) {
+                continue;
+            }
+        }
+
+        // Determine which string arguments are CONNECTION material (scannable
+        // for credentials) vs the trailing remote QUERY (never a credential).
+        //
+        //   OPENROWSET form: ('provider', 'connstr'[, …], 'query') — the LAST
+        //     string is the remote query and must be excluded from the scan.
+        //   OPENDATASOURCE form: ('provider', 'init-string') — no query arg, so
+        //     every string is connection material.
+        //
+        // For OPENROWSET with >= 2 strings the last one is the query, so the
+        // scannable connection args are strings[..len-1]. With a single string
+        // there is nothing query-like to exclude.
+        let scannable: &[&Token] = if is_opendatasource {
+            &strings
+        } else if strings.len() >= 2 {
+            &strings[..strings.len() - 1]
+        } else {
+            &strings
+        };
+
+        // (a) Keyword path: a real uid/pwd token inside a CONNECTION-string
+        //     argument. The trailing query argument is intentionally excluded,
+        //     so query text that happens to contain "password=" never fires.
         let mut hit: Option<&Token> = None;
-        for s in &strings {
-            let inner = string_inner(s).to_ascii_lowercase();
-            if inner.contains("pwd=")
-                || inner.contains("password=")
-                || inner.contains("user id=")
-                || inner.contains("uid=")
-            {
+        for s in scannable {
+            if looks_like_inline_credential(&string_inner(s)) {
                 hit = Some(s);
                 break;
             }
         }
-        if hit.is_none() && strings.len() >= 3 {
-            // Positional ('provider', 'datasource'/'login', 'password', query):
-            // require a non-empty literal in the credential slot (index 2 from
-            // the start is typically the password for the 4-arg positional form).
-            // Only fire if the 3rd string is non-empty -> looks like a secret.
-            if let Some(third) = strings.get(2) {
-                if !string_inner(third).is_empty() {
-                    hit = Some(third);
+
+        // (b) Positional-secret fallback: ONLY the genuine 4-string positional
+        //     form OPENROWSET('provider','datasource','password','query'), where
+        //     the credential sits at index 2 and the query at index 3. The
+        //     common 3-string form ('provider','connstr','query') has its query
+        //     at index 2 and must NOT be treated as a secret.
+        if hit.is_none() && is_openrowset && strings.len() >= 4 {
+            if let Some(secret) = strings.get(2) {
+                if !string_inner(secret).is_empty() {
+                    hit = Some(secret);
                 }
             }
         }
@@ -722,6 +779,7 @@ mod tests {
     // --- openrowset_inline_credentials ---
     #[test]
     fn openrowset_inline_creds_fires() {
+        // Real secret: UID=/PWD= sit inside the connection-string argument.
         let f = run(
             openrowset_inline_credentials,
             "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=RPT;UID=sa;PWD=Secret!', 'SELECT 1');",
@@ -736,5 +794,63 @@ mod tests {
             "SELECT * FROM OPENROWSET(BULK 'C:\\data\\file.csv', FORMATFILE = 'C:\\data\\fmt.xml') AS x;",
         );
         assert_silent(&f, "security.openrowset_inline_credentials");
+    }
+
+    // --- openrowset false-positive regression guards (fp_flags.json) ---
+
+    // FP #1: canonical credential-FREE 3-string form with Trusted_Connection.
+    // strings = ['SQLNCLI', 'Server=RPT;Trusted_Connection=yes', 'SELECT … query'].
+    // The 3rd string is the remote QUERY, not a password; no uid/pwd anywhere.
+    #[test]
+    fn openrowset_trusted_connection_3string_silent() {
+        let f = run(
+            openrowset_inline_credentials,
+            "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=RPT;Trusted_Connection=yes', 'SELECT * FROM dbo.Report');",
+        );
+        assert_silent(&f, "security.openrowset_inline_credentials");
+    }
+
+    // FP #2: ACE OLEDB Excel/CSV file import — file-path provider string, no
+    // login. Whitelisted like BULK.
+    #[test]
+    fn openrowset_ace_excel_file_silent() {
+        let f = run(
+            openrowset_inline_credentials,
+            "SELECT * FROM OPENROWSET('Microsoft.ACE.OLEDB.12.0', 'Excel 12.0;Database=C:\\data\\book.xlsx', 'SELECT * FROM [Sheet1$]');",
+        );
+        assert_silent(&f, "security.openrowset_inline_credentials");
+    }
+
+    // FP #3: trusted connection where the remote QUERY body literally contains
+    // the substring "password=" as data. The query argument is never scanned.
+    #[test]
+    fn openrowset_password_in_query_body_silent() {
+        let f = run(
+            openrowset_inline_credentials,
+            "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=R;Trusted_Connection=yes', 'SELECT * FROM cfg WHERE name = ''password=''');",
+        );
+        assert_silent(&f, "security.openrowset_inline_credentials");
+    }
+
+    // Positive guard: the genuine 4-string positional form still fires
+    // (provider, datasource, password, query) — secret at index 2.
+    #[test]
+    fn openrowset_positional_4string_secret_fires() {
+        let f = run(
+            openrowset_inline_credentials,
+            "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=RPT', 'Sup3rSecret', 'SELECT 1');",
+        );
+        assert_fires(&f, "security.openrowset_inline_credentials");
+    }
+
+    // Positive guard: OPENDATASOURCE init-string with an embedded password still
+    // fires (no query argument; the whole init string is connection material).
+    #[test]
+    fn opendatasource_inline_pwd_fires() {
+        let f = run(
+            openrowset_inline_credentials,
+            "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=RPT;User ID=sa;Password=Secret!').db.dbo.t;",
+        );
+        assert_fires(&f, "security.openrowset_inline_credentials");
     }
 }

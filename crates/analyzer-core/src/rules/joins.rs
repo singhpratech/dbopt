@@ -46,6 +46,54 @@ fn is_clause_boundary(t: &Token) -> bool {
         || t.text == ";"
 }
 
+/// True if a Word token is a set operator (UNION / EXCEPT / INTERSECT). These
+/// delimit independent query blocks: an alias defined as an outer join in one
+/// arm has no relationship to the same short alias reused in a sibling arm.
+fn is_set_op(t: &Token) -> bool {
+    is_word(t, "UNION") || is_word(t, "EXCEPT") || is_word(t, "INTERSECT")
+}
+
+/// Split `[start, end)` into independent query-block segments. We break on a
+/// top-level (paren-depth 0) statement terminator `;` and on top-level set
+/// operators (UNION/EXCEPT/INTERSECT, including UNION ALL). This is the core
+/// FP guard for the cross-statement / cross-UNION-arm rules: a LEFT JOIN in one
+/// segment can never be matched against a WHERE that belongs to a different
+/// segment. Returned bounds are absolute token indices and exclude the
+/// delimiter token itself.
+fn query_block_segments(tokens: &[Token<'_>], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut segs = Vec::new();
+    let mut depth = 0i32;
+    let mut seg_start = start;
+    let mut j = start;
+    while j < end {
+        let t = &tokens[j];
+        if t.text == "(" {
+            depth += 1;
+        } else if t.text == ")" {
+            // A depth-0 ')' here means we've run off the end of this region
+            // (e.g. a wrapping subquery's close); stop the current segment.
+            if depth == 0 {
+                if seg_start < j {
+                    segs.push((seg_start, j));
+                }
+                seg_start = j + 1;
+            } else {
+                depth -= 1;
+            }
+        } else if depth == 0 && (t.text == ";" || is_set_op(t)) {
+            if seg_start < j {
+                segs.push((seg_start, j));
+            }
+            seg_start = j + 1;
+        }
+        j += 1;
+    }
+    if seg_start < end {
+        segs.push((seg_start, end));
+    }
+    segs
+}
+
 // ---------------------------------------------------------------------------
 // (c) RIGHT OUTER JOIN -> rewrite as LEFT for readability (Info)
 // ---------------------------------------------------------------------------
@@ -359,7 +407,34 @@ pub fn function_on_join_column(ctx: &RuleCtx) -> Vec<Finding> {
                             let inner = skip_comments(tokens, lp + 1);
                             let wraps_ident = inner < q.saturating_sub(1)
                                 && tokens[inner].kind == TokKind::Word;
-                            if is_cmp && wraps_ident {
+                            // FP guard: equi-joining nullable keys via
+                            // ISNULL/COALESCE on BOTH sides is a correct, often
+                            // unavoidable idiom (NULL = NULL is unknown, so you
+                            // must coalesce both sides to a sentinel to make two
+                            // NULL keys match). There is no bare-column rewrite
+                            // that preserves those semantics, so the suggested
+                            // fix would be noise. Suppress when this function is
+                            // ISNULL/COALESCE AND the other side of the
+                            // comparison is also an ISNULL/COALESCE call. The
+                            // higher-confidence one-sided cases (UPPER/LOWER/
+                            // CAST-to-string on one side, or coalesce on only one
+                            // side) still fire.
+                            let symmetric_coalesce = (upper == "ISNULL" || upper == "COALESCE")
+                                && c.text == "="
+                                && {
+                                    let rhs = skip_comments(tokens, after + 1);
+                                    rhs < on_end
+                                        && tokens[rhs].kind == TokKind::Word
+                                        && {
+                                            let r = bare(&tokens[rhs]).to_ascii_uppercase();
+                                            (r == "ISNULL" || r == "COALESCE")
+                                                && {
+                                                    let rlp = skip_comments(tokens, rhs + 1);
+                                                    rlp < on_end && tokens[rlp].text == "("
+                                                }
+                                        }
+                                };
+                            if is_cmp && wraps_ident && !symmetric_coalesce {
                                 out.push(finding(
                                     "joins.function_on_join_column",
                                     Severity::Warning,
@@ -396,10 +471,13 @@ struct OuterRef {
     join_tok_idx: usize,
 }
 
-fn collect_outer_join_refs(tokens: &[Token<'_>]) -> Vec<OuterRef> {
+/// Collect outer-join refs that appear within `[seg_start, seg_end)` only.
+/// Scoping to a single query-block segment is what prevents a LEFT JOIN in one
+/// statement / UNION arm from being matched against a WHERE in another.
+fn collect_outer_join_refs(tokens: &[Token<'_>], seg_start: usize, seg_end: usize) -> Vec<OuterRef> {
     let mut refs = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
+    let mut i = seg_start;
+    while i < seg_end {
         let t = &tokens[i];
         if !(is_word(t, "LEFT") || is_word(t, "RIGHT")) {
             i += 1;
@@ -499,31 +577,56 @@ pub fn outer_join_filtered_to_inner(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
 
-    let refs = collect_outer_join_refs(tokens);
+    // FP guard: scope the entire analysis to one query block. Splitting on
+    // top-level `;` and on UNION/EXCEPT/INTERSECT means a LEFT JOIN in one
+    // statement / UNION arm is NEVER tested against a WHERE that belongs to a
+    // different statement / sibling arm (where a short alias like `o` is
+    // commonly reused for an unrelated base table). Both reported FPs were the
+    // cross-statement / cross-UNION-arm leak.
+    for (seg_start, seg_end) in query_block_segments(tokens, 0, tokens.len()) {
+        analyze_outer_join_segment(tokens, seg_start, seg_end, &mut out);
+    }
+    out
+}
+
+/// Run the OUTER-JOIN-demotion analysis on a single query-block segment.
+fn analyze_outer_join_segment(
+    tokens: &[Token<'_>],
+    seg_start: usize,
+    seg_end: usize,
+    out: &mut Vec<Finding>,
+) {
+    let refs = collect_outer_join_refs(tokens, seg_start, seg_end);
     if refs.is_empty() {
-        return out;
+        return;
     }
 
-    // Locate the (last top-level) WHERE clause region.
+    // Locate the FIRST top-level WHERE clause inside THIS segment. (Picking the
+    // first WHERE after the segment's joins keeps us aligned with the segment's
+    // own outer joins rather than any later/global WHERE.)
     let mut where_idx: Option<usize> = None;
     let mut depth = 0i32;
-    for (i, t) in tokens.iter().enumerate() {
+    let mut i = seg_start;
+    while i < seg_end {
+        let t = &tokens[i];
         if t.text == "(" {
             depth += 1;
         } else if t.text == ")" {
             depth -= 1;
         } else if depth == 0 && is_word(t, "WHERE") {
             where_idx = Some(i);
+            break;
         }
+        i += 1;
     }
     let Some(w) = where_idx else {
-        return out;
+        return;
     };
-    // WHERE region end.
+    // WHERE region end — bounded to the segment.
     let mut d2 = 0i32;
-    let mut we = tokens.len();
+    let mut we = seg_end;
     let mut j = w + 1;
-    while j < tokens.len() {
+    while j < seg_end {
         let t = &tokens[j];
         if t.text == "(" {
             d2 += 1;
@@ -537,11 +640,7 @@ pub fn outer_join_filtered_to_inner(ctx: &RuleCtx) -> Vec<Finding> {
             && (is_word(t, "GROUP")
                 || is_word(t, "ORDER")
                 || is_word(t, "HAVING")
-                || is_word(t, "OPTION")
-                || is_word(t, "UNION")
-                || is_word(t, "EXCEPT")
-                || is_word(t, "INTERSECT")
-                || t.text == ";")
+                || is_word(t, "OPTION"))
         {
             we = j;
             break;
@@ -613,8 +712,6 @@ pub fn outer_join_filtered_to_inner(ctx: &RuleCtx) -> Vec<Finding> {
             ));
         }
     }
-
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -660,7 +757,12 @@ pub fn distinct_with_join_fanout(ctx: &RuleCtx) -> Vec<Finding> {
                 }
                 depth -= 1;
             } else if depth == 0 {
-                if t.text == ";" {
+                // FP guard: a set operator ends THIS query block. The DISTINCT
+                // belongs to the current SELECT arm; a JOIN that lives in a
+                // sibling UNION/EXCEPT/INTERSECT arm must not be attributed to
+                // it (that DISTINCT is legitimately deduping the set union, not
+                // masking a join fan-out).
+                if t.text == ";" || is_set_op(t) {
                     stmt_end = j;
                     break;
                 }
@@ -879,5 +981,115 @@ mod tests {
             "SELECT c.id FROM Customers c JOIN Orders o ON o.cid = c.id",
         );
         assert!(f.is_empty(), "JOIN without DISTINCT should not fire: {f:?}");
+    }
+
+    // --- FP regressions (fp_flags.json, pack=joins) -----------------------
+
+    // (a) FP: the LEFT JOIN + `WHERE o.id IS NULL` anti-join lives in statement
+    // 1; statement 2 merely reuses the short alias `o` for an unrelated base
+    // table. The rule used to collect refs globally and test them against the
+    // LAST top-level WHERE (statement 2's), firing a false demotion warning.
+    // Per-statement scoping must keep both statements silent.
+    #[test]
+    fn outer_join_anti_join_across_semicolon_statements_does_not_fire() {
+        let f = run(
+            outer_join_filtered_to_inner,
+            "SELECT c.id FROM Customers c LEFT JOIN Orders o ON o.cid = c.id WHERE o.id IS NULL; \
+             SELECT o.cid, SUM(o.amt) FROM Orders o WHERE o.status = 'shipped' GROUP BY o.cid;",
+        );
+        assert!(
+            f.is_empty(),
+            "anti-join in stmt 1 + reused alias in stmt 2 must not fire: {f:?}"
+        );
+    }
+
+    // (a) FP: same leak across a UNION ALL boundary (no semicolon). Arm 1 is a
+    // textbook anti-join; arm 2 reuses alias `o` for a base table. Both arms
+    // are correct.
+    #[test]
+    fn outer_join_anti_join_across_union_arms_does_not_fire() {
+        let f = run(
+            outer_join_filtered_to_inner,
+            "SELECT c.id FROM Cust c LEFT JOIN Ord o ON o.cid=c.id WHERE o.id IS NULL \
+             UNION ALL \
+             SELECT o.id FROM OtherTbl o WHERE o.amt > 5",
+        );
+        assert!(
+            f.is_empty(),
+            "anti-join arm + reused alias arm across UNION must not fire: {f:?}"
+        );
+    }
+
+    // (a) Guard against over-correction: a genuine OUTER-JOIN demotion inside a
+    // single arm of a multi-statement batch must STILL fire (per-statement
+    // scoping must not blind the rule to a real problem).
+    #[test]
+    fn outer_join_real_demotion_in_second_statement_still_fires() {
+        let f = run(
+            outer_join_filtered_to_inner,
+            "SELECT 1; \
+             SELECT * FROM Customers c LEFT JOIN Orders o ON o.cid = c.id WHERE o.status = 'shipped'",
+        );
+        assert_eq!(f.len(), 1, "real demotion in stmt 2 should still fire: {f:?}");
+        assert_eq!(f[0].rule.0, "joins.outer_join_filtered_to_inner");
+    }
+
+    // (e) FP: `SELECT DISTINCT <cols> UNION SELECT ... JOIN ...`. The DISTINCT
+    // belongs to arm 1 (single table, no join) and is genuinely deduping the
+    // union; the JOIN is in arm 2. The scan must stop at UNION so arm 2's JOIN
+    // is not attributed to arm 1's DISTINCT.
+    #[test]
+    fn distinct_union_with_join_in_other_arm_does_not_fire() {
+        let f = run(
+            distinct_with_join_fanout,
+            "SELECT DISTINCT Country FROM dbo.Region \
+             UNION \
+             SELECT r.Country FROM dbo.Region r JOIN dbo.Sales s ON s.rid = r.id",
+        );
+        assert!(
+            f.is_empty(),
+            "DISTINCT deduping a UNION must not borrow a sibling arm's JOIN: {f:?}"
+        );
+    }
+
+    // (d) FP: equi-joining nullable keys via ISNULL on BOTH sides is a correct,
+    // unavoidable idiom (NULL = NULL is unknown). The symmetric-coalesce guard
+    // must keep this silent.
+    #[test]
+    fn isnull_both_sides_of_nullable_key_join_does_not_fire() {
+        let f = run(
+            function_on_join_column,
+            "SELECT * FROM A a JOIN B b ON ISNULL(a.tid,0) = ISNULL(b.tid,0)",
+        );
+        assert!(
+            f.is_empty(),
+            "symmetric ISNULL nullable-key join must not fire: {f:?}"
+        );
+    }
+
+    // (d) FP: COALESCE-on-both-sides variant of the same nullable-key idiom.
+    #[test]
+    fn coalesce_both_sides_of_nullable_key_join_does_not_fire() {
+        let f = run(
+            function_on_join_column,
+            "SELECT * FROM A a JOIN B b ON COALESCE(a.tid, 0) = COALESCE(b.tid, 0)",
+        );
+        assert!(
+            f.is_empty(),
+            "symmetric COALESCE nullable-key join must not fire: {f:?}"
+        );
+    }
+
+    // (d) Guard against over-correction: ISNULL on ONLY ONE side (the other
+    // side is a bare column) is still a non-sargable wrap and must STILL fire —
+    // there is a bare-column rewrite here (cast/normalize the literal side).
+    #[test]
+    fn isnull_one_side_only_still_fires() {
+        let f = run(
+            function_on_join_column,
+            "SELECT * FROM A a JOIN B b ON ISNULL(a.tid, 0) = b.tid",
+        );
+        assert_eq!(f.len(), 1, "one-sided ISNULL wrap should still fire: {f:?}");
+        assert_eq!(f[0].rule.0, "joins.function_on_join_column");
     }
 }

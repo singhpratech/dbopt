@@ -147,7 +147,7 @@ pub const REGISTRY: &[Rule] = &[
     // set-based anti-patterns
     ss(antipatterns::count_for_existence),
     ss(antipatterns::correlated_scalar_subquery_in_select),
-    ss(antipatterns::union_maybe_union_all),
+    ss(antipatterns::union_should_be_union_all),
     ss(antipatterns::distinct_many_columns),
     // database/server config smells
     ss(config::auto_shrink_on),

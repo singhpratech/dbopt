@@ -9,10 +9,55 @@
 // stream before firing and guards against the legitimate idioms (COMMIT inside
 // CATCH, ROLLBACK in an error path, single-statement implicit transactions, the
 // `transaction` keyword appearing only as an identifier, etc.).
+//
+// IMPORTANT — bracketed/quoted identifiers: the lexer emits `[COMMIT]` or
+// `"delete"` as a SINGLE Word token *including* the delimiters, and the shared
+// `is_word` helper strips `[]` before comparing, so `is_word("[COMMIT]","COMMIT")`
+// is TRUE. That means a column legitimately named [COMMIT], [Rollback], [delete]
+// or [insert] (common in audit/git/workflow/state-machine schemas) would match a
+// keyword. Transaction keywords are control-flow verbs, never sensibly used as a
+// bare keyword when delimited, so these rules use `is_kw` (bare-keyword only)
+// instead of `is_word`, which refuses any token that is a delimited identifier.
 
 use super::{finding, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
-use crate::tokens::{Token, TokKind};
+use crate::tokens::{word_eq_ci, Token, TokKind};
+
+/// True if `t` is a *bare* keyword equal (case-insensitively) to `kw`.
+///
+/// Unlike `is_word`, this returns `false` for *bracketed* identifiers — a
+/// `[bracketed]` token (which the lexer emits whole, brackets included) can
+/// never be a T-SQL keyword, it is always an identifier. This is the guard that
+/// stops `[COMMIT]`, `[Rollback]`, `[delete]`, `[insert]` (etc.) used as
+/// column/object names from being read as the COMMIT/ROLLBACK/DELETE/INSERT
+/// keywords.
+///
+/// NOTE: double-quoted identifiers (`"commit"`) are NOT a single token — the
+/// lexer emits `"`, `commit`, `"` separately — so this function alone cannot
+/// see them. Callers that scan the token stream additionally use
+/// `is_quoted_ident` to reject a word sandwiched between double quotes.
+fn is_kw(t: &Token<'_>, kw: &str) -> bool {
+    if !matches!(t.kind, TokKind::Word) {
+        return false;
+    }
+    let s = t.text;
+    // Bracketed identifiers are never keywords.
+    if s.starts_with('[') || s.starts_with('"') {
+        return false;
+    }
+    word_eq_ci(s, kw)
+}
+
+/// True if the Word token at index `i` is really a double-quoted identifier
+/// (`"commit"`), i.e. it is immediately wrapped by `"` Punct tokens. The lexer
+/// has no double-quote-string branch, so `"commit"` arrives as the three tokens
+/// `"` `commit` `"`; under QUOTED_IDENTIFIER ON (the default) that inner word is
+/// an identifier, never a keyword.
+fn is_quoted_ident(tokens: &[Token<'_>], i: usize) -> bool {
+    let prev_quote = i > 0 && tokens[i - 1].text == "\"";
+    let next_quote = i + 1 < tokens.len() && tokens[i + 1].text == "\"";
+    prev_quote && next_quote
+}
 
 /// Index of the next non-comment, non-whitespace token at or after `from`.
 /// (The lexer already drops whitespace, so this only skips comments.)
@@ -29,39 +74,119 @@ fn next_code(tokens: &[Token<'_>], from: usize) -> usize {
 /// `BEGIN TRY` / a bare procedural `BEGIN` block / `BEGIN DISTRIBUTED TRAN…`.
 /// Returns the index of the TRAN/TRANSACTION keyword on a match.
 fn begin_tran_at(tokens: &[Token<'_>], i: usize) -> Option<usize> {
-    if !is_word(&tokens[i], "BEGIN") {
+    if !is_kw(&tokens[i], "BEGIN") {
         return None;
     }
     let mut j = next_code(tokens, i + 1);
     // BEGIN DISTRIBUTED TRAN… — still an explicit transaction.
-    if j < tokens.len() && is_word(&tokens[j], "DISTRIBUTED") {
+    if j < tokens.len() && is_kw(&tokens[j], "DISTRIBUTED") {
         j = next_code(tokens, j + 1);
     }
-    if j < tokens.len() && (is_word(&tokens[j], "TRAN") || is_word(&tokens[j], "TRANSACTION")) {
+    if j < tokens.len() && (is_kw(&tokens[j], "TRAN") || is_kw(&tokens[j], "TRANSACTION")) {
         return Some(j);
     }
     None
 }
 
+/// True if the token at index `i` is a `SAVE TRAN`/`SAVE TRANSACTION` savepoint
+/// declaration. Returns the index of the savepoint name token if one follows.
+fn save_tran_name_at(tokens: &[Token<'_>], i: usize) -> Option<usize> {
+    if !is_kw(&tokens[i], "SAVE") {
+        return None;
+    }
+    let j = next_code(tokens, i + 1);
+    if j >= tokens.len() || !(is_kw(&tokens[j], "TRAN") || is_kw(&tokens[j], "TRANSACTION")) {
+        return None;
+    }
+    let k = next_code(tokens, j + 1);
+    // SAVE TRAN <name> — name may be an identifier or a @variable.
+    if k < tokens.len() && tokens[k].kind == TokKind::Word {
+        Some(k)
+    } else {
+        None
+    }
+}
+
 /// True if index `i` is the start of a COMMIT (`COMMIT` / `COMMIT TRAN…` /
 /// `COMMIT WORK`). A bare `COMMIT` is valid T-SQL, so we accept it on its own.
+/// Refuses a `[COMMIT]` or `"commit"` delimited/quoted identifier.
 fn is_commit_at(tokens: &[Token<'_>], i: usize) -> bool {
-    is_word(&tokens[i], "COMMIT")
+    is_kw(&tokens[i], "COMMIT") && !is_quoted_ident(tokens, i)
 }
 
 /// True if index `i` is the start of a ROLLBACK (`ROLLBACK` / `ROLLBACK TRAN…`
-/// / `ROLLBACK WORK`). A `SAVE TRAN` + `ROLLBACK <savepoint>` still counts as a
-/// rollback path for our purposes.
+/// / `ROLLBACK WORK`). Refuses a `[Rollback]` or `"rollback"` identifier.
 fn is_rollback_at(tokens: &[Token<'_>], i: usize) -> bool {
-    is_word(&tokens[i], "ROLLBACK")
+    is_kw(&tokens[i], "ROLLBACK") && !is_quoted_ident(tokens, i)
+}
+
+/// True if index `i` is a ROLLBACK that targets a *savepoint* whose name appears
+/// in `savepoints` — i.e. `ROLLBACK [TRAN|TRANSACTION] <name>` where `<name>`
+/// was previously declared with `SAVE TRAN <name>`. A savepoint rollback is the
+/// documented inner-scope idiom (it rolls back only this proc's work, not the
+/// caller's whole transaction) and must NOT be treated as a top-level close.
+fn rolls_back_to_savepoint(tokens: &[Token<'_>], i: usize, savepoints: &[String]) -> bool {
+    if !is_kw(&tokens[i], "ROLLBACK") {
+        return false;
+    }
+    let mut j = next_code(tokens, i + 1);
+    if j < tokens.len() && (is_kw(&tokens[j], "TRAN") || is_kw(&tokens[j], "TRANSACTION")) {
+        j = next_code(tokens, j + 1);
+    }
+    // The next token must be a savepoint name we have seen declared.
+    if j < tokens.len() && tokens[j].kind == TokKind::Word {
+        let name = tokens[j].text;
+        return savepoints.iter().any(|s| word_eq_ci(s, name));
+    }
+    false
+}
+
+/// Collect every savepoint name declared by `SAVE TRAN <name>` in the batch.
+fn collect_savepoints(tokens: &[Token<'_>]) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..tokens.len() {
+        if let Some(k) = save_tran_name_at(tokens, i) {
+            out.push(tokens[k].text.to_string());
+        }
+    }
+    out
+}
+
+/// True if the COMMIT/ROLLBACK at index `i` is guarded by an `@@TRANCOUNT`
+/// (or `XACT_STATE()`) check that runs into the same statement — the documented
+/// nested/participating-proc idiom `IF @@TRANCOUNT > 0 COMMIT;`. We look back a
+/// short window for the guard token, stopping at a statement terminator.
+///
+/// NOTE: the lexer splits `@@TRANCOUNT` into the two Word tokens `@` and
+/// `@TRANCOUNT` (the word-continuation set excludes a second `@`), so we match a
+/// word whose `@`-stripped text is `TRANCOUNT`. `XACT_STATE` is a function call,
+/// so it arrives as the plain word `XACT_STATE`.
+fn guarded_by_trancount(tokens: &[Token<'_>], i: usize) -> bool {
+    let mut j = i;
+    let mut steps = 0;
+    while j > 0 && steps < 24 {
+        j -= 1;
+        steps += 1;
+        let tk = &tokens[j];
+        if tk.text == ";" {
+            return false;
+        }
+        if tk.kind == TokKind::Word {
+            let bare = tk.text.trim_start_matches('@');
+            if word_eq_ci(bare, "TRANCOUNT") || word_eq_ci(bare, "XACT_STATE") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether `BEGIN TRY` appears anywhere in the token stream.
 fn has_try_block(tokens: &[Token<'_>]) -> bool {
     for i in 0..tokens.len() {
-        if is_word(&tokens[i], "BEGIN") {
+        if is_kw(&tokens[i], "BEGIN") {
             let j = next_code(tokens, i + 1);
-            if j < tokens.len() && is_word(&tokens[j], "TRY") {
+            if j < tokens.len() && is_kw(&tokens[j], "TRY") {
                 return true;
             }
         }
@@ -70,32 +195,132 @@ fn has_try_block(tokens: &[Token<'_>]) -> bool {
 }
 
 /// Whether `SET XACT_ABORT ON` appears anywhere in the token stream. Tolerates
-/// comments between the words. We deliberately do NOT match `SET XACT_ABORT
-/// OFF` as satisfying the rule.
+/// comments between the words AND the idiomatic comma-combined multi-option SET
+/// form `SET XACT_ABORT, NOCOUNT ON;` (one shared trailing ON turns every listed
+/// option ON). We deliberately do NOT accept `SET XACT_ABORT OFF`.
 fn has_xact_abort_on(tokens: &[Token<'_>]) -> bool {
     for i in 0..tokens.len() {
-        if !is_word(&tokens[i], "SET") {
+        if !is_kw(&tokens[i], "SET") {
             continue;
         }
         let j = next_code(tokens, i + 1);
-        if j >= tokens.len() || !is_word(&tokens[j], "XACT_ABORT") {
+        if j >= tokens.len() || !is_kw(&tokens[j], "XACT_ABORT") {
             continue;
         }
         let k = next_code(tokens, j + 1);
-        if k < tokens.len() && is_word(&tokens[k], "ON") {
+        if k >= tokens.len() {
+            continue;
+        }
+        // Direct form: SET XACT_ABORT ON
+        if is_kw(&tokens[k], "ON") {
             return true;
+        }
+        // Comma-combined form: SET XACT_ABORT, NOCOUNT[, ...] ON;
+        // After XACT_ABORT comes ',' then a list of `<option>[, <option>]*`
+        // closed by a single shared ON. Walk the option list; if it is purely
+        // `, <word>` groups terminated by ON (before any `;`/OFF), XACT_ABORT is
+        // turned ON.
+        if tokens[k].text == "," {
+            let mut m = k;
+            let mut ok = false;
+            while m < tokens.len() {
+                let t = &tokens[m];
+                if t.kind == TokKind::Comment {
+                    m += 1;
+                    continue;
+                }
+                if t.text == "," {
+                    m += 1;
+                    continue;
+                }
+                if t.text == ";" {
+                    break;
+                }
+                if matches!(t.kind, TokKind::Word) {
+                    if is_kw(t, "ON") {
+                        ok = true;
+                        break;
+                    }
+                    if is_kw(t, "OFF") {
+                        // Shared OFF — XACT_ABORT is being turned off.
+                        break;
+                    }
+                    // Another option name in the list (NOCOUNT, ANSI_NULLS, …).
+                    m += 1;
+                    continue;
+                }
+                // Anything else (=, number, punct) means this is not a simple
+                // multi-option SET list; give up on this candidate.
+                break;
+            }
+            if ok {
+                return true;
+            }
         }
     }
     false
 }
 
-/// A DML/DDL statement keyword inside a transaction body. We count these to tell
-/// a multi-statement transaction (needs XACT_ABORT) from a single-statement one.
-fn is_data_stmt_keyword(t: &Token<'_>) -> bool {
-    is_word(t, "INSERT")
-        || is_word(t, "UPDATE")
-        || is_word(t, "DELETE")
-        || is_word(t, "MERGE")
+/// True if the DML verb at index `i` is really a `UPDATE STATISTICS` maintenance
+/// command rather than row DML. `UPDATE STATISTICS <table>` is a DDL-ish
+/// maintenance op that does not leave a transaction half-applied, so it must not
+/// be counted toward the multi-statement-DML threshold.
+fn is_update_statistics(tokens: &[Token<'_>], i: usize) -> bool {
+    if !is_kw(&tokens[i], "UPDATE") {
+        return false;
+    }
+    let j = next_code(tokens, i + 1);
+    j < tokens.len() && is_kw(&tokens[j], "STATISTICS")
+}
+
+/// A DML statement keyword that *starts a statement* inside a transaction body.
+/// We count these to tell a multi-statement transaction (needs XACT_ABORT) from
+/// a single-statement one.
+///
+/// Guards against three documented false-positive shapes:
+///   * delimited identifiers — `[delete]`, `[insert]`, `"update"` used as column
+///     or object names are NOT keywords (handled by `is_kw`);
+///   * keywords used mid-expression / as a column name — we only count a verb at
+///     statement-start position (preceded by `;`, `BEGIN`, `THEN`, batch start,
+///     etc.), not one buried in a SET list or expression;
+///   * `UPDATE STATISTICS` — maintenance, not row DML.
+fn is_data_stmt_start(tokens: &[Token<'_>], i: usize) -> bool {
+    let t = &tokens[i];
+    let is_dml = is_kw(t, "INSERT")
+        || is_kw(t, "UPDATE")
+        || is_kw(t, "DELETE")
+        || is_kw(t, "MERGE");
+    if !is_dml {
+        return false;
+    }
+    // UPDATE STATISTICS is not row DML.
+    if is_update_statistics(tokens, i) {
+        return false;
+    }
+    // Must be at statement-start position: scan back over comments to the
+    // previous code token; it must be a separator/opener, not part of an ongoing
+    // expression or assignment list (which is what `SET col1 = 1, col2 = 2`
+    // looks like). This is belt-and-suspenders on top of `is_kw` so a keyword
+    // appearing inside an expression cannot be recounted as a statement.
+    let mut p = i;
+    while p > 0 {
+        p -= 1;
+        if tokens[p].kind == TokKind::Comment {
+            continue;
+        }
+        let prev = &tokens[p];
+        // Statement separators / openers that legitimately precede a DML verb.
+        let opener = prev.text == ";"
+            || is_kw(prev, "BEGIN")
+            || is_kw(prev, "THEN")
+            || is_kw(prev, "ELSE")
+            || is_kw(prev, "END")
+            || is_kw(prev, "GO")
+            || is_kw(prev, "AS");
+        return opener;
+    }
+    // No preceding code token → batch start → it's a statement start.
+    true
 }
 
 /// (a) BEGIN TRAN … COMMIT with NO TRY/CATCH anywhere in the batch and no
@@ -193,6 +418,14 @@ pub fn begin_tran_without_commit(ctx: &RuleCtx) -> Vec<Finding> {
 /// proc owns the transaction it merely participates in). Committing/rolling back
 /// a transaction you didn't open raises error 3902/3903 or unexpectedly affects
 /// the caller's transaction.
+///
+/// Suppressed for the documented inner-scope idioms:
+///   * `IF @@TRANCOUNT > 0 COMMIT;` / `IF @@TRANCOUNT > 0 ROLLBACK;` — the close
+///     is explicitly guarded by a transaction-count check (a participating proc
+///     finalizing only when it actually owns the outermost transaction);
+///   * `SAVE TRAN sp; … ROLLBACK TRAN sp;` — rolling back to a *savepoint* the
+///     batch declared is not a top-level close at all.
+/// Also refuses delimited identifiers (`[COMMIT]`, `[Rollback]` as column names).
 pub fn commit_rollback_without_begin(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -202,16 +435,25 @@ pub fn commit_rollback_without_begin(ctx: &RuleCtx) -> Vec<Finding> {
         return out;
     }
 
-    // Find the first COMMIT/ROLLBACK and anchor there. SAVE TRAN by itself is not
-    // a close, so it won't trip this.
+    let savepoints = collect_savepoints(tokens);
+
+    // Find the first *unguarded, top-level* COMMIT/ROLLBACK and anchor there.
+    // SAVE TRAN by itself is not a close, so it won't trip this.
     let mut i = 0;
     while i < tokens.len() {
         let commit = is_commit_at(tokens, i);
         let rollback = is_rollback_at(tokens, i);
         if commit || rollback {
-            // Guard: `COMMIT` / `ROLLBACK` could appear as a quoted identifier or
-            // string; is_word already excludes strings, and bracketed idents keep
-            // their [] so is_word("[COMMIT]","COMMIT") is false. Good enough.
+            // Savepoint rollback (`ROLLBACK TRAN sp`) is inner-scope, not a close.
+            if rollback && rolls_back_to_savepoint(tokens, i, &savepoints) {
+                i += 1;
+                continue;
+            }
+            // @@TRANCOUNT / XACT_STATE() guarded close is the documented idiom.
+            if guarded_by_trancount(tokens, i) {
+                i += 1;
+                continue;
+            }
             let verb = if commit { "COMMIT" } else { "ROLLBACK" };
             out.push(finding(
                 "tran.close_without_begin",
@@ -247,7 +489,9 @@ pub fn dml_batch_missing_xact_abort(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         };
         // Scan the transaction body: from after the BEGIN TRAN keyword until the
-        // first COMMIT/ROLLBACK or end-of-stream. Count distinct DML keywords.
+        // first COMMIT/ROLLBACK or end-of-stream. Count distinct DML *statements*
+        // (statement-start verbs only — not keywords used as column names, and
+        // not UPDATE STATISTICS).
         let mut dml = 0usize;
         let mut j = tran_kw + 1;
         while j < tokens.len() {
@@ -258,7 +502,7 @@ pub fn dml_batch_missing_xact_abort(ctx: &RuleCtx) -> Vec<Finding> {
             if begin_tran_at(tokens, j).is_some() {
                 break;
             }
-            if is_data_stmt_keyword(&tokens[j]) {
+            if is_data_stmt_start(tokens, j) {
                 dml += 1;
             }
             j += 1;
@@ -310,13 +554,13 @@ pub fn ddl_inside_explicit_tran(ctx: &RuleCtx) -> Vec<Finding> {
             // really part of a `SET`/index op we don't care about, and exclude
             // `CREATE TABLE #temp` (creating a temp object inside a tran is the
             // legitimate idiom and does not hold a user-object Sch-M lock).
-            let verb = if is_word(&tokens[j], "CREATE") {
+            let verb = if is_kw(&tokens[j], "CREATE") {
                 Some("CREATE")
-            } else if is_word(&tokens[j], "ALTER") {
+            } else if is_kw(&tokens[j], "ALTER") {
                 Some("ALTER")
-            } else if is_word(&tokens[j], "DROP") {
+            } else if is_kw(&tokens[j], "DROP") {
                 Some("DROP")
-            } else if is_word(&tokens[j], "TRUNCATE") {
+            } else if is_kw(&tokens[j], "TRUNCATE") {
                 Some("TRUNCATE")
             } else {
                 None
@@ -445,6 +689,39 @@ mod tests {
         assert!(!fires(super::commit_rollback_without_begin, sql, Some(2022), "tran.close_without_begin"));
     }
 
+    // ---- FP regression tests (empirically confirmed false positives) ----
+
+    /// FP: bracketed identifiers [COMMIT] / [Rollback] are column names, not the
+    /// COMMIT/ROLLBACK keywords. There is no transaction syntax at all.
+    #[test]
+    fn close_without_begin_negative_bracketed_identifiers() {
+        let sql = "SELECT [COMMIT], [Rollback] FROM dbo.GitCommitLog;";
+        assert!(!fires(super::commit_rollback_without_begin, sql, Some(2022), "tran.close_without_begin"));
+    }
+
+    /// FP: quoted identifiers "commit" / "rollback" are likewise just names.
+    #[test]
+    fn close_without_begin_negative_quoted_identifiers() {
+        let sql = "SELECT \"commit\", \"rollback\" FROM dbo.AuditLog;";
+        assert!(!fires(super::commit_rollback_without_begin, sql, Some(2022), "tran.close_without_begin"));
+    }
+
+    /// FP: an @@TRANCOUNT-guarded COMMIT in a participating proc is the
+    /// documented inner-scope idiom, not an orphan close.
+    #[test]
+    fn close_without_begin_negative_trancount_guarded_commit() {
+        let sql = "CREATE PROCEDURE dbo.PostStep\nAS\nBEGIN\n  -- caller (or outer proc) owns the transaction; we only finalize our scope\n  IF @@TRANCOUNT > 0 COMMIT;\nEND";
+        assert!(!fires(super::commit_rollback_without_begin, sql, Some(2022), "tran.close_without_begin"));
+    }
+
+    /// FP: rolling back to a savepoint the batch itself declared is inner-scope,
+    /// not a top-level close. (SAVE TRAN sp; … ROLLBACK TRANSACTION sp;)
+    #[test]
+    fn close_without_begin_negative_savepoint_rollback() {
+        let sql = "SAVE TRANSACTION sp;\n  UPDATE dbo.A SET x = 1;\nIF @@ERROR <> 0 ROLLBACK TRANSACTION sp;";
+        assert!(!fires(super::commit_rollback_without_begin, sql, Some(2022), "tran.close_without_begin"));
+    }
+
     // ---- (b) dml_batch_missing_xact_abort -------------------------------
 
     #[test]
@@ -464,6 +741,37 @@ mod tests {
         // Single-statement transaction does not need XACT_ABORT for atomicity.
         let sql = "BEGIN TRAN;\n  UPDATE dbo.B SET y = 2;\nCOMMIT;";
         assert!(!fires(super::dml_batch_missing_xact_abort, sql, Some(2022), "tran.missing_xact_abort"));
+    }
+
+    /// FP: a single UPDATE whose SET list assigns bracketed columns [delete] /
+    /// [insert] must NOT be miscounted as three DML statements.
+    #[test]
+    fn missing_xact_abort_negative_bracketed_columns() {
+        let sql = "BEGIN TRAN;\n  UPDATE dbo.T SET [delete] = 1, [insert] = 2 WHERE id = 5;\nCOMMIT;";
+        assert!(!fires(super::dml_batch_missing_xact_abort, sql, Some(2022), "tran.missing_xact_abort"));
+    }
+
+    /// FP: two UPDATE STATISTICS maintenance commands are not row DML.
+    #[test]
+    fn missing_xact_abort_negative_update_statistics() {
+        let sql = "BEGIN TRAN;\n  UPDATE STATISTICS dbo.BigTable;\n  UPDATE STATISTICS dbo.OtherTable;\nCOMMIT;";
+        assert!(!fires(super::dml_batch_missing_xact_abort, sql, Some(2022), "tran.missing_xact_abort"));
+    }
+
+    /// FP: the comma-combined `SET XACT_ABORT, NOCOUNT ON;` form DOES turn
+    /// XACT_ABORT on; the rule must recognise it and stay silent.
+    #[test]
+    fn missing_xact_abort_negative_combined_set() {
+        let sql = "SET XACT_ABORT, NOCOUNT ON;\nBEGIN TRAN;\n  INSERT INTO dbo.A(x) VALUES (1);\n  UPDATE dbo.B SET y = 2;\nCOMMIT;";
+        assert!(!fires(super::dml_batch_missing_xact_abort, sql, Some(2022), "tran.missing_xact_abort"));
+    }
+
+    /// Sanity: the comma-combined form with a shared OFF must NOT satisfy the
+    /// guard — the rule should still fire.
+    #[test]
+    fn missing_xact_abort_positive_combined_set_off() {
+        let sql = "SET XACT_ABORT, NOCOUNT OFF;\nBEGIN TRAN;\n  INSERT INTO dbo.A(x) VALUES (1);\n  UPDATE dbo.B SET y = 2;\nCOMMIT;";
+        assert!(fires(super::dml_batch_missing_xact_abort, sql, Some(2022), "tran.missing_xact_abort"));
     }
 
     // ---- (d) ddl_inside_explicit_tran -----------------------------------

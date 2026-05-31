@@ -365,6 +365,17 @@ fn predicate_state(t: &Token<'_>, in_pred: bool) -> bool {
         || is_word(t, "ORDER")
         || is_word(t, "SELECT")
         || is_word(t, "SET")
+        // Statement boundaries: a predicate ends when a new DML statement begins.
+        // Without these, a missing `;` leaks `in_pred` from one statement's WHERE
+        // into the next (e.g. `WHERE Id=1 INSERT INTO Log VALUES('x'+col)`),
+        // misfiring on the INSERT's VALUES list.
+        || is_word(t, "INSERT")
+        || is_word(t, "UPDATE")
+        || is_word(t, "DELETE")
+        || is_word(t, "MERGE")
+        || is_word(t, "VALUES")
+        || is_word(t, "EXEC")
+        || is_word(t, "EXECUTE")
         || t.text == ";"
     {
         false
