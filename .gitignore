@@ -23,3 +23,6 @@ web/public/_*
 
 # TS build cache
 *.tsbuildinfo
+
+# workflow-tool isolation worktrees (transient)
+.claude/worktrees/

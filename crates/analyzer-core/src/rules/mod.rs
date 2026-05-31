@@ -11,6 +11,14 @@ mod locking;
 mod tempdb;
 mod stats;
 mod index_design;
+// === optimizer-supremacy rule packs (2026-05, workflow wf_c93d48ba) ===
+mod joins;
+mod index_hints;
+mod antipatterns;
+mod config;
+mod security;
+mod transactions;
+mod datatypes;
 
 pub struct RuleCtx<'a> {
     pub src: &'a str,
@@ -119,6 +127,56 @@ pub const REGISTRY: &[Rule] = &[
     ss(index_design::nullable_columns_should_be_explicit),
     ss(index_design::heap_table),
     ss(index_design::varchar_max_overuse),
+    // === optimizer-supremacy rule packs (2026-05) ===
+    // JOIN correctness & performance
+    ss(joins::right_outer_join_readability),
+    ss(joins::comma_cross_join),
+    ss(joins::join_without_on),
+    ss(joins::function_on_join_column),
+    ss(joins::outer_join_filtered_to_inner),
+    ss(joins::distinct_with_join_fanout),
+    // offline missing-index inference from query shape
+    ss(index_hints::missing_index_from_predicate),
+    ss(index_hints::order_by_forces_sort),
+    ss(index_hints::key_lookup_risk),
+    // deeper SARGability
+    ss(sargability::datetime_fn_between),
+    ss(sargability::dateadd_on_column),
+    ss(sargability::string_concat_in_predicate),
+    ss(sargability::charindex_search_predicate),
+    // set-based anti-patterns
+    ss(antipatterns::count_for_existence),
+    ss(antipatterns::correlated_scalar_subquery_in_select),
+    ss(antipatterns::union_maybe_union_all),
+    ss(antipatterns::distinct_many_columns),
+    // database/server config smells
+    ss(config::auto_shrink_on),
+    ss(config::auto_close_on),
+    ss(config::page_verify_not_checksum),
+    ss(config::recovery_simple),
+    ss(config::dbcc_shrink),
+    ss(config::dbcc_traceon_global),
+    ss(config::sp_configure_known_bad),
+    // security smells
+    ss(security::xp_cmdshell),
+    ss(security::grant_to_public),
+    ss(security::grant_control),
+    ss(security::grant_with_grant_option),
+    ss(security::add_to_privileged_role),
+    ss(security::execute_as_without_revert),
+    ss(security::openrowset_inline_credentials),
+    // transaction & error-handling smells
+    ss(transactions::begin_tran_without_try_catch),
+    ss(transactions::begin_tran_without_commit),
+    ss(transactions::commit_rollback_without_begin),
+    ss(transactions::dml_batch_missing_xact_abort),
+    ss(transactions::ddl_inside_explicit_tran),
+    // data-type smells
+    ss(datatypes::implicit_string_length_ddl),
+    ss(datatypes::implicit_string_length_cast),
+    ss(datatypes::float_for_money),
+    ss(datatypes::datetime_legacy_type),
+    ss(datatypes::sysname_as_general_string),
 ];
 
 pub(crate) fn make_loc(t: &Token) -> Location {

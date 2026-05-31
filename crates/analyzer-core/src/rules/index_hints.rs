@@ -1,0 +1,985 @@
+// Offline missing-index inference from query SHAPE alone (no DMVs / no plan).
+//
+// This is the analyzer's flagship offline USP: given a single-table SELECT with
+// WHERE equality / range predicates, we emit a concrete, copy-paste
+// `CREATE NONCLUSTERED INDEX ...` whose key order follows the SARGable rule
+// (equality columns first, then a single range column last) and whose INCLUDE
+// list covers the projected columns. We also flag ORDER-BY-driven sorts and
+// key-lookup risk where a covering index removes the work.
+//
+// FALSE POSITIVES ARE THE WORST OUTCOME. Every rule here bails out the moment
+// the statement shape is anything other than a textbook single-base-table
+// SELECT we can read with total confidence:
+//   * any JOIN / APPLY / comma-FROM (multiple tables)        -> skip
+//   * derived table / subquery / CTE / table-valued-function -> skip
+//   * a table name we cannot extract as a plain identifier   -> skip
+//   * a predicate column we cannot extract as a bare column  -> skip
+//   * SELECT *                                               -> skip the INCLUDE-bearing rules
+// When unsure we drop the finding rather than emit noise.
+
+use super::{finding, is_word, make_loc, RuleCtx};
+use crate::findings::{Finding, Severity};
+use crate::tokens::{Token, TokKind};
+
+/// Strip surrounding [] brackets (the lexer keeps `[col]` as one Word token).
+fn bare<'a>(t: &'a Token<'a>) -> &'a str {
+    t.text.trim_matches(|c| c == '[' || c == ']')
+}
+
+fn name_eq_ci(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).all(|(x, y)| x.eq_ignore_ascii_case(&y))
+}
+
+/// Next non-comment index at or after `from`.
+fn skip_comments(tokens: &[Token<'_>], from: usize) -> usize {
+    let mut k = from;
+    while k < tokens.len() && tokens[k].kind == TokKind::Comment { k += 1; }
+    k
+}
+
+/// A column reference extracted from a predicate / order-by / select list:
+/// the bare (bracket-stripped) column name plus the token index of the part we
+/// want to anchor a finding at (the column identifier itself).
+#[derive(Clone)]
+struct ColRef {
+    name: String,
+    tok: usize,
+}
+
+/// One single-table SELECT statement we are confident enough to reason about.
+struct SelectStmt {
+    /// Token index of the SELECT keyword (for anchoring).
+    select_tok: usize,
+    /// Verbatim table reference text as it should appear in DDL, e.g. `dbo.Orders`.
+    table_ref: String,
+    /// `true` if the projection is `SELECT *` / `SELECT a.*`.
+    select_star: bool,
+    /// Projected column names (best-effort, bare). Empty when `select_star`.
+    select_cols: Vec<String>,
+    /// Equality-predicate columns from the WHERE clause, in source order.
+    eq_cols: Vec<ColRef>,
+    /// Range-predicate columns (<,>,<=,>=,BETWEEN) from the WHERE clause.
+    range_cols: Vec<ColRef>,
+    /// ORDER BY columns (bare), in source order. Empty when no ORDER BY.
+    order_cols: Vec<ColRef>,
+}
+
+/// Walk the whole token stream and return every single-base-table SELECT we can
+/// confidently model. Anything ambiguous is silently skipped.
+fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if !is_word(&tokens[i], "SELECT") { i += 1; continue; }
+        let select_tok = i;
+
+        // Statement boundary: top-level ';' or end of input. Parens are tracked
+        // so a `;` inside a (sub)expression doesn't end us early.
+        let mut depth = 0i32;
+        let mut stmt_end = tokens.len();
+        let mut j = i + 1;
+        while j < tokens.len() {
+            let t = &tokens[j];
+            if t.text == "(" { depth += 1; }
+            else if t.text == ")" { depth -= 1; if depth < 0 { stmt_end = j; break; } }
+            else if depth == 0 && t.text == ";" { stmt_end = j; break; }
+            j += 1;
+        }
+
+        if let Some(stmt) = parse_one(tokens, select_tok, stmt_end) {
+            out.push(stmt);
+        }
+        i = stmt_end + 1;
+    }
+    out
+}
+
+/// Locate top-level (depth-0) clause keyword indices inside [start, end).
+struct Clauses {
+    from: Option<usize>,
+    where_: Option<usize>,
+    group: Option<usize>,
+    order: Option<usize>,
+    having: Option<usize>,
+    option: Option<usize>,
+}
+
+fn find_clauses(tokens: &[Token<'_>], start: usize, end: usize) -> Clauses {
+    let mut c = Clauses { from: None, where_: None, group: None, order: None, having: None, option: None };
+    let mut depth = 0i32;
+    let mut k = start;
+    while k < end {
+        let t = &tokens[k];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && t.kind == TokKind::Word {
+            if c.from.is_none() && is_word(t, "FROM") { c.from = Some(k); }
+            else if c.where_.is_none() && is_word(t, "WHERE") { c.where_ = Some(k); }
+            else if c.group.is_none() && is_word(t, "GROUP") { c.group = Some(k); }
+            else if c.order.is_none() && is_word(t, "ORDER") { c.order = Some(k); }
+            else if c.having.is_none() && is_word(t, "HAVING") { c.having = Some(k); }
+            else if c.option.is_none() && is_word(t, "OPTION") { c.option = Some(k); }
+        }
+        k += 1;
+    }
+    c
+}
+
+fn parse_one(tokens: &[Token<'_>], select_tok: usize, stmt_end: usize) -> Option<SelectStmt> {
+    let clauses = find_clauses(tokens, select_tok + 1, stmt_end);
+    let from_tok = clauses.from?; // need a FROM to have a table
+
+    // ---- FROM clause: exactly one plain base table, nothing else ---------
+    // The "from body" runs from just after FROM up to the next clause keyword.
+    let from_body_end = [clauses.where_, clauses.group, clauses.order, clauses.having, clauses.option]
+        .into_iter()
+        .flatten()
+        .filter(|&x| x > from_tok)
+        .min()
+        .unwrap_or(stmt_end);
+
+    let (table_ref, _table_tok) = extract_single_table(tokens, from_tok + 1, from_body_end)?;
+
+    // ---- projection ------------------------------------------------------
+    let (select_star, select_cols) = parse_projection(tokens, select_tok + 1, from_tok);
+
+    // ---- WHERE predicates ------------------------------------------------
+    let (eq_cols, range_cols) = if let Some(w) = clauses.where_ {
+        let where_end = [clauses.group, clauses.order, clauses.having, clauses.option]
+            .into_iter()
+            .flatten()
+            .filter(|&x| x > w)
+            .min()
+            .unwrap_or(stmt_end);
+        parse_where_predicates(tokens, w + 1, where_end)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // ---- ORDER BY columns ------------------------------------------------
+    let order_cols = if let Some(o) = clauses.order {
+        let order_end = [clauses.option]
+            .into_iter()
+            .flatten()
+            .filter(|&x| x > o)
+            .min()
+            .unwrap_or(stmt_end);
+        parse_order_by(tokens, o, order_end)
+    } else {
+        Vec::new()
+    };
+
+    Some(SelectStmt {
+        select_tok,
+        table_ref,
+        select_star,
+        select_cols,
+        eq_cols,
+        range_cols,
+        order_cols,
+    })
+}
+
+/// Read the FROM body and return the single base table reference, or None if the
+/// shape is anything we can't model with total confidence (join, subquery,
+/// comma list, TVF, hint, variable, etc.).
+fn extract_single_table(tokens: &[Token<'_>], start: usize, end: usize) -> Option<(String, usize)> {
+    let first = skip_comments(tokens, start);
+    if first >= end { return None; }
+
+    // A derived table / subquery starts with '(' — bail.
+    if tokens[first].text == "(" { return None; }
+    // A table variable (@t) or temp (#t) — the lexer keeps the sigil in-token.
+    if tokens[first].kind != TokKind::Word { return None; }
+    let lead = tokens[first].text;
+    if lead.starts_with('@') || lead.starts_with('#') { return None; }
+
+    // Collect the dotted identifier: Word (. Word)*  e.g. db.dbo.Orders / dbo.Orders / Orders.
+    let mut parts: Vec<usize> = vec![first];
+    let mut k = first + 1;
+    loop {
+        let dot = skip_comments(tokens, k);
+        if dot < end && tokens[dot].text == "." {
+            let nxt = skip_comments(tokens, dot + 1);
+            if nxt < end && tokens[nxt].kind == TokKind::Word && tokens[nxt].text != "(" {
+                parts.push(nxt);
+                k = nxt + 1;
+                continue;
+            }
+            return None; // dangling dot — give up rather than guess
+        }
+        k = dot;
+        break;
+    }
+    if parts.len() > 3 { return None; } // server.db.schema.table is too exotic to model
+
+    // Whatever follows the identifier must be only: an optional alias and
+    // nothing that signals multiplicity (JOIN/APPLY/comma) or a TVF call '('.
+    let mut p = skip_comments(tokens, k);
+    // optional AS
+    if p < end && is_word(&tokens[p], "AS") {
+        p = skip_comments(tokens, p + 1);
+        // alias word required after AS
+        if p < end && tokens[p].kind == TokKind::Word { p = skip_comments(tokens, p + 1); }
+        else { return None; }
+    } else if p < end && tokens[p].kind == TokKind::Word {
+        // bare alias — but reject anything that is actually a join/clause keyword
+        let w = tokens[p].text;
+        if is_join_or_break_kw(w) { /* not an alias, that's fine */ }
+        else { p = skip_comments(tokens, p + 1); }
+    }
+
+    // After the (optional) alias the FROM body must be exhausted. If anything
+    // remains — a comma (second table), JOIN/APPLY, a '(' (TVF args), a WITH
+    // hint, etc. — we are not in single-table territory.
+    let rest = skip_comments(tokens, p);
+    if rest < end {
+        return None;
+    }
+
+    // Reject TVF: `dbo.fn(...)` — the part right after the identifier is '('.
+    // (Handled above because '(' at `rest` would be inside [start,end); but a
+    // TVF with no alias would leave '(' as the first post-ident token, which we
+    // catch here too.)
+    let after_ident = skip_comments(tokens, k);
+    if after_ident < end && tokens[after_ident].text == "(" { return None; }
+
+    // Build the verbatim reference text from the identifier parts (preserve the
+    // user's bracketing/casing so the generated DDL is paste-ready).
+    let mut s = String::new();
+    for (idx, &pi) in parts.iter().enumerate() {
+        if idx > 0 { s.push('.'); }
+        s.push_str(tokens[pi].text);
+    }
+    // The table identifier we anchor at is the LAST part (the actual name).
+    Some((s, *parts.last().unwrap()))
+}
+
+fn is_join_or_break_kw(w: &str) -> bool {
+    const KWS: &[&str] = &[
+        "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER", "APPLY",
+        "WHERE", "GROUP", "ORDER", "HAVING", "OPTION", "UNION", "ON", "PIVOT", "UNPIVOT",
+    ];
+    KWS.iter().any(|k| name_eq_ci(w, k))
+}
+
+/// Parse the projection list between SELECT and FROM. Returns (is_star, cols).
+/// Columns are only collected when each item is a *plain* column reference
+/// (`col`, `t.col`, optionally `[col]`); any expression / function / literal /
+/// `*` makes us return star=false but stop collecting (empty list) so we never
+/// fabricate an INCLUDE list from something we didn't understand.
+fn parse_projection(tokens: &[Token<'_>], start: usize, from_tok: usize) -> (bool, Vec<String>) {
+    // Skip an optional DISTINCT / TOP (n) [PERCENT] prefix.
+    let mut p = skip_comments(tokens, start);
+    if p < from_tok && is_word(&tokens[p], "DISTINCT") { p = skip_comments(tokens, p + 1); }
+    if p < from_tok && is_word(&tokens[p], "TOP") {
+        p = skip_comments(tokens, p + 1);
+        if p < from_tok && tokens[p].text == "(" {
+            let mut d = 0i32;
+            while p < from_tok {
+                if tokens[p].text == "(" { d += 1; }
+                else if tokens[p].text == ")" { d -= 1; if d == 0 { p += 1; break; } }
+                p += 1;
+            }
+        } else if p < from_tok && tokens[p].kind == TokKind::Number {
+            p = skip_comments(tokens, p + 1);
+        }
+        if p < from_tok && is_word(&tokens[p], "PERCENT") { p = skip_comments(tokens, p + 1); }
+        if p < from_tok && is_word(&tokens[p], "WITH") {
+            // TOP ... WITH TIES — skip two words conservatively.
+            p = skip_comments(tokens, p + 1);
+            if p < from_tok && is_word(&tokens[p], "TIES") { p = skip_comments(tokens, p + 1); }
+        }
+    }
+
+    // Split into top-level comma items.
+    let mut items: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0i32;
+    let mut item_start = p;
+    let mut k = p;
+    while k < from_tok {
+        let t = &tokens[k];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && t.text == "," { items.push((item_start, k)); item_start = k + 1; }
+        k += 1;
+    }
+    if item_start < from_tok { items.push((item_start, from_tok)); }
+
+    let mut cols: Vec<String> = Vec::new();
+    for (s, e) in items {
+        let a = skip_comments(tokens, s);
+        if a >= e { return (false, Vec::new()); }
+        // `*` or `alias.*`
+        if tokens[a].text == "*" { return (true, Vec::new()); }
+        if a + 2 < e && tokens[a].kind == TokKind::Word && tokens[a + 1].text == "." && tokens[a + 2].text == "*" {
+            return (true, Vec::new());
+        }
+        // A plain column item is: Word (. Word)? optionally followed by `AS alias` / `alias`.
+        // Anything else (function call, arithmetic, literal, CASE, subquery) means
+        // we don't understand the projection — return cols we can't trust as empty.
+        let col = match plain_column_at(tokens, a, e) {
+            Some(c) => c,
+            None => return (false, Vec::new()),
+        };
+        cols.push(col);
+    }
+    (false, cols)
+}
+
+/// If [start,end) is exactly a plain column reference (optionally with an alias),
+/// return the bare column name. Otherwise None.
+fn plain_column_at(tokens: &[Token<'_>], start: usize, end: usize) -> Option<String> {
+    let a = skip_comments(tokens, start);
+    if a >= end || tokens[a].kind != TokKind::Word { return None; }
+    if tokens[a].text.starts_with('@') { return None; } // variable, not a column
+    // Optional `.col` qualifier (take the last segment as the column).
+    let mut col_tok = a;
+    let mut k = a + 1;
+    let d1 = skip_comments(tokens, k);
+    if d1 < end && tokens[d1].text == "." {
+        let nxt = skip_comments(tokens, d1 + 1);
+        if nxt < end && tokens[nxt].kind == TokKind::Word {
+            col_tok = nxt;
+            k = nxt + 1;
+        } else {
+            return None;
+        }
+    }
+    // Whatever remains may only be an alias: `AS name` or a bare `name`.
+    let mut p = skip_comments(tokens, k);
+    if p < end && is_word(&tokens[p], "AS") {
+        p = skip_comments(tokens, p + 1);
+        if p < end && tokens[p].kind == TokKind::Word { p = skip_comments(tokens, p + 1); } else { return None; }
+    } else if p < end && tokens[p].kind == TokKind::Word {
+        p = skip_comments(tokens, p + 1);
+    }
+    if skip_comments(tokens, p) < end { return None; } // trailing junk -> not a plain column
+    Some(bare(&tokens[col_tok]).to_string())
+}
+
+/// Parse WHERE predicates into (equality cols, range cols). We only model a
+/// conjunction of simple `col <op> <literal-or-param>` comparisons joined by
+/// AND at depth 0. The presence of any OR (at depth 0) makes the index
+/// recommendation unsound, so we bail entirely. Function-wrapped columns,
+/// column-to-column comparisons, and IN/EXISTS subqueries are ignored (not
+/// errors — just not modeled as seekable keys).
+fn parse_where_predicates(tokens: &[Token<'_>], start: usize, end: usize) -> (Vec<ColRef>, Vec<ColRef>) {
+    // Bail on any depth-0 OR — a disjunction can't be served by one B-tree seek.
+    let mut depth = 0i32;
+    let mut k = start;
+    while k < end {
+        let t = &tokens[k];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && is_word(t, "OR") { return (Vec::new(), Vec::new()); }
+        k += 1;
+    }
+
+    let mut eq: Vec<ColRef> = Vec::new();
+    let mut range: Vec<ColRef> = Vec::new();
+
+    // Split into depth-0 AND-separated conjuncts.
+    let mut conj: Vec<(usize, usize)> = Vec::new();
+    depth = 0;
+    let mut cstart = start;
+    k = start;
+    while k < end {
+        let t = &tokens[k];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && is_word(t, "AND") { conj.push((cstart, k)); cstart = k + 1; }
+        k += 1;
+    }
+    if cstart < end { conj.push((cstart, end)); }
+
+    for (cs, ce) in conj {
+        if let Some((col, is_range)) = parse_simple_predicate(tokens, cs, ce) {
+            if is_range {
+                if !range.iter().any(|c| name_eq_ci(&c.name, &col.name))
+                    && !eq.iter().any(|c| name_eq_ci(&c.name, &col.name))
+                {
+                    range.push(col);
+                }
+            } else if !eq.iter().any(|c| name_eq_ci(&c.name, &col.name))
+                && !range.iter().any(|c| name_eq_ci(&c.name, &col.name))
+            {
+                eq.push(col);
+            }
+        }
+    }
+    (eq, range)
+}
+
+/// Parse one conjunct. Returns (column, is_range) only when it is a clean
+/// `<col> <op> <constant/param>` (or `<col> BETWEEN ...`). Strips outer parens.
+fn parse_simple_predicate(tokens: &[Token<'_>], start: usize, end: usize) -> Option<(ColRef, bool)> {
+    let mut a = skip_comments(tokens, start);
+    let mut e = end;
+    // Strip a single layer of wrapping parens: ( <pred> ).
+    while a < e {
+        let aa = skip_comments(tokens, a);
+        if aa < e && tokens[aa].text == "(" {
+            // Find matching ')'. If it closes exactly at e-1, unwrap.
+            let mut d = 0i32;
+            let mut m = aa;
+            let mut close = None;
+            while m < e {
+                if tokens[m].text == "(" { d += 1; }
+                else if tokens[m].text == ")" { d -= 1; if d == 0 { close = Some(m); break; } }
+                m += 1;
+            }
+            match close {
+                Some(c) if c + 1 >= e => { a = aa + 1; e = c; }
+                _ => break,
+            }
+        } else { break; }
+    }
+
+    let lhs = skip_comments(tokens, a);
+    if lhs >= e || tokens[lhs].kind != TokKind::Word { return None; }
+    if tokens[lhs].text.starts_with('@') { return None; } // @var on the left
+
+    // The LHS must be a *bare* column (optionally `alias.col`) and NOT a
+    // function call. If the token after the identifier is '(', it's a function.
+    let mut col_tok = lhs;
+    let mut k = lhs + 1;
+    let d1 = skip_comments(tokens, k);
+    if d1 < e && tokens[d1].text == "." {
+        let nxt = skip_comments(tokens, d1 + 1);
+        if nxt < e && tokens[nxt].kind == TokKind::Word {
+            col_tok = nxt;
+            k = nxt + 1;
+        } else {
+            return None;
+        }
+    }
+    let after = skip_comments(tokens, k);
+    if after >= e { return None; }
+    // Function call on the LHS -> non-SARGable, not a clean key column.
+    if tokens[after].text == "(" { return None; }
+
+    let op = &tokens[after];
+    let col = ColRef { name: bare(&tokens[col_tok]).to_string(), tok: col_tok };
+
+    // BETWEEN -> range.
+    if is_word(op, "BETWEEN") {
+        return Some((col, true));
+    }
+    // IN -> treat as equality-class (can seek), but only for a literal list, not
+    // a subquery. Be conservative: require '(' then no SELECT inside.
+    if is_word(op, "IN") {
+        let lp = skip_comments(tokens, after + 1);
+        if lp < e && tokens[lp].text == "(" {
+            // ensure no SELECT inside (subquery) -> then it's a value list.
+            let mut d = 0i32;
+            let mut m = lp;
+            let mut has_select = false;
+            while m < e {
+                if tokens[m].text == "(" { d += 1; }
+                else if tokens[m].text == ")" { d -= 1; if d == 0 { break; } }
+                else if is_word(&tokens[m], "SELECT") { has_select = true; }
+                m += 1;
+            }
+            if !has_select { return Some((col, false)); }
+        }
+        return None;
+    }
+
+    // Comparison operators. The lexer emits each punct char separately, so `<=`
+    // is `<` then `=`. Treat `=` as equality; `<`,`>` (with/without `=`) as range.
+    let op_txt = op.text;
+    let rhs_start;
+    let is_range;
+    match op_txt {
+        "=" => { is_range = false; rhs_start = after + 1; }
+        "<" | ">" => {
+            // peek for a following '=' or '>' (>=, <=, <>) — still range, except
+            // `<>`/`!=` (inequality) which is NOT seekable -> reject.
+            let nxt = skip_comments(tokens, after + 1);
+            if nxt < e && tokens[nxt].text == ">" { return None; } // `<>`
+            is_range = true;
+            rhs_start = after + 1;
+        }
+        "!" => return None, // `!=` / `!<` etc. — not a clean seek
+        _ => return None,
+    }
+
+    // RHS must be a constant / parameter / simple value — NOT another column.
+    // We require the RHS to start with a literal (Number/String) or @param or a
+    // function like GETDATE()/N'..'. If RHS is a bare Word that isn't a param,
+    // it's probably a column-to-column comparison -> reject (can't index that).
+    let r = skip_comments(tokens, rhs_start);
+    if r >= e { return None; }
+    let rt = &tokens[r];
+    let rhs_ok = matches!(rt.kind, TokKind::Number | TokKind::String)
+        || (rt.kind == TokKind::Word && rt.text.starts_with('@'))
+        || (rt.kind == TokKind::Word && rt.text.eq_ignore_ascii_case("N")) // N'...'
+        || (rt.kind == TokKind::Word && is_known_constant_fn(rt.text));
+    if !rhs_ok { return None; }
+
+    Some((col, is_range))
+}
+
+/// RHS function-ish words we accept as "a constant value" so e.g.
+/// `created < GETDATE()` is still modeled. Conservative allowlist.
+fn is_known_constant_fn(w: &str) -> bool {
+    const FNS: &[&str] = &["GETDATE", "GETUTCDATE", "SYSDATETIME", "SYSUTCDATETIME", "NULL", "DATEADD"];
+    FNS.iter().any(|f| name_eq_ci(w, f))
+}
+
+/// Parse ORDER BY columns. Each item must be a plain column (optionally with
+/// `ASC`/`DESC`); if any item isn't, we return empty (don't model the sort).
+fn parse_order_by(tokens: &[Token<'_>], order_tok: usize, end: usize) -> Vec<ColRef> {
+    // ORDER must be followed by BY.
+    let by = skip_comments(tokens, order_tok + 1);
+    if by >= end || !is_word(&tokens[by], "BY") { return Vec::new(); }
+
+    let list_start = by + 1;
+    // Split on top-level commas.
+    let mut items: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0i32;
+    let mut s = list_start;
+    let mut k = list_start;
+    while k < end {
+        let t = &tokens[k];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && t.text == "," { items.push((s, k)); s = k + 1; }
+        k += 1;
+    }
+    if s < end { items.push((s, end)); }
+
+    let mut cols = Vec::new();
+    for (is_, ie) in items {
+        let a = skip_comments(tokens, is_);
+        if a >= ie || tokens[a].kind != TokKind::Word { return Vec::new(); }
+        // Ordinal ORDER BY (1,2) -> can't map to columns; bail.
+        if tokens[a].kind == TokKind::Number { return Vec::new(); }
+        let mut col_tok = a;
+        let mut p = a + 1;
+        let d1 = skip_comments(tokens, p);
+        if d1 < ie && tokens[d1].text == "." {
+            let nxt = skip_comments(tokens, d1 + 1);
+            if nxt < ie && tokens[nxt].kind == TokKind::Word { col_tok = nxt; p = nxt + 1; } else { return Vec::new(); }
+        }
+        // A trailing function-call '(' means an expression sort -> bail.
+        let q = skip_comments(tokens, p);
+        if q < ie && tokens[q].text == "(" { return Vec::new(); }
+        // Allow optional ASC/DESC, otherwise it must be the end of the item.
+        if q < ie {
+            if is_word(&tokens[q], "ASC") || is_word(&tokens[q], "DESC") {
+                if skip_comments(tokens, q + 1) < ie { return Vec::new(); }
+            } else {
+                return Vec::new();
+            }
+        }
+        cols.push(ColRef { name: bare(&tokens[col_tok]).to_string(), tok: col_tok });
+    }
+    cols
+}
+
+/// Derive a safe identifier fragment for the index name from a column name.
+fn ident_frag(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
+}
+
+/// The bare table name (last dotted segment, brackets stripped) for naming.
+fn table_short_name(table_ref: &str) -> String {
+    let last = table_ref.rsplit('.').next().unwrap_or(table_ref);
+    ident_frag(last.trim_matches(|c| c == '[' || c == ']'))
+}
+
+/// Build a `CREATE NONCLUSTERED INDEX` statement string. Key = eq cols then a
+/// single range col; INCLUDE = projected cols not already in the key.
+fn build_create_index(stmt: &SelectStmt, include_cols: &[String]) -> String {
+    let mut key: Vec<String> = stmt.eq_cols.iter().map(|c| c.name.clone()).collect();
+    // SARGable ordering: at most one trailing range column is useful as a key.
+    if let Some(first_range) = stmt.range_cols.first() {
+        key.push(first_range.name.clone());
+    }
+
+    let key_join = key
+        .iter()
+        .map(|c| format!("[{}]", ident_frag(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // INCLUDE = projected cols minus anything already in the key.
+    let incl: Vec<String> = include_cols
+        .iter()
+        .filter(|c| !key.iter().any(|k| name_eq_ci(k, c)))
+        .cloned()
+        .collect();
+
+    let name = format!(
+        "IX_{}_{}",
+        table_short_name(&stmt.table_ref),
+        key.iter().map(|c| ident_frag(c)).collect::<Vec<_>>().join("_")
+    );
+
+    let mut sql = format!(
+        "CREATE NONCLUSTERED INDEX [{}]\n    ON {} ({})",
+        name, stmt.table_ref, key_join
+    );
+    if !incl.is_empty() {
+        let incl_join = incl
+            .iter()
+            .map(|c| format!("[{}]", ident_frag(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!("\n    INCLUDE ({})", incl_join));
+    }
+    sql.push(';');
+    sql
+}
+
+// ===========================================================================
+// RULE (a): missing index from WHERE equality / range predicates
+// ===========================================================================
+
+/// Single-table SELECT with WHERE equality / range predicates we can read →
+/// emit a concrete CREATE NONCLUSTERED INDEX (equality keys first, one trailing
+/// range key) with an INCLUDE list covering the projection.
+pub fn missing_index_from_predicate(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for stmt in parse_single_table_selects(ctx.tokens) {
+        // Need at least one seekable predicate column to recommend a key.
+        if stmt.eq_cols.is_empty() && stmt.range_cols.is_empty() { continue; }
+        // Confidence guard: at least one equality column, OR a single clean range
+        // column. Pure multi-range with no equality is weaker; still emit but it
+        // remains a valid (single trailing range) key.
+        let anchor = stmt
+            .eq_cols
+            .first()
+            .or_else(|| stmt.range_cols.first())
+            .map(|c| c.tok)
+            .unwrap_or(stmt.select_tok);
+
+        // INCLUDE only when we confidently parsed the projection (not SELECT *).
+        let include: Vec<String> = if stmt.select_star { Vec::new() } else { stmt.select_cols.clone() };
+
+        let ddl = build_create_index(&stmt, &include);
+
+        let key_desc = {
+            let mut parts: Vec<String> = stmt.eq_cols.iter().map(|c| format!("{} (=)", c.name)).collect();
+            if let Some(r) = stmt.range_cols.first() {
+                parts.push(format!("{} (range)", r.name));
+            }
+            parts.join(", ")
+        };
+
+        let star_note = if stmt.select_star {
+            "  (Projection is SELECT * — listing real columns would let the index cover the query via INCLUDE.)"
+        } else {
+            ""
+        };
+
+        out.push(finding(
+            "index.missing_index_from_predicate",
+            Severity::Info,
+            format!(
+                "Single-table SELECT on {} filters by {} but no matching index is declared in this batch. The optimizer may scan the whole table.",
+                stmt.table_ref, key_desc
+            ),
+            Some(make_loc(&ctx.tokens[anchor])),
+            Some(format!(
+                "Add a covering nonclustered index (equality columns first, range column last):\n\n{}\n{}\nVerify against the actual plan / sys.dm_db_missing_index_details before deploying; an index has write-side cost.",
+                ddl, star_note
+            )),
+        ));
+    }
+    out
+}
+
+// ===========================================================================
+// RULE (b): ORDER BY that doesn't match the WHERE equality columns -> sort
+// ===========================================================================
+
+/// Single-table SELECT whose ORDER BY columns aren't covered by the WHERE
+/// equality columns → the engine adds an explicit Sort. A covering index keyed
+/// (equality cols, then ORDER BY cols) returns rows pre-sorted.
+pub fn order_by_forces_sort(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for stmt in parse_single_table_selects(ctx.tokens) {
+        if stmt.order_cols.is_empty() { continue; }
+
+        // If the ORDER BY leading column is itself an equality-filtered column,
+        // a single-value filter makes the sort trivial — skip (low value, risk
+        // of noise). We fire only when ORDER BY adds genuinely new sort columns.
+        let order_all_in_eq = stmt
+            .order_cols
+            .iter()
+            .all(|o| stmt.eq_cols.iter().any(|e| name_eq_ci(&e.name, &o.name)));
+        if order_all_in_eq { continue; }
+
+        // We must be confident: only fire when there's at least one equality
+        // predicate (so the suggested index has a sensible leading key) OR the
+        // ORDER BY is the only access path (no predicate at all). Mixed range +
+        // order is left to rule (a)/manual review to avoid a wrong key order.
+        if !stmt.range_cols.is_empty() && stmt.eq_cols.is_empty() {
+            // pure range + order: range and sort columns may conflict for key
+            // order; don't guess.
+            continue;
+        }
+
+        let anchor = stmt.order_cols[0].tok;
+
+        // Build a sort-avoiding key: equality cols, then ORDER BY cols (dedup).
+        let mut key: Vec<String> = stmt.eq_cols.iter().map(|c| c.name.clone()).collect();
+        for o in &stmt.order_cols {
+            if !key.iter().any(|k| name_eq_ci(k, &o.name)) {
+                key.push(o.name.clone());
+            }
+        }
+        let key_join = key
+            .iter()
+            .map(|c| format!("[{}]", ident_frag(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let include: Vec<String> = if stmt.select_star {
+            Vec::new()
+        } else {
+            stmt.select_cols
+                .iter()
+                .filter(|c| !key.iter().any(|k| name_eq_ci(k, c)))
+                .cloned()
+                .collect()
+        };
+        let name = format!(
+            "IX_{}_{}",
+            table_short_name(&stmt.table_ref),
+            key.iter().map(|c| ident_frag(c)).collect::<Vec<_>>().join("_")
+        );
+        let mut ddl = format!(
+            "CREATE NONCLUSTERED INDEX [{}]\n    ON {} ({})",
+            name, stmt.table_ref, key_join
+        );
+        if !include.is_empty() {
+            let incl_join = include
+                .iter()
+                .map(|c| format!("[{}]", ident_frag(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ddl.push_str(&format!("\n    INCLUDE ({})", incl_join));
+        }
+        ddl.push(';');
+
+        let order_desc = stmt
+            .order_cols
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        out.push(finding(
+            "index.order_by_forces_sort",
+            Severity::Info,
+            format!(
+                "ORDER BY {} on {} isn't served by the filter columns, so the engine must add an explicit Sort. An index that keys the sort columns returns rows already ordered.",
+                order_desc, stmt.table_ref
+            ),
+            Some(make_loc(&ctx.tokens[anchor])),
+            Some(format!(
+                "Create an index whose key ends with the ORDER BY columns so the Sort operator disappears:\n\n{}\nMatch the ASC/DESC direction of the ORDER BY in the index key if the sort is single-direction-critical.",
+                ddl
+            )),
+        ));
+    }
+    out
+}
+
+// ===========================================================================
+// RULE (c): key-lookup risk — several projected columns + narrow predicate
+// ===========================================================================
+
+/// Single-table SELECT projecting several explicitly-named columns behind a
+/// narrow (equality) predicate → if only a non-covering index exists, each row
+/// pays a key lookup. A covering index with INCLUDE removes the lookups. Fires
+/// only when we confidently read both the predicate AND a real (non-*) column
+/// list of meaningful width.
+pub fn key_lookup_risk(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for stmt in parse_single_table_selects(ctx.tokens) {
+        // Require a narrow predicate: at least one equality column, no range
+        // (range widens the seek and changes the calculus).
+        if stmt.eq_cols.is_empty() || !stmt.range_cols.is_empty() { continue; }
+        // Require a genuine, understood projection of several columns.
+        if stmt.select_star || stmt.select_cols.is_empty() { continue; }
+        // Count projected columns that are NOT already the predicate keys —
+        // those are exactly the columns a key lookup would have to fetch.
+        let lookup_cols: Vec<String> = stmt
+            .select_cols
+            .iter()
+            .filter(|c| !stmt.eq_cols.iter().any(|e| name_eq_ci(&e.name, c)))
+            .cloned()
+            .collect();
+        // "Several" -> at least 3 fetched columns. Below that, a key lookup is
+        // cheap and a covering index may not pay off; stay conservative.
+        if lookup_cols.len() < 3 { continue; }
+
+        let anchor = stmt.eq_cols[0].tok;
+        let ddl = build_create_index(&stmt, &stmt.select_cols);
+
+        out.push(finding(
+            "index.key_lookup_risk",
+            Severity::Info,
+            format!(
+                "SELECT on {} returns {} columns behind a narrow equality filter. If the seek index doesn't cover these columns, every matching row pays a key lookup back to the base table.",
+                stmt.table_ref, stmt.select_cols.len()
+            ),
+            Some(make_loc(&ctx.tokens[anchor])),
+            Some(format!(
+                "Make the index cover the query: key on the filter column(s) and INCLUDE the fetched columns so no key lookup is needed:\n\n{}\nConfirm with the actual plan that a Key Lookup / RID Lookup is present before adding the index.",
+                ddl
+            )),
+        ));
+    }
+    out
+}
+
+// ===========================================================================
+// tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use crate::{analyze, AnalyzeInput};
+    use crate::findings::Finding;
+
+    fn run(sql: &str) -> Vec<Finding> {
+        analyze(&AnalyzeInput {
+            sql: Some(sql.to_string()),
+            server_version: Some(2025),
+            ..Default::default()
+        })
+        .findings
+    }
+
+    fn fired(sql: &str, id: &str) -> Option<Finding> {
+        run(sql).into_iter().find(|f| f.rule.0 == id)
+    }
+
+    // ---- rule (a): missing_index_from_predicate -----------------------------
+
+    #[test]
+    fn missing_index_equality_fires_with_location_and_ddl() {
+        let sql = "SELECT OrderId, CustomerId, Total FROM dbo.Orders WHERE CustomerId = @cid AND Status = 'Open';";
+        let f = fired(sql, "index.missing_index_from_predicate")
+            .expect("rule (a) should fire on single-table equality SELECT");
+        assert!(f.location.is_some(), "must set a location");
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("CREATE NONCLUSTERED INDEX"), "rec must contain runnable DDL: {rec}");
+        assert!(rec.contains("dbo.Orders"), "DDL must name the real table: {rec}");
+        // equality columns belong in the key
+        assert!(rec.contains("[CustomerId]") && rec.contains("[Status]"), "key cols missing: {rec}");
+    }
+
+    #[test]
+    fn missing_index_range_goes_last_in_key() {
+        let sql = "SELECT Id FROM dbo.Events WHERE TenantId = 5 AND CreatedAt > '2026-01-01';";
+        let f = fired(sql, "index.missing_index_from_predicate").expect("should fire");
+        let rec = f.recommendation.unwrap();
+        // TenantId (equality) must come before CreatedAt (range) in the ON(...) key.
+        let on = rec.find("ON ").unwrap();
+        let tenant = rec[on..].find("[TenantId]").unwrap();
+        let created = rec[on..].find("[CreatedAt]").unwrap();
+        assert!(tenant < created, "equality key must precede range key: {rec}");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_join() {
+        // Two tables -> we must NOT emit a single-table index recommendation.
+        let sql = "SELECT o.Id FROM dbo.Orders o JOIN dbo.Customers c ON o.CustomerId = c.Id WHERE c.Status = 'X';";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire on a multi-table join");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_or_predicate() {
+        // OR can't be served by a single seek -> no recommendation.
+        let sql = "SELECT Id FROM dbo.T WHERE A = 1 OR B = 2;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire when WHERE has a top-level OR");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_function_predicate() {
+        // Function-wrapped column is non-SARGable; we don't propose a key on it.
+        let sql = "SELECT Id FROM dbo.T WHERE UPPER(Name) = 'X';";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not propose an index key on a function-wrapped column");
+    }
+
+    #[test]
+    fn missing_index_does_not_fire_on_subquery_from() {
+        let sql = "SELECT Id FROM (SELECT Id FROM dbo.T) AS x WHERE x.Id = 1;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none(),
+            "must not fire when FROM is a derived table");
+    }
+
+    // ---- rule (b): order_by_forces_sort -------------------------------------
+
+    #[test]
+    fn order_by_sort_fires() {
+        let sql = "SELECT Id, Name FROM dbo.People WHERE TenantId = 1 ORDER BY LastName, FirstName;";
+        let f = fired(sql, "index.order_by_forces_sort")
+            .expect("rule (b) should fire when ORDER BY adds new sort columns");
+        assert!(f.location.is_some());
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("CREATE NONCLUSTERED INDEX"), "rec must include DDL: {rec}");
+        assert!(rec.contains("[LastName]") && rec.contains("[FirstName]"), "sort cols must be in key: {rec}");
+    }
+
+    #[test]
+    fn order_by_sort_does_not_fire_when_order_matches_filter() {
+        // ORDER BY column is the equality-filtered column -> trivial sort, skip.
+        let sql = "SELECT Id FROM dbo.People WHERE Status = 'X' ORDER BY Status;";
+        assert!(fired(sql, "index.order_by_forces_sort").is_none(),
+            "must not fire when ORDER BY is fully covered by equality filter");
+    }
+
+    #[test]
+    fn order_by_sort_does_not_fire_on_join() {
+        let sql = "SELECT a.Id FROM dbo.A a JOIN dbo.B b ON a.Id = b.Id ORDER BY a.Name;";
+        assert!(fired(sql, "index.order_by_forces_sort").is_none(),
+            "must not fire on a multi-table join");
+    }
+
+    // ---- rule (c): key_lookup_risk ------------------------------------------
+
+    #[test]
+    fn key_lookup_fires_on_wide_projection_narrow_filter() {
+        let sql = "SELECT Id, FirstName, LastName, Email, Phone FROM dbo.Customer WHERE CustomerCode = @c;";
+        let f = fired(sql, "index.key_lookup_risk")
+            .expect("rule (c) should fire: many columns behind a narrow equality filter");
+        assert!(f.location.is_some());
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("INCLUDE"), "covering index must use INCLUDE: {rec}");
+        assert!(rec.contains("[CustomerCode]"), "filter col must be the key: {rec}");
+    }
+
+    #[test]
+    fn key_lookup_does_not_fire_on_select_star() {
+        // We can't build a trustworthy INCLUDE list from '*'.
+        let sql = "SELECT * FROM dbo.Customer WHERE CustomerCode = @c;";
+        assert!(fired(sql, "index.key_lookup_risk").is_none(),
+            "must not fire on SELECT * (no real column list)");
+    }
+
+    #[test]
+    fn key_lookup_does_not_fire_on_few_columns() {
+        // Only 2 fetched columns besides the key -> below the "several" threshold.
+        let sql = "SELECT Id, Name FROM dbo.Customer WHERE CustomerCode = @c;";
+        assert!(fired(sql, "index.key_lookup_risk").is_none(),
+            "must not fire when only a couple of columns are fetched");
+    }
+
+    #[test]
+    fn key_lookup_does_not_fire_with_range_predicate() {
+        // Range predicate widens the seek; this rule is for narrow equality only.
+        let sql = "SELECT Id, A, B, C, D FROM dbo.T WHERE CreatedAt > '2026-01-01';";
+        assert!(fired(sql, "index.key_lookup_risk").is_none(),
+            "must not fire when the predicate is a range");
+    }
+}

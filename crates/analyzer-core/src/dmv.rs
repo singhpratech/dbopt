@@ -315,7 +315,15 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     let mut recs: Vec<Recommendation> = Vec::new();
 
     // ---- CreateIndex: from SQL Server's own missing-index DMV --------------
-    for m in &bundle.missing_indexes {
+    // Cross-group consolidation first: the DMV emits one suggestion per query
+    // shape, so the SAME table often gets several near-identical suggestions
+    // that differ only by a trailing key column or an INCLUDE. Left un-merged
+    // they'd become N overlapping indexes (write amplification + the very
+    // duplication this advisor is meant to prevent). `consolidate_missing_indexes`
+    // folds prefix-related suggestions into one superset index (widest key,
+    // unioned INCLUDEs) before we emit any DDL. See its docs for the merge rule.
+    let consolidated = consolidate_missing_indexes(&bundle.missing_indexes);
+    for m in &consolidated {
         let keys: Vec<String> = m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect();
         if keys.is_empty() { continue; }
         // SQL Server's standard "improvement measure".
@@ -449,6 +457,48 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         }
     }
 
+    // ---- MergeIndex: left-PREFIX-redundant existing indexes ----------------
+    // The exact-duplicate pass above only catches indexes whose key lists are
+    // identical. The thinner case the old code missed: index A's key list is a
+    // strict left prefix of index B's key list on the same table. Any query A
+    // can satisfy, B can satisfy too (a composite index serves all of its leading
+    // prefixes), so A is redundant — drop it and let B carry the load. This is
+    // exactly what the community index-health script flags as a "borderline duplicate". We never
+    // touch a PK/unique index (it enforces a constraint), and `redundant_existing_indexes`
+    // dedupes so a key list that's a prefix of several survivors is only flagged once.
+    for r in redundant_existing_indexes(&bundle.indexes) {
+        let drop_reserved_kb = reserved_by_index
+            .get(&(r.schema.to_lowercase(), r.table.to_lowercase(), r.redundant_index.to_lowercase()))
+            .copied()
+            .unwrap_or(0);
+        recs.push(Recommendation {
+            kind: RecKind::MergeIndex,
+            priority: "medium".into(),
+            title: format!("Drop prefix-redundant index {} on {}.{}", r.redundant_index, r.schema, r.table),
+            object: format!("{}.{}.{}", r.schema, r.table, r.redundant_index),
+            rationale: format!(
+                "Index {} on key ({}) is a left prefix of {} on ({}). A composite index already serves every query that uses only its leading columns, so {} is redundant — it just doubles the write maintenance on this key. Confirm {} has any INCLUDE columns {} needs, then drop {}.",
+                r.redundant_index, r.redundant_key.join(", "),
+                r.superset_index, r.superset_key.join(", "),
+                r.redundant_index, r.superset_index, r.redundant_index, r.redundant_index
+            ),
+            ddl: format!(
+                "-- {} ({}) is a left prefix of {} ({}); fold any still-needed INCLUDE columns into {} first, then:\nDROP INDEX {} ON {}.{};",
+                r.redundant_index, r.redundant_key.join(", "),
+                r.superset_index, r.superset_key.join(", "),
+                br(&r.superset_index),
+                br(&r.redundant_index), br(&r.schema), br(&r.table)
+            ),
+            impact_score: 4_000.0,
+            metrics: vec![
+                ("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb))),
+                ("Reads".into(), "0 unique".into()),
+            ],
+            // Prefix relationship is read directly from catalog key-column metadata.
+            confidence: "observed".into(),
+        });
+    }
+
     // ---- ColumnstoreCandidate: big, scan-heavy, low-churn rowstore ---------
     // Aggregate row_count (max across partitions) + reserved_kb per table.
     let mut size_by_table: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
@@ -504,4 +554,444 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             .then(b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal))
     });
     recs
+}
+
+// ===========================================================================
+// Index-advisor cross-group de-dup — closes the "thinner the community index-health script" gap.
+//
+// The base `advise()` only merged EXACT same-table duplicate EXISTING indexes
+// and emitted one CreateIndex per raw missing-index DMV row. That leaves two
+// real gaps that a serious index advisor must close:
+//   (a) the missing-index DMV fans out one suggestion per query shape, so the
+//       SAME table gets several prefix-overlapping suggestions. Applied naively
+//       they become N overlapping indexes — the exact write-amplification the
+//       advisor exists to prevent. We consolidate them into one superset index.
+//   (b) an EXISTING index whose key list is a strict left prefix of another
+//       index's key list on the same table is redundant (a composite index
+//       serves all of its leading prefixes) and should be dropped.
+//   (c) an EXISTING index with writes but ~zero reads is pure write tax and is
+//       a drop candidate — already handled by the DropIndex pass in `advise()`;
+//       `unused_existing_indexes` factors that logic out for reuse + testing.
+//
+// All three are pure functions over the bundle so they unit-test in isolation,
+// and the conservative merge rules below keep false positives near zero.
+// ===========================================================================
+
+/// Case-insensitive equality on an identifier fragment, ignoring brackets and
+/// surrounding whitespace (so `[CustomerId]` == `customerid`).
+fn col_eq(a: &str, b: &str) -> bool {
+    unbr(a).eq_ignore_ascii_case(&unbr(b))
+}
+
+/// True iff `prefix`'s columns are a prefix (or equal) of `full`'s columns,
+/// compared case-insensitively and bracket-insensitively, IN ORDER. An empty
+/// `prefix` is never treated as a prefix (it carries no key, nothing to merge).
+fn is_key_prefix(prefix: &[String], full: &[String]) -> bool {
+    if prefix.is_empty() || prefix.len() > full.len() { return false; }
+    prefix.iter().zip(full.iter()).all(|(p, f)| col_eq(p, f))
+}
+
+/// Union INCLUDE columns preserving first-seen order, case/bracket-insensitive.
+fn union_includes(into: &mut Vec<String>, extra: &[String]) {
+    for c in extra {
+        if !into.iter().any(|x| col_eq(x, c)) && !c.trim().is_empty() {
+            into.push(c.clone());
+        }
+    }
+}
+
+/// (a) CROSS-GROUP missing-index consolidation.
+///
+/// The DMV's missing-index suggestions are grouped per query shape, so one
+/// table frequently has several suggestions that share leading equality
+/// columns or where one key is a left prefix of another. Creating all of them
+/// produces overlapping, write-amplifying indexes. This folds prefix-related
+/// suggestions on the SAME (schema, table) into one superset suggestion:
+///   * the WIDEST key wins (the prefix one is absorbed),
+///   * INCLUDE columns are UNIONED,
+///   * impact metrics are aggregated (max user-impact + cost, summed seeks),
+///     so the consolidated rec still ranks on the strongest evidence.
+///
+/// Conservative by design — we ONLY merge when one suggestion's full key
+/// (equality columns followed by inequality columns, the order the DMV uses to
+/// build the key) is a clean ordered prefix of another's. Suggestions that
+/// merely overlap without a prefix relationship are left separate, because
+/// reordering key columns can change selectivity and we will not guess.
+pub fn consolidate_missing_indexes(missing: &[MissingIndex]) -> Vec<MissingIndex> {
+    // The DMV builds the index key as equality columns first, then inequality
+    // columns. Compare on that full ordered key.
+    fn full_key(m: &MissingIndex) -> Vec<String> {
+        m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect()
+    }
+
+    // Group by (schema, table), case-insensitively, preserving input order.
+    let mut groups: BTreeMap<(String, String), Vec<MissingIndex>> = BTreeMap::new();
+    for m in missing {
+        if full_key(m).is_empty() { continue; }
+        groups
+            .entry((m.schema_name.to_lowercase(), m.table_name.to_lowercase()))
+            .or_default()
+            .push(m.clone());
+    }
+
+    let mut out: Vec<MissingIndex> = Vec::new();
+    for (_, mut list) in groups {
+        // Greedy fixpoint merge: repeatedly fold any pair in a prefix relation
+        // into the wider one until no more merges are possible. O(n^2) per
+        // group, and groups are tiny (a handful of suggestions), so this is fine.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            'outer: for i in 0..list.len() {
+                for j in 0..list.len() {
+                    if i == j { continue; }
+                    let ki = full_key(&list[i]);
+                    let kj = full_key(&list[j]);
+                    // Merge j INTO i when j's key is a (possibly equal) prefix of
+                    // i's key — i is the superset and survives. When the keys are
+                    // identical, `i < j` ensures we pick a single survivor and
+                    // don't ping-pong forever.
+                    let j_is_prefix_of_i = is_key_prefix(&kj, &ki);
+                    let identical = ki.len() == kj.len() && j_is_prefix_of_i;
+                    if j_is_prefix_of_i && (!identical || i < j) {
+                        // Absorb j into i: widest key already on i; union INCLUDEs
+                        // (also pull j's KEY columns beyond i's into i's INCLUDE?
+                        // No — j is a prefix, so it has no columns i lacks).
+                        let absorbed = list.remove(j);
+                        // Index i may have shifted if j < i.
+                        let i2 = if j < i { i - 1 } else { i };
+                        union_includes(&mut list[i2].included_columns, &absorbed.included_columns);
+                        // Aggregate evidence onto the survivor.
+                        list[i2].avg_user_impact = list[i2].avg_user_impact.max(absorbed.avg_user_impact);
+                        list[i2].avg_total_user_cost = list[i2].avg_total_user_cost.max(absorbed.avg_total_user_cost);
+                        list[i2].user_seeks = list[i2].user_seeks.saturating_add(absorbed.user_seeks);
+                        changed = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        out.extend(list);
+    }
+    out
+}
+
+/// One left-prefix-redundant EXISTING index: `redundant_index` can be dropped
+/// because its key is a strict left prefix of `superset_index`'s key on the
+/// same table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedundantIndexFinding {
+    pub schema: String,
+    pub table: String,
+    pub redundant_index: String,
+    pub redundant_key: Vec<String>,
+    pub superset_index: String,
+    pub superset_key: Vec<String>,
+}
+
+/// (b) Detect EXISTING indexes whose key list is a strict left prefix of
+/// another index's key list on the same table — the prefix one is redundant.
+///
+/// Conservative guards (false positives are the worst outcome here, because the
+/// "fix" is a DROP):
+///   * STRICT prefix only (shorter than the superset). Exact duplicates are
+///     already handled by `advise()`'s exact-dup MergeIndex pass; emitting them
+///     here too would double-report.
+///   * never propose dropping a PRIMARY KEY or UNIQUE index — it enforces a
+///     constraint and a query plan may depend on its uniqueness guarantee.
+///     A unique index is also NOT redundant with a non-unique superset.
+///   * a redundant index is reported at most once even if several wider indexes
+///     contain it as a prefix (pick the first survivor deterministically).
+pub fn redundant_existing_indexes(indexes: &[IndexMeta]) -> Vec<RedundantIndexFinding> {
+    let mut by_table: BTreeMap<(String, String), Vec<&IndexMeta>> = BTreeMap::new();
+    for ix in indexes {
+        if ix.key_columns.is_empty() { continue; }
+        by_table
+            .entry((ix.schema_name.clone(), ix.table_name.clone()))
+            .or_default()
+            .push(ix);
+    }
+
+    let mut out: Vec<RedundantIndexFinding> = Vec::new();
+    for ((schema, table), list) in &by_table {
+        for i in 0..list.len() {
+            let cand = list[i];
+            // Never drop something that enforces a constraint.
+            if cand.is_primary_key || cand.is_unique { continue; }
+            // Find a STRICT superset: same leading key, strictly longer.
+            let superset = list.iter().enumerate().find(|(j, other)| {
+                *j != i
+                    && other.key_columns.len() > cand.key_columns.len()
+                    && is_key_prefix(&cand.key_columns, &other.key_columns)
+            });
+            if let Some((_, sup)) = superset {
+                out.push(RedundantIndexFinding {
+                    schema: schema.clone(),
+                    table: table.clone(),
+                    redundant_index: cand.index_name.clone(),
+                    redundant_key: cand.key_columns.clone(),
+                    superset_index: sup.index_name.clone(),
+                    superset_key: sup.key_columns.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// One clearly-unused EXISTING index: writes accrued but reads are ~zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnusedIndexFinding {
+    pub schema: String,
+    pub table: String,
+    pub index_name: String,
+    pub user_updates: u64,
+}
+
+/// (c) Detect EXISTING indexes that take writes but serve ~zero reads (pure
+/// write tax). Mirrors the DropIndex logic already wired into `advise()`,
+/// factored out as a pure function for reuse and direct testing. Same
+/// conservative guards: requires a meaningful write count and skips PK/unique
+/// and PK-named indexes (`meta` lets the caller pass catalog metadata so we can
+/// honour the is_primary_key / is_unique flags, not just the name heuristic).
+pub fn unused_existing_indexes(
+    usage: &[IndexUsage],
+    indexes: &[IndexMeta],
+    min_updates: u64,
+) -> Vec<UnusedIndexFinding> {
+    let mut meta: BTreeMap<(String, String, String), &IndexMeta> = BTreeMap::new();
+    for ix in indexes {
+        meta.insert(
+            (ix.schema_name.to_lowercase(), ix.table_name.to_lowercase(), ix.index_name.to_lowercase()),
+            ix,
+        );
+    }
+    let mut out = Vec::new();
+    for u in usage {
+        let reads = u.user_seeks + u.user_scans + u.user_lookups;
+        if reads != 0 || u.user_updates <= min_updates { continue; }
+        let key = (u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase());
+        if let Some(ix) = meta.get(&key) {
+            if ix.is_primary_key || ix.is_unique { continue; }
+        }
+        if u.index_name.to_lowercase().starts_with("pk_") || u.index_name.eq_ignore_ascii_case("PK") { continue; }
+        out.push(UnusedIndexFinding {
+            schema: u.schema_name.clone(),
+            table: u.table_name.clone(),
+            index_name: u.index_name.clone(),
+            user_updates: u.user_updates,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn mi(table: &str, eq: &[&str], ineq: &[&str], inc: &[&str], impact: f64, seeks: u64, cost: f64) -> MissingIndex {
+        MissingIndex {
+            schema_name: "dbo".into(),
+            table_name: table.into(),
+            equality_columns: eq.iter().map(|s| s.to_string()).collect(),
+            inequality_columns: ineq.iter().map(|s| s.to_string()).collect(),
+            included_columns: inc.iter().map(|s| s.to_string()).collect(),
+            avg_user_impact: impact,
+            user_seeks: seeks,
+            avg_total_user_cost: cost,
+        }
+    }
+
+    fn ix(table: &str, name: &str, keys: &[&str], unique: bool, pk: bool) -> IndexMeta {
+        IndexMeta {
+            schema_name: "dbo".into(),
+            table_name: table.into(),
+            index_name: name.into(),
+            is_unique: unique,
+            is_primary_key: pk,
+            key_columns: keys.iter().map(|s| s.to_string()).collect(),
+            included_columns: vec![],
+        }
+    }
+
+    fn usage(table: &str, name: &str, seeks: u64, scans: u64, lookups: u64, updates: u64) -> IndexUsage {
+        IndexUsage {
+            database_name: "db".into(),
+            schema_name: "dbo".into(),
+            table_name: table.into(),
+            index_name: name.into(),
+            user_seeks: seeks,
+            user_scans: scans,
+            user_lookups: lookups,
+            user_updates: updates,
+        }
+    }
+
+    // ---- (a) consolidate_missing_indexes -----------------------------------
+
+    #[test]
+    fn consolidate_merges_prefix_suggestions_into_superset() {
+        // Two suggestions on the same table: ([CustomerId]) is a left prefix of
+        // ([CustomerId],[OrderDate]). They must collapse to ONE superset index
+        // with the wider key and the UNION of INCLUDE columns.
+        let missing = vec![
+            mi("Orders", &["CustomerId"], &[], &["Total"], 60.0, 100, 5.0),
+            mi("Orders", &["CustomerId"], &["OrderDate"], &["Amount"], 90.0, 300, 12.0),
+        ];
+        let out = consolidate_missing_indexes(&missing);
+        assert_eq!(out.len(), 1, "prefix suggestions must consolidate to one: {out:#?}");
+        let m = &out[0];
+        // Widest key wins (equality CustomerId + inequality OrderDate).
+        assert_eq!(m.equality_columns, vec!["CustomerId"]);
+        assert_eq!(m.inequality_columns, vec!["OrderDate"]);
+        // INCLUDEs unioned.
+        assert!(m.included_columns.iter().any(|c| c.eq_ignore_ascii_case("Total")));
+        assert!(m.included_columns.iter().any(|c| c.eq_ignore_ascii_case("Amount")));
+        // Evidence aggregated: max impact/cost, summed seeks.
+        assert_eq!(m.user_seeks, 400);
+        assert!((m.avg_user_impact - 90.0).abs() < 1e-9);
+        assert!((m.avg_total_user_cost - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn consolidate_keeps_unrelated_keys_separate() {
+        // NEGATIVE: same table but the keys are NOT in a prefix relationship
+        // (different leading column). Reordering could change selectivity, so we
+        // must NOT merge them.
+        let missing = vec![
+            mi("Orders", &["CustomerId"], &[], &[], 50.0, 10, 1.0),
+            mi("Orders", &["ProductId"], &[], &[], 50.0, 10, 1.0),
+        ];
+        let out = consolidate_missing_indexes(&missing);
+        assert_eq!(out.len(), 2, "non-prefix suggestions must stay separate: {out:#?}");
+    }
+
+    #[test]
+    fn consolidate_does_not_cross_tables() {
+        // NEGATIVE: identical-shaped suggestions on DIFFERENT tables are not
+        // duplicates and must both survive.
+        let missing = vec![
+            mi("Orders", &["CustomerId"], &[], &[], 50.0, 10, 1.0),
+            mi("Invoices", &["CustomerId"], &[], &[], 50.0, 10, 1.0),
+        ];
+        let out = consolidate_missing_indexes(&missing);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn consolidate_advise_emits_single_create_for_prefix_group() {
+        // End-to-end through advise(): the prefix group yields exactly one
+        // CreateIndex carrying the superset key + unioned INCLUDEs.
+        let bundle = DmvBundle {
+            missing_indexes: vec![
+                mi("Orders", &["CustomerId"], &[], &["Total"], 60.0, 100, 5.0),
+                mi("Orders", &["CustomerId"], &["OrderDate"], &["Amount"], 90.0, 300, 12.0),
+            ],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let creates: Vec<_> = recs.iter().filter(|r| r.kind == RecKind::CreateIndex).collect();
+        assert_eq!(creates.len(), 1, "one consolidated CreateIndex expected: {creates:#?}");
+        let ddl = &creates[0].ddl;
+        assert!(ddl.contains("[CustomerId]") && ddl.contains("[OrderDate]"), "key: {ddl}");
+        assert!(ddl.contains("[Total]") && ddl.contains("[Amount]"), "include: {ddl}");
+    }
+
+    // ---- (b) redundant_existing_indexes ------------------------------------
+
+    #[test]
+    fn redundant_flags_left_prefix_existing_index() {
+        // IX_a (CustomerId) is a strict prefix of IX_b (CustomerId, OrderDate).
+        let idx = vec![
+            ix("Orders", "IX_a", &["CustomerId"], false, false),
+            ix("Orders", "IX_b", &["CustomerId", "OrderDate"], false, false),
+        ];
+        let out = redundant_existing_indexes(&idx);
+        assert_eq!(out.len(), 1, "{out:#?}");
+        assert_eq!(out[0].redundant_index, "IX_a");
+        assert_eq!(out[0].superset_index, "IX_b");
+    }
+
+    #[test]
+    fn redundant_advise_emits_merge_drop_for_prefix() {
+        let bundle = DmvBundle {
+            indexes: vec![
+                ix("Orders", "IX_a", &["CustomerId"], false, false),
+                ix("Orders", "IX_b", &["CustomerId", "OrderDate"], false, false),
+            ],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let merge = recs.iter().find(|r| r.kind == RecKind::MergeIndex && r.object.ends_with("IX_a"));
+        let merge = merge.expect("expected a MergeIndex drop rec for the prefix index");
+        assert!(merge.ddl.contains("DROP INDEX [IX_a]"), "ddl: {}", merge.ddl);
+        assert!(merge.ddl.contains("[IX_b]"), "ddl should name the superset: {}", merge.ddl);
+    }
+
+    #[test]
+    fn redundant_never_drops_pk_or_unique_prefix() {
+        // NEGATIVE: a UNIQUE / PK index that is a prefix of another index is NOT
+        // redundant — it enforces a constraint. Must not be flagged.
+        let idx = vec![
+            ix("Orders", "PK_Orders", &["Id"], true, true),
+            ix("Orders", "IX_super", &["Id", "OrderDate"], false, false),
+            ix("Orders", "UQ_email", &["Email"], true, false),
+            ix("Orders", "IX_emailx", &["Email", "Tenant"], false, false),
+        ];
+        let out = redundant_existing_indexes(&idx);
+        assert!(out.is_empty(), "unique/PK prefixes must not be flagged: {out:#?}");
+    }
+
+    #[test]
+    fn redundant_ignores_exact_duplicates() {
+        // NEGATIVE: exact duplicates (same length) are handled by advise()'s own
+        // exact-dup pass, not here. STRICT prefix only.
+        let idx = vec![
+            ix("Orders", "IX_a", &["CustomerId"], false, false),
+            ix("Orders", "IX_b", &["CustomerId"], false, false),
+        ];
+        let out = redundant_existing_indexes(&idx);
+        assert!(out.is_empty(), "exact dups are out of scope here: {out:#?}");
+    }
+
+    #[test]
+    fn redundant_ignores_different_leading_column() {
+        // NEGATIVE: shares a column but not as a leading prefix.
+        let idx = vec![
+            ix("Orders", "IX_a", &["OrderDate"], false, false),
+            ix("Orders", "IX_b", &["CustomerId", "OrderDate"], false, false),
+        ];
+        let out = redundant_existing_indexes(&idx);
+        assert!(out.is_empty(), "{out:#?}");
+    }
+
+    // ---- (c) unused_existing_indexes ---------------------------------------
+
+    #[test]
+    fn unused_flags_write_only_index() {
+        let usage = vec![usage("Orders", "IX_writeonly", 0, 0, 0, 50_000)];
+        let idx = vec![ix("Orders", "IX_writeonly", &["Status"], false, false)];
+        let out = unused_existing_indexes(&usage, &idx, 100);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].index_name, "IX_writeonly");
+        assert_eq!(out[0].user_updates, 50_000);
+    }
+
+    #[test]
+    fn unused_skips_indexes_with_reads_pk_and_low_writes() {
+        // NEGATIVE: an index that is read, a PK index, and a low-write index must
+        // all be left alone.
+        let usage = vec![
+            usage("Orders", "IX_read", 0, 5, 0, 50_000),     // has reads
+            usage("Orders", "PK_Orders", 0, 0, 0, 50_000),   // pk by metadata
+            usage("Orders", "IX_tiny", 0, 0, 0, 10),         // below threshold
+        ];
+        let idx = vec![
+            ix("Orders", "IX_read", &["A"], false, false),
+            ix("Orders", "PK_Orders", &["Id"], true, true),
+            ix("Orders", "IX_tiny", &["B"], false, false),
+        ];
+        let out = unused_existing_indexes(&usage, &idx, 100);
+        assert!(out.is_empty(), "none should be flagged: {out:#?}");
+    }
 }

@@ -393,6 +393,67 @@ pub async fn set_query_store_capture(req: &ConnectReq, mode: &str) -> anyhow::Re
     Ok(format!("Query Store capture mode set to {mode}"))
 }
 
+/// One Query Store query aggregated across its plans/intervals, ranked by
+/// average duration. Pure telemetry — no execution, no user-table rows.
+#[derive(Debug, serde::Serialize)]
+pub struct QueryStoreTopQuery {
+    pub query_id: i64,
+    pub sql_text: String,
+    pub executions: i64,
+    pub avg_duration_ms: f64,
+    pub max_duration_ms: f64,
+    pub avg_cpu_ms: f64,
+    pub avg_logical_reads: i64,
+}
+
+/// Read the connected database's top long-running queries from Query Store,
+/// ranked by average duration. READ-ONLY: it queries the `sys.query_store_*`
+/// catalog views only — it never executes the captured queries and never reads
+/// rows from user tables. `limit` is clamped to an integer and interpolated into
+/// `TOP (n)` (never user text), so there is nothing to escape. Durations are
+/// converted from microseconds to milliseconds and weighted by execution count.
+pub async fn query_store_top_queries(
+    req: &ConnectReq,
+    limit: u32,
+) -> anyhow::Result<Vec<QueryStoreTopQuery>> {
+    let limit = limit.clamp(1, 200);
+    let mut client = open(req).await?;
+    let sql = format!(
+        "SELECT TOP ({limit}) m.query_id, m.execs, m.avg_ms, m.max_ms, m.avg_cpu_ms, m.avg_reads,
+                CAST(LEFT(qt.query_sql_text, 2000) AS NVARCHAR(2000)) AS sql_text
+         FROM (
+           SELECT q.query_id,
+                  CAST(SUM(rs.count_executions) AS BIGINT) AS execs,
+                  CAST(SUM(rs.avg_duration * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) / 1000.0 AS FLOAT) AS avg_ms,
+                  CAST(MAX(rs.max_duration) / 1000.0 AS FLOAT) AS max_ms,
+                  CAST(SUM(rs.avg_cpu_time * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) / 1000.0 AS FLOAT) AS avg_cpu_ms,
+                  CAST(SUM(rs.avg_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) AS BIGINT) AS avg_reads,
+                  MIN(q.query_text_id) AS query_text_id
+           FROM sys.query_store_runtime_stats rs
+           JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id
+           JOIN sys.query_store_query q ON q.query_id = p.query_id
+           GROUP BY q.query_id
+         ) m
+         JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id
+         ORDER BY m.avg_ms DESC"
+    );
+    let stream = client.simple_query(sql.as_str()).await?;
+    let rows = stream.into_first_result().await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(QueryStoreTopQuery {
+            query_id: r.get::<i64, _>("query_id").unwrap_or(0),
+            executions: r.get::<i64, _>("execs").unwrap_or(0),
+            avg_duration_ms: r.get::<f64, _>("avg_ms").unwrap_or(0.0),
+            max_duration_ms: r.get::<f64, _>("max_ms").unwrap_or(0.0),
+            avg_cpu_ms: r.get::<f64, _>("avg_cpu_ms").unwrap_or(0.0),
+            avg_logical_reads: r.get::<i64, _>("avg_reads").unwrap_or(0),
+            sql_text: r.get::<&str, _>("sql_text").unwrap_or("").to_string(),
+        });
+    }
+    Ok(out)
+}
+
 /// One T-SQL syntax diagnostic from the real engine parser. `number` is the
 /// SQL Server error number (e.g. 102 "Incorrect syntax near …"), `line` is the
 /// 1-based line within the submitted batch.

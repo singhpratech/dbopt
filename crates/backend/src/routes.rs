@@ -29,6 +29,7 @@ pub fn router() -> Router {
         .route("/validate", post(validate))
         .route("/qstore/status", post(qstore_status))
         .route("/qstore/capture", post(qstore_capture))
+        .route("/qstore/top", post(qstore_top))
         .route("/llm/models", get(llm_models))
         .route("/llm/chat", post(llm_chat))
         .route("/llm/cloud/:provider", post(llm_cloud))
@@ -239,6 +240,24 @@ async fn validate(Json(req): Json<ExplainReq>) -> impl IntoResponse {
 async fn qstore_status(Json(req): Json<ConnectReq>) -> impl IntoResponse {
     match sqlserver::query_store_status(&req).await {
         Ok(s) => (StatusCode::OK, Json(s)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// POST /api/qstore/top — the connected database's top long-running queries from
+/// Query Store, ranked by average duration. READ-ONLY telemetry from the
+/// sys.query_store_* catalog views: no query execution, no user-table rows read.
+#[derive(Debug, Deserialize)]
+pub struct QStoreTopReq {
+    #[serde(flatten)]
+    pub conn: ConnectReq,
+    /// How many queries to return (clamped 1..=200 server-side; default 20).
+    pub limit: Option<u32>,
+}
+
+async fn qstore_top(Json(req): Json<QStoreTopReq>) -> impl IntoResponse {
+    match sqlserver::query_store_top_queries(&req.conn, req.limit.unwrap_or(20)).await {
+        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "queries": rows }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
