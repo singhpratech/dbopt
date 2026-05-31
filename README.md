@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/public/logo.svg" alt="dbopt" width="96" height="96" />
+</p>
+
 # dbopt
 
 **Find and fix slow SQL _before_ it reaches production — statically, privately, and prescriptively.**
