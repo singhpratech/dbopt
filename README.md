@@ -61,7 +61,7 @@ irm https://dbopt.org/install.ps1 | iex
 |---|---|
 | **Windows** (x64) | **[`.msi`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi)** · [portable `.zip`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.zip) |
 | **macOS** (Apple Silicon) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg)** |
-| **Linux** (x64) | **[`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz)** (or the one-line installer above, which adds a menu entry) |
+| **Linux** (x64) | **[`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz)** (glibc 2.34+) · [static `musl`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64-musl.tar.gz) (runs on **any** Linux — Alpine, RHEL 8, old distros) · or the one-line installer above (adds a menu entry) |
 
 Each is a **single self-contained binary** (the web UI is embedded) — run it, then open `http://127.0.0.1:3690`. New to dbopt? See the **[Usage guide](docs/USAGE.md)**. Checksums and all builds are on the [releases page](https://github.com/singhpratech/dbopt/releases).
 

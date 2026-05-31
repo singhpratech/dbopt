@@ -177,9 +177,50 @@ jobs:
             dbopt-linux-x86_64.AppImage
           if-no-files-found: ignore
 
+  # A fully-static musl binary that runs on ANY x86_64 Linux (Alpine, RHEL 8,
+  # ancient glibc, no glibc at all) — the universal fallback alongside the
+  # glibc-2.34 tar.gz. Built with cargo-zigbuild (zig cross-compiles the C deps:
+  # aws-lc-sys, rusqlite, ring). continue-on-error + NOT a required asset, so a
+  # musl/zig hiccup can never block the main release.
+  linux-musl:
+    name: linux-x86_64-musl (static)
+    needs: web
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with: { key: linux-musl }
+      - name: fetch web bundle
+        uses: actions/download-artifact@v4
+        with: { name: web-dist, path: web/dist }
+      - name: install zig + cargo-zigbuild
+        run: |
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
+          tar -xf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-linux-x86_64-0.13.0" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild
+      - name: build static musl binary
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p backend
+      - name: archive
+        run: |
+          mkdir -p staging
+          cp target/x86_64-unknown-linux-musl/release/dbopt-backend staging/dbopt
+          cp README.md staging/ 2>/dev/null || true
+          cp samples/bad.sql staging/sample.sql 2>/dev/null || true
+          (cd staging && tar czf ../dbopt-linux-x86_64-musl.tar.gz ./*)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbopt-linux-x86_64-musl
+          path: dbopt-linux-x86_64-musl.tar.gz
+          if-no-files-found: ignore
+
   release:
     name: publish release
-    needs: binary
+    needs: [binary, linux-musl]
     runs-on: ubuntu-latest
     permissions:
       contents: write
