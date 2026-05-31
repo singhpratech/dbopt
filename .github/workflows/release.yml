@@ -120,10 +120,12 @@ jobs:
           if ($wix) { $env:PATH = "$($wix.FullName)\bin;$env:PATH"; Write-Host "WiX bin: $($wix.FullName)\bin" }
           else { Write-Warning "WiX Toolset not found" }
           cargo install cargo-wix --locked
-          # Build from the committed wix/ manifest (stable UpgradeCode). Run from
-          # inside the crate so the relative 'wix\License.rtf' paths resolve.
+          # Build from the committed wix/ manifest (stable UpgradeCode). cargo-wix
+          # needs -p in a workspace, and `light` resolves the relative
+          # 'wix\License.rtf' from the invocation CWD — so do both: cd into the
+          # crate AND pass -p backend.
           Push-Location crates/backend
-          cargo wix --no-build --target ${{ matrix.target }} --nocapture --output "$env:GITHUB_WORKSPACE\dbopt-windows-x86_64.msi"
+          cargo wix -p backend --no-build --target ${{ matrix.target }} --nocapture --output "$env:GITHUB_WORKSPACE\dbopt-windows-x86_64.msi"
           Pop-Location
           if (Test-Path dbopt-windows-x86_64.msi) {
             Write-Host "MSI built: $((Get-Item dbopt-windows-x86_64.msi).Length) bytes"
