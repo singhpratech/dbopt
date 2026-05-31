@@ -114,9 +114,11 @@
                                 System='yes'/>
                         </Component>
                         <Component Id='binary0' Guid='*'>
+                            <!-- Installed as dbopt.exe (the brand + PATH command),
+                                 though cargo builds it as dbopt-backend.exe. -->
                             <File
                                 Id='exe0'
-                                Name='dbopt-backend.exe'
+                                Name='dbopt.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\dbopt-backend.exe'
                                 KeyPath='yes'/>
@@ -124,7 +126,28 @@
                     </Directory>
                 </Directory>
             </Directory>
+
+            <!-- Start Menu shortcut so the product is actually launchable after
+                 install (a plain PATH entry is invisible to most users). The
+                 shortcut targets the installed exe; Show='minimized' keeps the
+                 server's console window out of the way while the browser opens. -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='dbopt'/>
+            </Directory>
         </Directory>
+
+        <DirectoryRef Id='ApplicationProgramsFolder'>
+            <Component Id='AppShortcut' Guid='*'>
+                <Shortcut Id='AppStartMenuShortcut'
+                          Name='dbopt'
+                          Description='Open dbopt — local-first database optimizer (opens 127.0.0.1:3690)'
+                          Target='[#exe0]'
+                          WorkingDirectory='Bin'
+                          Show='minimized'/>
+                <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
+                <RegistryValue Root='HKCU' Key='Software\dbopt' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
+            </Component>
+        </DirectoryRef>
 
         <Feature
             Id='Binaries'
@@ -140,8 +163,9 @@
               the license sidecar file from the installer.
             -->
             <ComponentRef Id='License'/>
-            
+
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='AppShortcut'/>
 
             <Feature
                 Id='Environment'

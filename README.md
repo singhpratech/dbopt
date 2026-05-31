@@ -61,9 +61,19 @@ irm https://dbopt.org/install.ps1 | iex
 |---|---|
 | **Windows** (x64) | **[`.msi`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi)** · [portable `.zip`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.zip) |
 | **macOS** (Apple Silicon) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg)** |
-| **Linux** (x64) | **[`.AppImage`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.AppImage)** · [`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz) |
+| **Linux** (x64) | **[`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz)** (or the one-line installer above, which adds a menu entry) |
 
 Each is a **single self-contained binary** (the web UI is embedded) — run it, then open `http://127.0.0.1:3690`. New to dbopt? See the **[Usage guide](docs/USAGE.md)**. Checksums and all builds are on the [releases page](https://github.com/singhpratech/dbopt/releases).
+
+### First run (current builds aren't code-signed yet)
+
+dbopt is open-source and the builds are **not yet code-signed**, so the OS will warn you the first time. It's safe — verify the SHA256 against [`SHA256SUMS`](https://github.com/singhpratech/dbopt/releases/latest) if you like — and here's how to get past each prompt:
+
+- **Windows** — SmartScreen shows *"Windows protected your PC."* Click **More info → Run anyway**.
+- **macOS** — Gatekeeper says dbopt *"cannot be opened"* / *"is damaged."* **Right-click the app → Open → Open**, or run `xattr -dr com.apple.quarantine /Applications/dbopt.app`.
+- **Linux** — no prompt; just `./dbopt` (or use the installer, which adds it to your apps menu).
+
+Signed/notarized installers are on the roadmap.
 
 ## Why it exists
 

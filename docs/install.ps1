@@ -23,5 +23,21 @@ if ($userPath -notlike "*$dest*") {
   Write-Host "dbopt: added $dest to your PATH (restart your terminal)."
 }
 
-Write-Host "dbopt: installed to $dest\dbopt.exe"
-Write-Host "dbopt: run 'dbopt' and open http://127.0.0.1:3690"
+# Start Menu shortcut so dbopt is launchable without a terminal (mirrors the MSI).
+$exe = Join-Path $dest 'dbopt.exe'
+$lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\dbopt.lnk'
+try {
+  $ws = New-Object -ComObject WScript.Shell
+  $sc = $ws.CreateShortcut($lnk)
+  $sc.TargetPath = $exe
+  $sc.WorkingDirectory = $dest
+  $sc.WindowStyle = 7   # minimized — keep the server console out of the way
+  $sc.Description = 'Open dbopt (opens http://127.0.0.1:3690)'
+  $sc.Save()
+  Write-Host "dbopt: added a Start Menu shortcut."
+} catch {
+  Write-Host "dbopt: (could not create Start Menu shortcut: $_)"
+}
+
+Write-Host "dbopt: installed to $exe"
+Write-Host "dbopt: launch from the Start Menu (search 'dbopt'), or run 'dbopt' in a new terminal, then open http://127.0.0.1:3690"

@@ -40,6 +40,30 @@ mv "$tmp/dbopt" "$DEST/$BIN"
 chmod +x "$DEST/$BIN"
 
 echo "dbopt: installed to $DEST/$BIN"
+
+# Desktop integration on Linux so dbopt is launchable from the apps menu
+# (not just a terminal). macOS uses the .app/.dmg instead, so skip it there.
+if [ "$os" = "Linux" ]; then
+  apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+  mkdir -p "$apps_dir" "$icon_dir"
+  # Brand icon (best-effort; the menu entry still works without it).
+  curl -fsSL "https://dbopt.org/logo.svg" -o "$icon_dir/dbopt.svg" 2>/dev/null || true
+  cat > "$apps_dir/dbopt.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=dbopt
+Comment=Local-first database performance optimizer
+Exec=$DEST/$BIN
+Icon=dbopt
+Terminal=true
+Categories=Development;Database;
+Keywords=sql;database;performance;index;
+DESKTOP
+  update-desktop-database "$apps_dir" >/dev/null 2>&1 || true
+  echo "dbopt: added a desktop menu entry (search 'dbopt' in your apps)."
+fi
+
 case ":$PATH:" in
   *":$DEST:"*) ;;
   *) echo "dbopt: add $DEST to your PATH, e.g.  export PATH=\"$DEST:\$PATH\"" ;;
