@@ -1,5 +1,5 @@
 /* ============================================================
-   sqlopt · Observatory aesthetic
+   dbopt · Observatory aesthetic
    Precision-instrument theme: deep slate, acid chartreuse signal,
    hairline geometry, IBM Plex + Departure Mono typography.
    ============================================================ */
@@ -2204,7 +2204,7 @@ kbd {
 
 /* ── A2: post-fix verify breadcrumb — the "did the fix work?" loop ──
    A persistent strip on each issue card (and the detail pane) that re-runs the
-   READ-ONLY HEALTH scan. sqlopt never executes the fix DDL itself, so the lead
+   READ-ONLY HEALTH scan. dbopt never executes the fix DDL itself, so the lead
    text frames it as "ran it yourself?". Signal-tinted so it reads as the
    recommended next step without shouting like a primary CTA. */
 .verify-breadcrumb {
@@ -3693,7 +3693,7 @@ kbd {
 
 /* ── B1: PRE-FLIGHT preview section (IssueDetailPane) ────────
    Read-only preview of exactly what the fix DDL will do + cost chips + rollback
-   + the explicit "sqlopt does not execute changes" boundary. */
+   + the explicit "dbopt does not execute changes" boundary. */
 .issue-section-preflight .issue-section-h { border-left-color: var(--info-sev); }
 .preflight-lead {
   margin: 0 0 12px;

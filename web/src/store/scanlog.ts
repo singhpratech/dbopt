@@ -9,7 +9,7 @@
  * (resolved/new titles, not just an aggregate grade swing) and render a compact
  * trend table — without any backend or extra round-trip.
  *
- * Everything is local: localStorage under `sqlopt.scanlog` (the shared `persist`
+ * Everything is local: localStorage under `dbopt.scanlog` (the shared `persist`
  * namespace), keyed `serverdatabase` so two databases on one server never
  * cross-contaminate. No PII beyond the server/db the user already typed.
  */

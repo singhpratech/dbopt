@@ -25,7 +25,7 @@ import * as runlog from "./store/runlog";
 // Signature of the old canned demo SQL. We no longer seed it (the analyze
 // screen starts empty, on real input) and we purge it from storage on load so
 // returning users don't keep seeing placeholder content.
-const LEGACY_SAMPLE_PREFIX = "-- sqlopt :: paste your T-SQL here";
+const LEGACY_SAMPLE_PREFIX = "-- dbopt :: paste your T-SQL here";
 
 // A realistic, anti-pattern-laden T-SQL sample loaded ONLY on the explicit
 // [Load sample] action in the ANALYZE editor (never auto-seeded). It packs a

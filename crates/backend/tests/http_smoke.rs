@@ -1,9 +1,9 @@
 //! End-to-end HTTP smoke test for the backend server.
 //!
-//! The router lives inside the `sqlopt-backend` binary crate, whose modules are
+//! The router lives inside the `dbopt-backend` binary crate, whose modules are
 //! private and not importable from an integration test. So instead of rebuilding
 //! the router here, we spawn the actual compiled binary
-//! (`env!("CARGO_BIN_EXE_sqlopt-backend")` is provided by Cargo for integration
+//! (`env!("CARGO_BIN_EXE_dbopt-backend")` is provided by Cargo for integration
 //! tests) on a fixed port, poll `/api/health` until it is accepting, then
 //! exercise the real HTTP surface with reqwest. This tests the genuine artifact.
 
@@ -45,11 +45,11 @@ async fn wait_until_ready(client: &reqwest::Client, timeout: Duration) {
 #[tokio::test]
 async fn http_smoke_end_to_end() {
     // 1. Spawn the real built binary on a dedicated port.
-    let child = Command::new(env!("CARGO_BIN_EXE_sqlopt-backend"))
+    let child = Command::new(env!("CARGO_BIN_EXE_dbopt-backend"))
         .env("PORT", PORT.to_string())
-        .env("SQLOPT_NO_OPEN", "1")
+        .env("DBOPT_NO_OPEN", "1")
         .spawn()
-        .expect("failed to spawn sqlopt-backend binary");
+        .expect("failed to spawn dbopt-backend binary");
     let _guard = ServerGuard(child);
 
     let client = reqwest::Client::new();

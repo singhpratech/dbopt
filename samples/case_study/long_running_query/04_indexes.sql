@@ -5,7 +5,7 @@
 -- Order key columns by selectivity. Use INCLUDE for the SELECT list
 -- so the index is covering — no key lookups.
 -- ============================================================
-USE sqlopt_case;
+USE dbopt_case;
 GO
 
 -- 1) Persisted, reversed-host hash for SARGable email-suffix queries.

@@ -16,7 +16,7 @@
 --   modern.missing_set_nocount, deprecated.lob_legacy_types
 --   (declared on AuditLog via 00_schema.sql)
 -- ============================================================
-USE sqlopt_case;
+USE dbopt_case;
 GO
 
 IF OBJECT_ID('dbo.GetGmailSReport', 'P') IS NOT NULL DROP PROCEDURE dbo.GetGmailSReport;

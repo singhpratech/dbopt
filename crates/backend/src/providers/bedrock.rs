@@ -46,7 +46,7 @@ pub fn stream_chat(cfg: Config, messages: Vec<Message>) -> impl Stream<Item = Re
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest()).region(aws_sdk_bedrockruntime::config::Region::new(cfg.region.clone()));
         if let (Some(k), Some(s)) = (cfg.access_key_id.as_deref(), cfg.secret_access_key.as_deref()) {
-            let creds = aws_credential_types::Credentials::new(k, s, cfg.session_token.clone(), None, "sqlopt");
+            let creds = aws_credential_types::Credentials::new(k, s, cfg.session_token.clone(), None, "dbopt");
             loader = loader.credentials_provider(creds);
         }
         let conf = loader.load().await;

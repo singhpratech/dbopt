@@ -1,11 +1,25 @@
-target/
+# Rust
+/target/
+
+# Node / web
 node_modules/
-dist/
+web/dist/
 web/src/wasm/
-*.log
-.env
+
+# Build & release artifacts — publish via GitHub Releases, never commit
+*.tar.gz
+*.zip
+*.dmg
+*.AppImage
+*.msi
+
+# Local scratch / render previews
+web/_*.mjs
+web/_*.png
+web/public/_*
+
+# OS / editor
 .DS_Store
 
-# Local Claude Code session data
-.claude/
-web/tsconfig.tsbuildinfo
+# TS build cache
+*.tsbuildinfo

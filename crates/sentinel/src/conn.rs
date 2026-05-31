@@ -69,7 +69,7 @@ rebuild sentinel with `--features integrated-auth` (GSSAPI/Kerberos on Linux)."
     }
     // Tag every sentinel connection so its own polling queries can be filtered
     // out of the activity feed (see poll::live / poll::query_store).
-    config.application_name("sqlopt-sentinel");
+    config.application_name("dbopt-sentinel");
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(config.get_addr()))
         .await
         .map_err(|_| anyhow::anyhow!("connection to SQL Server timed out after {}s", CONNECT_TIMEOUT.as_secs()))?

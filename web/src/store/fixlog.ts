@@ -9,7 +9,7 @@
  * this" flag that survives reload and surfaces a "Validated ✓ (date)" badge back
  * on the HEALTH issue card.
  *
- * Everything is local: localStorage under `sqlopt.fixlog` (the shared `persist`
+ * Everything is local: localStorage under `dbopt.fixlog` (the shared `persist`
  * namespace), keyed `server·db·issue-id` — the SAME server·db scoping the
  * scanlog store uses (keyFor), so two databases on one server never cross-
  * contaminate and a fix tracked against app-sql-01 can't bleed onto another

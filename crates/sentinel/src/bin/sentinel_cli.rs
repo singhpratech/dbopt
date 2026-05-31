@@ -1,22 +1,22 @@
-//! `sqlopt-sentinel` — CLI front-end for the sentinel daemon.
+//! `dbopt-sentinel` — CLI front-end for the sentinel daemon.
 //!
 //! Three modes:
 //!   poll-once   run every poller exactly once against an instance
 //!   run         start the long-running daemon (blocks until ^C)
 //!   report      render a markdown report from whatever data is already
-//!               in `~/.sqlopt/sentinel.db`
+//!               in `~/.dbopt/sentinel.db`
 //!
 //! All connection info comes from environment variables so the binary
 //! can be wrapped in a systemd unit / launchd plist / Windows service
 //! without surfacing secrets on the command line:
 //!
-//!   SQLOPT_SERVER       host[,port]      (default localhost,1433)
-//!   SQLOPT_DB           database name    (optional)
-//!   SQLOPT_USER         SQL login
-//!   SQLOPT_PASSWORD     SQL password
-//!   SQLOPT_TRUST_CERT   "1" to skip TLS validation
-//!   SQLOPT_DATA_DIR     where to put sentinel.db (default ~/.sqlopt)
-//!   SQLOPT_INSTANCE     display name for the instance (default = server)
+//!   DBOPT_SERVER       host[,port]      (default localhost,1433)
+//!   DBOPT_DB           database name    (optional)
+//!   DBOPT_USER         SQL login
+//!   DBOPT_PASSWORD     SQL password
+//!   DBOPT_TRUST_CERT   "1" to skip TLS validation
+//!   DBOPT_DATA_DIR     where to put sentinel.db (default ~/.dbopt)
+//!   DBOPT_INSTANCE     display name for the instance (default = server)
 
 use std::time::Duration;
 
@@ -37,16 +37,16 @@ fn install_tracing() {
 
 fn env_conn() -> anyhow::Result<ConnectionInfo> {
     Ok(ConnectionInfo {
-        server: std::env::var("SQLOPT_SERVER").unwrap_or_else(|_| "localhost,1433".into()),
-        database: std::env::var("SQLOPT_DB").ok().filter(|s| !s.is_empty()),
-        user: std::env::var("SQLOPT_USER").ok().filter(|s| !s.is_empty()),
-        password: std::env::var("SQLOPT_PASSWORD").ok().filter(|s| !s.is_empty()),
-        trust_cert: Some(std::env::var("SQLOPT_TRUST_CERT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(true)),
+        server: std::env::var("DBOPT_SERVER").unwrap_or_else(|_| "localhost,1433".into()),
+        database: std::env::var("DBOPT_DB").ok().filter(|s| !s.is_empty()),
+        user: std::env::var("DBOPT_USER").ok().filter(|s| !s.is_empty()),
+        password: std::env::var("DBOPT_PASSWORD").ok().filter(|s| !s.is_empty()),
+        trust_cert: Some(std::env::var("DBOPT_TRUST_CERT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(true)),
     })
 }
 
 fn usage() -> ! {
-    eprintln!("usage: sqlopt-sentinel <poll-once | run | report> [days]");
+    eprintln!("usage: dbopt-sentinel <poll-once | run | report> [days]");
     std::process::exit(2);
 }
 
@@ -71,17 +71,17 @@ async fn main() -> anyhow::Result<()> {
             // Fail fast at startup if creds are missing — better than waiting
             // for each poller to print the same error.
             if conn.user.as_deref().unwrap_or("").is_empty() {
-                anyhow::bail!("SQLOPT_USER + SQLOPT_PASSWORD are required for sentinel poll-once");
+                anyhow::bail!("DBOPT_USER + DBOPT_PASSWORD are required for sentinel poll-once");
             }
             run_once(&conn, &storage).await;
             tracing::info!("poll-once complete · db at {}", db_path.display());
         }
         "run" => {
-            let instance_name = std::env::var("SQLOPT_INSTANCE")
+            let instance_name = std::env::var("DBOPT_INSTANCE")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| {
-                    std::env::var("SQLOPT_SERVER").unwrap_or_else(|_| "localhost".into())
+                    std::env::var("DBOPT_SERVER").unwrap_or_else(|_| "localhost".into())
                 });
             let cfg = SentinelConfig {
                 instances: vec![InstanceConfig {

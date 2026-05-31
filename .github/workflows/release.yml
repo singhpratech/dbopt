@@ -49,7 +49,6 @@ jobs:
       matrix:
         include:
           - { label: linux-x86_64, os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  archive: tar.gz,  binsuffix: ''     }
-          - { label: macos-x86_64, os: macos-13,       target: x86_64-apple-darwin,       archive: tar.gz,  binsuffix: ''     }
           - { label: macos-arm64,  os: macos-latest,   target: aarch64-apple-darwin,      archive: tar.gz,  binsuffix: ''     }
           - { label: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc,  archive: zip,     binsuffix: '.exe' }
     steps:
@@ -69,7 +68,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/sqlopt-backend${{ matrix.binsuffix }} staging/sqlopt${{ matrix.binsuffix }}
+          cp target/${{ matrix.target }}/release/dbopt-backend${{ matrix.binsuffix }} staging/dbopt${{ matrix.binsuffix }}
           cp README.md staging/ 2>/dev/null || true
           cp samples/bad.sql staging/sample.sql 2>/dev/null || true
       - name: archive
@@ -77,9 +76,9 @@ jobs:
         run: |
           cd staging
           if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a ../sqlopt-${{ matrix.label }}.zip ./*
+            7z a ../dbopt-${{ matrix.label }}.zip ./*
           else
-            tar czf ../sqlopt-${{ matrix.label }}.tar.gz ./*
+            tar czf ../dbopt-${{ matrix.label }}.tar.gz ./*
           fi
       - name: macos dmg
         if: startsWith(matrix.label, 'macos-')
@@ -87,64 +86,66 @@ jobs:
           VER="${{ github.event.inputs.tag || github.ref_name }}"
           VER="${VER#v}"          # strip leading v from e.g. v0.2.0
           VER="${VER:-0.0.0}"     # fall back if somehow empty
-          mkdir -p sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS
-          cp staging/sqlopt sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
-          chmod +x sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/MacOS/sqlopt
-          cat > sqlopt-${{ matrix.label }}-app/sqlopt.app/Contents/Info.plist <<EOF
+          mkdir -p dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS
+          cp staging/dbopt dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
+          chmod +x dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
+          cat > dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Info.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>CFBundleExecutable</key><string>sqlopt</string>
-            <key>CFBundleIdentifier</key><string>dev.sqlopt.observatory</string>
-            <key>CFBundleName</key><string>sqlopt</string>
+            <key>CFBundleExecutable</key><string>dbopt</string>
+            <key>CFBundleIdentifier</key><string>dev.dbopt.observatory</string>
+            <key>CFBundleName</key><string>dbopt</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${VER}</string>
             <key>CFBundleVersion</key><string>1</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
-          hdiutil create -volname sqlopt -srcfolder sqlopt-${{ matrix.label }}-app -ov -format UDZO sqlopt-${{ matrix.label }}.dmg
-      - name: windows installer (NSIS-free zip)
+          hdiutil create -volname dbopt -srcfolder dbopt-${{ matrix.label }}-app -ov -format UDZO dbopt-${{ matrix.label }}.dmg
+      - name: windows MSI (best-effort)
         if: matrix.label == 'windows-x86_64'
-        shell: bash
+        continue-on-error: true
+        shell: pwsh
         run: |
-          # The .exe IS the installer: double-click runs the server + opens the browser.
-          # No actual installation step needed because there are no extra files.
-          echo "windows artifact is the zipped portable .exe"
+          cargo install cargo-wix --locked
+          cargo wix init -p backend --force
+          cargo wix -p backend --no-build --target ${{ matrix.target }} --nocapture --output dbopt-windows-x86_64.msi
       - name: linux AppImage (best-effort)
         if: matrix.label == 'linux-x86_64'
         run: |
-          mkdir -p sqlopt.AppDir/usr/bin
-          cp staging/sqlopt sqlopt.AppDir/usr/bin/sqlopt
-          chmod +x sqlopt.AppDir/usr/bin/sqlopt
-          cat > sqlopt.AppDir/sqlopt.desktop <<EOF
+          mkdir -p dbopt.AppDir/usr/bin
+          cp staging/dbopt dbopt.AppDir/usr/bin/dbopt
+          chmod +x dbopt.AppDir/usr/bin/dbopt
+          cat > dbopt.AppDir/dbopt.desktop <<EOF
           [Desktop Entry]
           Type=Application
-          Name=sqlopt
-          Exec=sqlopt
-          Icon=sqlopt
+          Name=dbopt
+          Exec=dbopt
+          Icon=dbopt
           Categories=Development;Database;
           Terminal=true
           EOF
-          touch sqlopt.AppDir/sqlopt.png
-          cat > sqlopt.AppDir/AppRun <<'EOF'
+          touch dbopt.AppDir/dbopt.png
+          cat > dbopt.AppDir/AppRun <<'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
-          exec "${HERE}/usr/bin/sqlopt" "$@"
+          exec "${HERE}/usr/bin/dbopt" "$@"
           EOF
-          chmod +x sqlopt.AppDir/AppRun
+          chmod +x dbopt.AppDir/AppRun
           curl -L -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage || true
           chmod +x appimagetool || true
-          ARCH=x86_64 ./appimagetool sqlopt.AppDir sqlopt-linux-x86_64.AppImage || \
+          ARCH=x86_64 ./appimagetool dbopt.AppDir dbopt-linux-x86_64.AppImage || \
             echo "AppImage build skipped (appimagetool unavailable)"
       - uses: actions/upload-artifact@v4
         with:
-          name: sqlopt-${{ matrix.label }}
+          name: dbopt-${{ matrix.label }}
           path: |
-            sqlopt-${{ matrix.label }}.tar.gz
-            sqlopt-${{ matrix.label }}.zip
-            sqlopt-${{ matrix.label }}.dmg
-            sqlopt-linux-x86_64.AppImage
+            dbopt-${{ matrix.label }}.tar.gz
+            dbopt-${{ matrix.label }}.zip
+            dbopt-${{ matrix.label }}.dmg
+            dbopt-windows-x86_64.msi
+            dbopt-linux-x86_64.AppImage
           if-no-files-found: ignore
 
   release:
@@ -159,7 +160,7 @@ jobs:
       - name: stage flat
         run: |
           mkdir -p out
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.AppImage' \) -exec cp {} out/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} out/ \;
           (cd out && sha256sum * > SHA256SUMS)
           ls -la out
       - name: gh release

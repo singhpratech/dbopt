@@ -191,7 +191,7 @@ export function HelpPanel({
             <p className="help-sentinel-lead">
               <strong>Sentinel</strong> (started with <code>WATCH</code>) is dbopt's continuous
               poller. It samples those views on an interval and keeps a local time-series in{" "}
-              <code>~/.sqlopt/sentinel.db</code>, so runtime pain accumulates into real history you
+              <code>~/.dbopt/sentinel.db</code>, so runtime pain accumulates into real history you
               can grade against — and into the weekly pain report.
             </p>
             <p className="help-sentinel-why">

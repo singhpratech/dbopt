@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
             input.sql = Some(body);
         }
     } else {
-        eprintln!("usage: sqlopt <file.sql | file.sqlplan | bundle.json> | sqlopt --stdin");
+        eprintln!("usage: dbopt <file.sql | file.sqlplan | bundle.json> | dbopt --stdin");
         std::process::exit(2);
     }
 

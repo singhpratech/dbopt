@@ -3,7 +3,7 @@
 -- Volumes are sized so the bad query is genuinely painful but the seed
 -- finishes in a few minutes on a developer laptop.
 -- ============================================================
-USE sqlopt_case;
+USE dbopt_case;
 GO
 SET NOCOUNT ON;
 GO

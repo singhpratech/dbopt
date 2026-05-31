@@ -33,10 +33,10 @@ read.** (See ACCESS.md for the least-privilege grants this needs.)
 ## Where it's stored — all local
 
 - **Monitoring telemetry** (waits, blocking, deadlocks, query-store stats, sizes)
-  → `~/.sqlopt/sentinel.db`, a SQLite file on your disk. Retained ~90 days, then
+  → `~/.dbopt/sentinel.db`, a SQLite file on your disk. Retained ~90 days, then
   pruned. Nothing is uploaded.
 - **Connection profiles, LLM settings, drafts, AI logs** → your **browser's
-  localStorage** (and `~/.sqlopt` for the sentinel config). On-disk secrets are
+  localStorage** (and `~/.dbopt` for the sentinel config). On-disk secrets are
   written `0600`.
 
 ## What can leave your machine — AI providers only

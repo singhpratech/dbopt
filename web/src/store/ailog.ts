@@ -3,7 +3,7 @@
  *
  * In-memory ring buffer for instant UI rendering, mirrored write-through to
  * the backend's `/api/logs/ai` endpoint so entries survive browser cache
- * clears AND backend restarts (SQLite at `~/.sqlopt/sentinel.db`).
+ * clears AND backend restarts (SQLite at `~/.dbopt/sentinel.db`).
  *
  * Streaming responses post twice: once on `startEntry` (placeholder) and once
  * on `finishEntry` (final state). `appendToken` is local-only to avoid

@@ -1,7 +1,7 @@
 import { test, expect, Page } from "@playwright/test";
 
 /**
- * sqlopt UI end-to-end tests.
+ * dbopt UI end-to-end tests.
  *
  * These drive the real React app served by Vite. The analyzer runs in-browser
  * (WASM) and most state is localStorage-backed, so the specs do not depend on
@@ -14,20 +14,20 @@ SELECT *
 FROM Customers c WITH (NOLOCK)
 WHERE UPPER(c.LastName) LIKE '%son%';`;
 
-/** Seed localStorage keys (namespace sqlopt.*) before the SPA initialises. */
+/** Seed localStorage keys (namespace dbopt.*) before the SPA initialises. */
 async function seed(page: Page, kv: Record<string, unknown>) {
   await page.addInitScript((entries) => {
     for (const [k, v] of Object.entries(entries)) {
-      window.localStorage.setItem(`sqlopt.${k}`, JSON.stringify(v));
+      window.localStorage.setItem(`dbopt.${k}`, JSON.stringify(v));
     }
   }, kv);
 }
 
 test("app loads with the observatory shell", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveTitle(/sqlopt/i);
+  await expect(page).toHaveTitle(/dbopt/i);
   // Brand chrome is present.
-  await expect(page.locator(".brand")).toContainText(/sqlopt/i);
+  await expect(page.locator(".brand")).toContainText(/dbopt/i);
   // The left rail exposes the workspace switcher.
   await expect(page.locator(".rail-btn").first()).toBeVisible();
 });

@@ -19,8 +19,9 @@
 
 <p align="center">
   <a href="https://dbopt.org"><b>dbopt.org</b></a>
+  &nbsp;·&nbsp; <a href="docs/USAGE.md">Usage guide</a>
   &nbsp;·&nbsp; <a href="docs/WHO-IS-DBOPT-FOR.md">Who it's for</a>
-  &nbsp;·&nbsp; <a href="docs/ACCESS.md">Access &amp; permissions</a>
+  &nbsp;·&nbsp; <a href="docs/ACCESS.md">Access</a>
   &nbsp;·&nbsp; <a href="docs/ROADMAP-TO-COMPLETE.md">Roadmap</a>
 </p>
 
@@ -43,16 +44,26 @@ cloud model.
 
 ## Download
 
-Prebuilt — **no toolchain needed**. Grab the installer for your OS:
+**Install in one line** (no toolchain needed):
+
+```bash
+# Linux & macOS (Apple Silicon)
+curl -fsSL https://dbopt.org/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://dbopt.org/install.ps1 | iex
+```
+
+…or grab an installer directly:
 
 | Platform | Download |
 |---|---|
-| **Windows** (x64) | **[portable `.zip`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-windows-x86_64.zip)** |
-| **macOS** (Apple Silicon) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-arm64.dmg)** |
-| **macOS** (Intel) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-macos-x86_64.dmg)** |
-| **Linux** (x64) | **[`.AppImage`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-linux-x86_64.AppImage)** · [`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/sqlopt-linux-x86_64.tar.gz) |
+| **Windows** (x64) | **[`.msi`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi)** · [portable `.zip`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.zip) |
+| **macOS** (Apple Silicon) | **[`.dmg`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg)** |
+| **Linux** (x64) | **[`.AppImage`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.AppImage)** · [`.tar.gz`](https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz) |
 
-Each is a **single self-contained binary** (the web UI is embedded) — run it, then open `http://127.0.0.1:3690`. Checksums and all builds on the [releases page](https://github.com/singhpratech/dbopt/releases).
+Each is a **single self-contained binary** (the web UI is embedded) — run it, then open `http://127.0.0.1:3690`. New to dbopt? See the **[Usage guide](docs/USAGE.md)**. Checksums and all builds are on the [releases page](https://github.com/singhpratech/dbopt/releases).
 
 ## Why it exists
 
@@ -114,14 +125,14 @@ cd web && npm install && npm run build && cd ..
 cargo build --release
 
 # 1) Analyze a script statically — no DB connection needed
-./target/release/sqlopt path/to/query.sql
+./target/release/dbopt path/to/query.sql
 
 # 2) Run the web observatory (UI + API on :3690)
-./target/release/sqlopt-backend          # then open http://127.0.0.1:3690
+./target/release/dbopt-backend          # then open http://127.0.0.1:3690
 
 # 3) Continuous monitoring (SQL auth via env)
-SQLOPT_SERVER="host,1433" SQLOPT_USER="..." SQLOPT_PASSWORD="..." \
-  ./target/release/sqlopt-sentinel run
+DBOPT_SERVER="host,1433" DBOPT_USER="..." DBOPT_PASSWORD="..." \
+  ./target/release/dbopt-sentinel run
 ```
 
 For UI development: `cd web && npm install && npm run dev` (proxies the API to the backend on :3690).
@@ -147,13 +158,13 @@ A Rust workspace plus a React / Vite / TypeScript front end:
 |---|---|
 | `analyzer-core` | the rule engine + tokenizer + plan/DMV models |
 | `analyzer-wasm` | WebAssembly bindings for in-browser analysis |
-| `analyzer-cli`  | `sqlopt` — analyze a `.sql` / `.sqlplan` / bundle from the shell |
-| `backend`       | `sqlopt-backend` — axum API + embedded web UI, LLM proxy, durable logs |
-| `sentinel`      | `sqlopt-sentinel` — continuous DMV poller → SQLite → pain report |
+| `analyzer-cli`  | `dbopt` — analyze a `.sql` / `.sqlplan` / bundle from the shell |
+| `backend`       | `dbopt-backend` — axum API + embedded web UI, LLM proxy, durable logs |
+| `sentinel`      | `dbopt-sentinel` — continuous DMV poller → SQLite → pain report |
 | `eval`          | the rule-quality harness (precision / recall / F1 + HTML report) |
 | `web/`          | the "observatory" UI (analysis, plans, charts, AI, monitoring) |
 
-Storage and config live under `~/.sqlopt/` (override with `SQLOPT_DATA_DIR`). No external services required.
+Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No external services required.
 
 ## Roadmap — one brand, every engine
 

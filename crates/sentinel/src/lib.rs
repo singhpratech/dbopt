@@ -88,14 +88,20 @@ pub struct SentinelConfig {
 pub fn default_retention_days() -> u64 { 90 }
 
 impl SentinelConfig {
-    /// Resolve the default DB path: `$SQLOPT_DATA_DIR/sentinel.db` if set,
-    /// otherwise `~/.sqlopt/sentinel.db`.
+    /// Resolve the default DB path: `$DBOPT_DATA_DIR/sentinel.db` if set,
+    /// otherwise `~/.dbopt/sentinel.db`.
     pub fn default_db_path() -> PathBuf {
-        if let Ok(dir) = std::env::var("SQLOPT_DATA_DIR") {
+        if let Ok(dir) = std::env::var("DBOPT_DATA_DIR") {
             return PathBuf::from(dir).join("sentinel.db");
         }
         let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join(".sqlopt").join("sentinel.db")
+        let current = base.join(".dbopt");
+        // Migration shim: if the new ~/.dbopt dir doesn't exist yet but the
+        // pre-rebrand ~/.sqlopt does, keep using it so existing monitoring data
+        // and the autostart config survive the rename.
+        let legacy = base.join(".sqlopt");
+        let dir = if !current.exists() && legacy.exists() { legacy } else { current };
+        dir.join("sentinel.db")
     }
 }
 

@@ -35,7 +35,7 @@ async fn daemon_slot() -> Arc<Mutex<Option<Sentinel>>> {
 
 /// Where we persist the daemon's instance configuration so monitoring can
 /// resume after a backend restart. Lives next to the SQLite store at
-/// `~/.sqlopt/sentinel-config.json`.
+/// `~/.dbopt/sentinel-config.json`.
 fn config_path() -> PathBuf {
     let db_path = SentinelConfig::default_db_path();
     let dir = db_path

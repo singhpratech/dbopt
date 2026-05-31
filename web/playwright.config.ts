@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Playwright e2e config for the sqlopt web UI.
+ * Playwright e2e config for the dbopt web UI.
  *
  * Uses the system-installed Google Chrome (channel: "chrome") so no ~130MB
  * browser download is needed. Auto-starts the Vite dev server (reusing one if

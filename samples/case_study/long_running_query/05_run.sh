@@ -8,15 +8,15 @@
 #   SA_PASSWORD='<choose-a-strong-password>' ./05_run.sh optimized
 #
 # Env vars (with defaults):
-#   SQLOPT_CONTAINER (default: sqlopt-sql2025)
+#   DBOPT_CONTAINER (default: dbopt-sql2025)
 #   SA_PASSWORD      (required)
-#   DB_NAME          (default: sqlopt_case)
+#   DB_NAME          (default: dbopt_case)
 
 set -euo pipefail
 
 mode="${1:-baseline}"
-container="${SQLOPT_CONTAINER:-sqlopt-sql2025}"
-db="${DB_NAME:-sqlopt_case}"
+container="${DBOPT_CONTAINER:-dbopt-sql2025}"
+db="${DB_NAME:-dbopt_case}"
 : "${SA_PASSWORD:?set SA_PASSWORD before running}"
 
 case "$mode" in

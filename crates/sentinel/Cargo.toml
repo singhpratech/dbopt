@@ -30,5 +30,5 @@ default = []
 integrated-auth = ["tiberius/integrated-auth-gssapi"]
 
 [[bin]]
-name = "sqlopt-sentinel"
+name = "dbopt-sentinel"
 path = "src/bin/sentinel_cli.rs"

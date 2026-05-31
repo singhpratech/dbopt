@@ -1,4 +1,4 @@
-//! sqlopt evaluation harness.
+//! dbopt evaluation harness.
 //!
 //! Walks `samples/scenarios/<id>/` directories, runs analyzer-core on each
 //! input, compares produced rule IDs against `expected.json`, and emits an
@@ -232,7 +232,7 @@ fn print_human(
 ) {
     let _ = (passed, failed);
     println!();
-    println!("{}", "─── sqlopt evaluation ───".dimmed());
+    println!("{}", "─── dbopt evaluation ───".dimmed());
     println!();
     for o in outcomes {
         let badge = if o.passed { "PASS".green().bold().to_string() } else { "FAIL".red().bold().to_string() };
@@ -352,7 +352,7 @@ fn render_html(
     s.push_str(&format!(
         r#"<header class="hero">
   <div class="hero-left">
-    <div class="brand"><span class="mark">▣</span> sqlopt <span class="dim">/ eval report</span></div>
+    <div class="brand"><span class="mark">▣</span> dbopt <span class="dim">/ eval report</span></div>
     <div class="ts">generated {now}</div>
   </div>
   <div class="verdict {verdict_class}">
@@ -452,7 +452,7 @@ fn render_html(
 
     // ── Footer ────────────────────────────────────────────────────────────────
     s.push_str(&format!(
-        r#"<footer class="foot">sqlopt evaluation harness · {total} scenarios · {rules_covered} rules · generated {now}</footer>
+        r#"<footer class="foot">dbopt evaluation harness · {total} scenarios · {rules_covered} rules · generated {now}</footer>
 </div></body></html>"#
     ));
 
@@ -464,7 +464,7 @@ const HTML_HEAD: &str = r##"<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <meta name="color-scheme" content="dark"/>
-<title>sqlopt · eval report</title>
+<title>dbopt · eval report</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>

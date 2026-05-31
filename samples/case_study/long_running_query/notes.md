@@ -13,7 +13,7 @@ instead of scan.
 
 ## What the analyzer flags
 
-Running `sqlopt-eval` (or the live web UI) over `02_baseline_query.sql`
+Running `dbopt-eval` (or the live web UI) over `02_baseline_query.sql`
 should surface at least these rules:
 
 | Rule | Severity | Why |
@@ -86,4 +86,4 @@ on your container.
 - The seed is deterministic-ish via `CHECKSUM(NEWID())` — your row counts will match but the data values will vary, so plan shapes are reproducible but exact wall-clock numbers will not be.
 - The user is responsible for clearing the plan cache and the buffer pool fairly between runs. `05_run.sh` does both.
 - Statistics may need updating after the seed completes; the run script does not invoke `UPDATE STATISTICS` to keep the comparison honest.
-- The case study runs against `sqlopt_case`. If you want to play in a non-isolated database, point the scripts elsewhere — but expect collisions.
+- The case study runs against `dbopt_case`. If you want to play in a non-isolated database, point the scripts elsewhere — but expect collisions.

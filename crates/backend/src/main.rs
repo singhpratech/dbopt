@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Open the user's browser (best effort) once the listener is ready.
     let url_for_open = url.clone();
-    let no_open = std::env::var("SQLOPT_NO_OPEN").is_ok();
+    let no_open = std::env::var("DBOPT_NO_OPEN").is_ok();
     tokio::spawn(async move {
         // Tiny delay so axum is definitely accepting before we hand the URL to the browser.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -80,12 +80,12 @@ fn print_banner(url: &str, port: u16) {
     let green = "\x1b[38;2;212;255;78m";
     let reset = "\x1b[0m";
     eprintln!();
-    eprintln!("{green}{bold}▣ sqlopt{reset} {dim}/ observatory{reset}");
+    eprintln!("{green}{bold}▣ dbopt{reset} {dim}/ observatory{reset}");
     eprintln!("{dim}  SQL Server static + plan + DMV analyzer · Rust + WASM{reset}");
     eprintln!();
     eprintln!("  {bold}{green}  →  {url}  {reset}");
     eprintln!();
-    eprintln!("{dim}  port {port}  ·  set SQLOPT_NO_OPEN=1 to skip auto-browser{reset}");
+    eprintln!("{dim}  port {port}  ·  set DBOPT_NO_OPEN=1 to skip auto-browser{reset}");
     eprintln!("{dim}  press ctrl-c to stop{reset}");
     eprintln!();
 }

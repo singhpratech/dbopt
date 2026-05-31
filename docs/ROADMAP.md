@@ -69,10 +69,10 @@ dimension so coverage is tracked per engine.
 `/api/*` endpoints and the connection panel carry the target engine; the analyzer
 and sentinel select the right `DbEngine` impl.
 
-### 4. Rename / rebrand (sqlopt → dbopt)
-Binaries (`sqlopt`→`dbopt`, `sqlopt-backend`→`dbopt-backend`, `sqlopt-sentinel`→
-`dbopt-sentinel`), env vars (`SQLOPT_*`→`DBOPT_*`), data dir (`~/.sqlopt`→`~/.dbopt`)
-and the localStorage namespace (`sqlopt.*`→`dbopt.*`, with a migration shim).
+### 4. Rename / rebrand (dbopt → dbopt)
+Binaries (`dbopt`→`dbopt`, `dbopt-backend`→`dbopt-backend`, `dbopt-sentinel`→
+`dbopt-sentinel`), env vars (`DBOPT_*`→`DBOPT_*`), data dir (`~/.dbopt`→`~/.dbopt`)
+and the localStorage namespace (`dbopt.*`→`dbopt.*`, with a migration shim).
 
 ## Later
 - Cross-platform single-binary release artifacts (.exe / .dmg / .AppImage).

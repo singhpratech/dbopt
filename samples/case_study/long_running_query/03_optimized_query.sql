@@ -12,7 +12,7 @@
 -- behaviour: RCSI is on at the database level (see docker/bootstrap/00_init.sql)
 -- so we get non-blocking reads without NOLOCK.
 -- ============================================================
-USE sqlopt_case;
+USE dbopt_case;
 GO
 
 IF OBJECT_ID('dbo.GetGmailSReport_Fast', 'P') IS NOT NULL DROP PROCEDURE dbo.GetGmailSReport_Fast;

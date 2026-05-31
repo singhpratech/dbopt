@@ -11,7 +11,7 @@
 # Connect from the host:
 #   sqlcmd -S localhost,14333 -U sa -P "$SA_PASSWORD" -C -d master
 #
-# Or, point sqlopt's Connection workspace at:
+# Or, point dbopt's Connection workspace at:
 #   server   = localhost,14333
 #   user     = sa
 #   password = $SA_PASSWORD
@@ -24,9 +24,9 @@
 #   docker compose -f docker/sqlserver.yml down -v
 
 services:
-  sqlopt-sql2025:
+  dbopt-sql2025:
     image: mcr.microsoft.com/mssql/server:2025-latest
-    container_name: sqlopt-sql2025
+    container_name: dbopt-sql2025
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_PID: Developer
@@ -36,7 +36,7 @@ services:
     ports:
       - "14333:1433"
     volumes:
-      - sqlopt_sql2025_data:/var/opt/mssql
+      - dbopt_sql2025_data:/var/opt/mssql
       - ./bootstrap:/bootstrap:ro
     healthcheck:
       test:
@@ -51,5 +51,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  sqlopt_sql2025_data:
-    name: sqlopt_sql2025_data
+  dbopt_sql2025_data:
+    name: dbopt_sql2025_data

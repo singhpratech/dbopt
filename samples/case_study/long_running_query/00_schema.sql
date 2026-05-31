@@ -1,9 +1,9 @@
 -- ============================================================
--- sqlopt case study: "the 10-hour sales report"
+-- dbopt case study: "the 10-hour sales report"
 -- Schema for a small e-commerce model. Deliberately missing the
 -- nonclustered indexes the pathological baseline query needs.
 -- ============================================================
-USE sqlopt_case;
+USE dbopt_case;
 GO
 
 IF OBJECT_ID('dbo.OrderLines', 'U') IS NOT NULL DROP TABLE dbo.OrderLines;

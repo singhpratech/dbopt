@@ -1,14 +1,23 @@
 /**
  * Tiny typed wrapper around localStorage with a versioned namespace.
- * All settings keys live under `sqlopt.*`.
+ * All settings keys live under `dbopt.*`.
  */
 
-const NS = "sqlopt";
+const NS = "dbopt";
 
 export function load<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(`${NS}.${key}`);
-    if (!raw) return fallback;
+    let raw = localStorage.getItem(`${NS}.${key}`);
+    if (raw == null) {
+      // One-time migration from the pre-rebrand "sqlopt.*" namespace so existing
+      // users keep their settings/connection/thread after the dbopt rename.
+      const legacy = localStorage.getItem(`sqlopt.${key}`);
+      if (legacy != null) {
+        localStorage.setItem(`${NS}.${key}`, legacy);
+        raw = legacy;
+      }
+    }
+    if (raw == null) return fallback;
     return JSON.parse(raw) as T;
   } catch {
     return fallback;
@@ -35,7 +44,7 @@ export function clearAll(): void {
 /**
  * First-run onboarding flag. Gates the welcome → connect wizard so it only
  * appears until the user has either connected or explicitly skipped. Stored
- * under `sqlopt.onboarded`.
+ * under `dbopt.onboarded`.
  */
 export function isOnboarded(): boolean {
   return load<boolean>("onboarded", false) === true;
@@ -96,8 +105,8 @@ function newId(): string {
 
 /**
  * Load the saved server profiles, returning the list plus the currently-active
- * profile id. On first run (no `sqlopt.servers` key) this seeds a single
- * profile from the legacy `sqlopt.conn` value so existing users keep their
+ * profile id. On first run (no `dbopt.servers` key) this seeds a single
+ * profile from the legacy `dbopt.conn` value so existing users keep their
  * connection. The legacy `conn` key is left untouched for backward compat.
  */
 export function loadServers(): { servers: ServerProfile[]; currentId: string | null } {

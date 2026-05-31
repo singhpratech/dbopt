@@ -1,7 +1,7 @@
 //! Durable log endpoints (AI interactions + analysis history).
 //!
 //! Storage shares the same SQLite file the sentinel daemon writes to
-//! (`~/.sqlopt/sentinel.db`), so logs survive backend restarts and browser
+//! (`~/.dbopt/sentinel.db`), so logs survive backend restarts and browser
 //! cache clears. The schema lives in sentinel/migrations/0003_logs.sql.
 
 use axum::{extract::Query, http::StatusCode, response::IntoResponse, Json};

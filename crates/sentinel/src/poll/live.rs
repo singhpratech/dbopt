@@ -27,7 +27,7 @@ pub async fn poll_live_requests(
     // nvarchar(max), and tiberius silently returns NULL when reading a MAX type
     // as &str — which is why every preview used to come back empty. We capture
     // every in-flight user request (is_user_process = 1), excluding this poller
-    // and our own background pollers (tagged program_name = 'sqlopt-sentinel').
+    // and our own background pollers (tagged program_name = 'dbopt-sentinel').
     const SQL: &str = r#"
         SELECT
             r.session_id,
@@ -41,7 +41,7 @@ pub async fn poll_live_requests(
         OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
         WHERE r.session_id <> @@SPID
           AND s.is_user_process = 1
-          AND ISNULL(s.program_name, '') <> 'sqlopt-sentinel';
+          AND ISNULL(s.program_name, '') <> 'dbopt-sentinel';
     "#;
 
     let stream = client.simple_query(SQL).await?;
