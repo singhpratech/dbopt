@@ -53,7 +53,8 @@ The AI features are the main outbound path. There are two kinds:
 |---|---|---|
 | **Ollama** | your machine (localhost) | **No** |
 | **web-llm** | in your browser (WASM) | **No** |
-| **OpenAI / Anthropic / Azure OpenAI / AWS Bedrock / OpenRouter** | the vendor's cloud | **Yes** |
+| **OpenAI / Anthropic / Azure OpenAI / OpenRouter** | the vendor's cloud | **Yes** |
+| **AWS Bedrock** (source builds with the `bedrock` feature only) | the vendor's cloud | **Yes** |
 
 When you use a **cloud** provider, your prompt — which may contain your SQL,
 schema, and the findings dbopt produced — is sent over HTTPS to that vendor, along

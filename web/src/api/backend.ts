@@ -34,11 +34,13 @@ export type Capabilities = {
   integrated_auth: boolean;
   /** Can authenticate with an explicit Windows account + password (NTLM). */
   windows_account_auth: boolean;
+  /** AWS Bedrock provider is compiled into this build (opt-in feature). */
+  bedrock: boolean;
   platform?: string;
   version?: string;
 };
 
-const CAPS_FALLBACK: Capabilities = { integrated_auth: false, windows_account_auth: false };
+const CAPS_FALLBACK: Capabilities = { integrated_auth: false, windows_account_auth: false, bedrock: false };
 
 /** What this backend binary actually supports. Defaults to the safe assumption
  *  (no Windows auth) if the call fails, so the UI never offers a dead end. */

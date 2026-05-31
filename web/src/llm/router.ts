@@ -21,6 +21,14 @@ export const PROVIDER_LABEL: Record<ProviderKey, string> = {
   bedrock: "AWS Bedrock",
 };
 
+// Cached one-shot capability probe so we don't refetch per provider. Used to
+// honestly gate AWS Bedrock, which is only present in builds compiled with the
+// `bedrock` feature (shipped release binaries are NOT).
+let _capsPromise: Promise<backend.Capabilities> | null = null;
+function caps(): Promise<backend.Capabilities> {
+  return (_capsPromise ??= backend.capabilities());
+}
+
 export async function probeOllama(): Promise<{ ready: boolean; models: string[]; error?: string }> {
   const r = await backend.listOllamaModels();
   if (!r) return { ready: false, models: [], error: "Ollama not reachable through backend." };
@@ -55,6 +63,9 @@ export async function evaluate(p: ProviderConfig): Promise<ProviderRuntimeStatus
     case "azure":
     case "anthropic":
     case "bedrock":
+      if (p.key === "bedrock" && !(await caps()).bedrock) {
+        return { key: p.key, label, ready: false, detail: "Not in this build — compile from source with --features bedrock" };
+      }
       if (!p.api_key && p.key !== "bedrock") return { key: p.key, label, ready: false, detail: "API key not set" };
       if (p.key === "bedrock" && !p.access_key_id) return { key: p.key, label, ready: false, detail: "AWS credentials not set" };
       if (p.key === "azure" && (!p.base_url || !p.deployment)) return { key: p.key, label, ready: false, detail: "base_url + deployment required" };

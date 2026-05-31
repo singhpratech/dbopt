@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GLOSSARY } from "../glossary";
 import { appVersion } from "../api/backend";
 import { checkForUpdates, RELEASES_PAGE, type UpdateCheck } from "../api/updates";
+import * as P from "../store/persist";
 
 /**
  * The "?" help slide-over. Two sections:
@@ -68,6 +69,7 @@ export function HelpPanel({
   // from the backend when the panel opens (no egress) just to show the version.
   const [curVer, setCurVer] = useState<string | null>(null);
   const [upd, setUpd] = useState<UpdateCheck | "idle" | "checking">("idle");
+  const [autoCheck, setAutoCheck] = useState<boolean>(() => P.load<boolean>("auto_check_updates", true));
   const bodyRef = useRef<HTMLDivElement>(null);
   const focusRowRef = useRef<HTMLDivElement>(null);
   const rubricRef = useRef<HTMLElement>(null);
@@ -257,6 +259,14 @@ export function HelpPanel({
               </a>
             </div>
             <UpdateResult upd={upd} />
+            <label className="help-update-auto">
+              <input
+                type="checkbox"
+                checked={autoCheck}
+                onChange={(e) => { setAutoCheck(e.target.checked); P.save("auto_check_updates", e.target.checked); }}
+              />
+              Check for updates automatically on launch
+            </label>
           </section>
 
           <section className="help-glossary">

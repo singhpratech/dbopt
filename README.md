@@ -33,9 +33,11 @@ fix it, with the reasoning cited**. It works statically and from the *estimated*
 execution, no locks, no load on production**. Nothing leaves your machine unless you explicitly choose a
 cloud model.
 
-> **One product, many engines.** **SQL Server is the first engine** — comprehensive and fully tested
-> (2019 → 2025). PostgreSQL and MySQL are next; the engine seam is already in place, so each new database is
-> a *flavor* of the same tool, not a separate product.
+> **One product, many engines.** **SQL Server is the first and only fully-supported engine** (2019 → 2025).
+> The static analyzer and index advisor are ship-grade; continuous capture (sentinel) and the health score
+> are included and improving — an early-warning telemetry layer, not yet a replacement for a full production
+> monitor. PostgreSQL and MySQL are next; the engine seam is already in place, so each new database is a
+> *flavor* of the same tool, not a separate product.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
 > monetizing your pain.
@@ -111,9 +113,10 @@ account, no upload, ever** — so it'll happily dissect a query you'd never dare
 plans are compile-only and DDL is preview-only (Safe-Apply never auto-runs a change).
 
 **AI is your call.** Run a **local** model (Ollama / web-llm) and *nothing* leaves the machine. Want a
-frontier model instead? Pick a **cloud** provider (Anthropic, OpenAI, Azure, Bedrock, OpenRouter) and only
+frontier model instead? Pick a **cloud** provider (Anthropic, OpenAI, Azure OpenAI, OpenRouter) and only
 your prompt — the SQL plus its findings — is sent, and only when you choose it. The one egress is yours to
-make.
+make. *(AWS Bedrock is also supported, but only in a source build compiled with the `bedrock` feature — it
+is not included in the prebuilt downloads.)*
 
 ## Quality bar — proven, not promised
 
@@ -183,8 +186,10 @@ Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No e
 
 ## Roadmap — one brand, every engine
 
-**SQL Server (2019 → 2025) is the product** — complete and tested: static analysis, estimated-plan
-analysis, live DMVs, continuous sentinel, AI assistant, web UI.
+**SQL Server (2019 → 2025) is the product.** The **static analyzer + index advisor** are ship-grade
+(59 rules, F1 = 1.000 on 135 scenarios; estimated/actual plan analysis; read-only DMV advisor). **Live
+capture (sentinel) + the health score** are included as an early-warning telemetry layer — a real
+head-start, not yet a full production monitor with alerting/trending. AI assistant + web UI round it out.
 
 **PostgreSQL and MySQL are a deliberate _later_.** The `Engine` seam already exists (the analyzer accepts a
 target engine and filters rules), so adding them never destabilizes the SQL Server core — one master brand,

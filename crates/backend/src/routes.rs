@@ -67,6 +67,10 @@ async fn capabilities() -> impl IntoResponse {
         "integrated_auth": integrated_auth,
         // Can authenticate with an explicit Windows account + password (NTLM).
         "windows_account_auth": windows_account_auth,
+        // AWS Bedrock is behind an opt-in build feature (heavy AWS SDK). Shipped
+        // release binaries don't include it, so the UI must gate it honestly
+        // rather than offer a provider that errors the moment it's used.
+        "bedrock": cfg!(feature = "bedrock"),
         "platform": std::env::consts::OS,
         "version": env!("CARGO_PKG_VERSION"),
     }))

@@ -70,7 +70,7 @@ The left rail is grouped **START → OPERATE → INSPECT → SETUP**. Toggle **D
 - **≡ Severity** — findings rolled up by severity.
 
 ### SETUP
-- **↪ AI** — a grounded assistant. It receives your SQL **and** the static findings as context, so it explains and rewrites with real grounding. Run **one model** or **fan out** the same prompt to several providers side by side. Answers render as rich Markdown (tables, code blocks with a COPY button). Providers: local **Ollama** + **web-llm**, or cloud (Anthropic, OpenAI, Azure OpenAI, Bedrock, OpenRouter). **Only the cloud providers send your prompt off-box** — local models keep everything on the machine.
+- **↪ AI** — a grounded assistant. It receives your SQL **and** the static findings as context, so it explains and rewrites with real grounding. Run **one model** or **fan out** the same prompt to several providers side by side. Answers render as rich Markdown (tables, code blocks with a COPY button). Providers: local **Ollama** + **web-llm**, or cloud (Anthropic, OpenAI, Azure OpenAI, OpenRouter). **Only the cloud providers send your prompt off-box** — local models keep everything on the machine. *(AWS Bedrock is available only in a source build compiled with the `bedrock` feature, not in the prebuilt downloads.)*
 - **⚙ Config** — theme, mode, providers, and version defaults. Everything persists to local storage.
 
 ## 5. The CLI

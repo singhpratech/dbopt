@@ -3946,6 +3946,62 @@ kbd {
   gap: 8px;
   margin-top: 10px;
 }
+.help-update-auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font: 12px var(--f-sans);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+/* On-launch "update available" banner (top of the app shell) ------------- */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  background: linear-gradient(90deg, rgba(212, 255, 78, 0.14), rgba(212, 255, 78, 0.05));
+  border-bottom: 1px solid var(--signal);
+  font: 12px var(--f-sans);
+  color: var(--text);
+}
+.update-banner-msg { display: inline-flex; align-items: center; gap: 6px; }
+.update-banner-msg strong { color: var(--text-strong); }
+.update-banner-icon { color: var(--signal); font-weight: 700; }
+.update-banner-btn {
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: var(--signal);
+  color: var(--bg-void);
+  font: 600 11px var(--f-mono);
+  text-decoration: none;
+  cursor: pointer;
+}
+.update-banner-btn:hover { filter: brightness(1.08); }
+.update-banner-link {
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font: 11px var(--f-sans);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 2px 4px;
+}
+.update-banner-link:hover { color: var(--text); }
+.update-banner-x {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 6px;
+  line-height: 1;
+}
+.update-banner-x:hover { color: var(--text); }
 
 /* ============================================================
    Live activity monitor (WATCH ▸ LIVE) — real-time vitals.

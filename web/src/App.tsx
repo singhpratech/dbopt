@@ -19,6 +19,7 @@ import { HelpPanel } from "./components/HelpPanel";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import * as P from "./store/persist";
 import * as backend from "./api/backend";
+import { checkForUpdates } from "./api/updates";
 import * as ailog from "./store/ailog";
 import * as runlog from "./store/runlog";
 
@@ -149,6 +150,27 @@ export function App() {
   type DbStatus = "unconfigured" | "checking" | "connected" | "offline";
   const [dbStatus, setDbStatus] = useState<DbStatus>("unconfigured");
   const editorHandle = useRef<SqlEditorHandle | null>(null);
+
+  // ── Software version + auto-update notice ───────────────
+  // The running version (from the local /api/version) drives the topbar tag and
+  // the on-launch update check. The check is opt-out (auto_check_updates) and
+  // remembers a dismissed version so it never nags about the same release twice.
+  const [appVer, setAppVer] = useState<string | null>(null);
+  const [updateAvail, setUpdateAvail] = useState<{ latest: string; url: string; assetUrl: string | null } | null>(null);
+  useEffect(() => {
+    let live = true;
+    backend.appVersion().then((v) => {
+      if (!live || !v) return;
+      setAppVer(v.version);
+      if (!P.load<boolean>("auto_check_updates", true)) return;
+      checkForUpdates(v.version, v.platform).then((u) => {
+        if (!live || u.status !== "update") return;
+        if (P.load<string>("dismissed_update_version", "") === u.latest) return;
+        setUpdateAvail({ latest: u.latest, url: u.url, assetUrl: u.assetUrl });
+      });
+    });
+    return () => { live = false; };
+  }, []);
 
   // ── Onboarding + help ───────────────────────────────
   // First-run gate: show the welcome → connect wizard until the user has
@@ -454,11 +476,46 @@ export function App() {
   // ── Render ──────────────────────────────────────────
   return (
     <div className={`app${railExpanded ? " rail-expanded" : ""}`}>
+      {updateAvail && (
+        <div className="update-banner" role="status">
+          <span className="update-banner-msg">
+            <span className="update-banner-icon" aria-hidden>↑</span>
+            <strong>Update available</strong> — dbopt v{updateAvail.latest} is out
+            {appVer ? <> (you have v{appVer})</> : null}.
+          </span>
+          <a
+            className="update-banner-btn"
+            href={updateAvail.assetUrl ?? updateAvail.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Download
+          </a>
+          <a className="update-banner-link" href={updateAvail.url} target="_blank" rel="noopener noreferrer">
+            Release notes ↗
+          </a>
+          <button
+            className="update-banner-link"
+            onClick={() => { P.save("auto_check_updates", false); setUpdateAvail(null); }}
+            title="Stop checking for updates automatically (you can still check from Help)"
+          >
+            Stop auto-checking
+          </button>
+          <button
+            className="update-banner-x"
+            aria-label="Dismiss"
+            title="Dismiss until the next release"
+            onClick={() => { P.save("dismissed_update_version", updateAvail.latest); setUpdateAvail(null); }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <header className="topbar">
         <div className="brand">
           <img className="mark" src="/logo.svg" alt="dbopt" width="26" height="26" />
           <span className="name">dbopt<span className="dim">/observatory</span></span>
-          <span className="tag">v0.1</span>
+          <span className="tag">{appVer ? `v${appVer}` : ""}</span>
         </div>
 
         <div className="topbar-status">
