@@ -12,3 +12,4 @@ path = "src/main.rs"
 analyzer-core = { path = "../analyzer-core" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+walkdir = "2"

@@ -30,6 +30,7 @@ dependencies = [
  "analyzer-core",
  "anyhow",
  "serde_json",
+ "walkdir",
 ]
 
 [[package]]
