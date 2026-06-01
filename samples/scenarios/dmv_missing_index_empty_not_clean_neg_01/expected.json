@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["dmv.missing_index", "dmv.unused_index", "dmv.duplicate_or_overlapping_index"],
+  "server_version": 2019,
+  "category": "dmv"
+}

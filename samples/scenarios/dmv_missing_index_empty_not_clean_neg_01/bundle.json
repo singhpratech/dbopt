@@ -1,0 +1,16 @@
+{
+  "dmv_bundle": {
+    "index_usage": [
+      { "database_name": "Sales", "schema_name": "dbo", "table_name": "Customer",
+        "index_name": "PK_Customer", "user_seeks": 14200, "user_scans": 3,
+        "user_lookups": 0, "user_updates": 220 }
+    ],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Customer", "index_name": "PK_Customer",
+        "is_unique": true, "is_primary_key": true,
+        "key_columns": ["CustomerID"], "included_columns": [] }
+    ],
+    "missing_indexes": [],
+    "partition_stats": []
+  }
+}

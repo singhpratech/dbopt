@@ -584,6 +584,35 @@ mod tests {
     }
 
     #[test]
+    fn hadr_async_not_healthy_secondary_still_flagged() {
+        // ts.hadr_secondary_lagging: an ASYNCHRONOUS_COMMIT secondary whose
+        // synchronization_health is NOT_HEALTHY (redo queue stalled, far behind)
+        // MUST fire on the health flag alone, even though async replicas are
+        // expected to lag in *state*. Health, not lag-in-state, is the signal.
+        let f = OperationalFacts {
+            hadr_readable: true,
+            hadr_replicas: vec![HadrReplicaFact {
+                replica_server_name: "NODE2".into(),
+                database_name: "Sales".into(),
+                synchronization_state: "SYNCHRONIZING".into(),
+                synchronization_health: "NOT_HEALTHY".into(),
+                availability_mode: "ASYNCHRONOUS_COMMIT".into(),
+                is_suspended: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let c = evaluate(&f, "db");
+        let h = c
+            .iter()
+            .find(|c| c.id == "hadr.replica_unhealthy")
+            .expect("ASYNC NOT_HEALTHY secondary must be flagged");
+        assert_eq!(h.severity, "critical");
+        // The measured sync-state/health pair is surfaced as the metric value.
+        assert!(h.metric_value.contains("NOT_HEALTHY"), "metric: {}", h.metric_value);
+    }
+
+    #[test]
     fn hadr_async_not_synchronizing_is_not_flagged_on_state_alone() {
         // ASYNCHRONOUS replicas are expected to lag; "NOT SYNCHRONIZING" state
         // alone (with HEALTHY health, not suspended) must not trip the check.
@@ -632,6 +661,37 @@ mod tests {
         assert_eq!(backup.severity, "error");
         let reorg = c.iter().find(|c| c.title.contains("Index Reorg")).expect("reorg job flagged");
         assert_eq!(reorg.severity, "warning");
+    }
+
+    #[test]
+    fn jobs_backup_failure_surfaces_message_and_count() {
+        // ts.backup_job_failing_silently: a nightly full-backup job failing every
+        // night for a week is a direct RPO/data-loss exposure. The check must
+        // surface the engine's failure message (so the operator can act) and the
+        // 30-day failure count, at error severity for a backup job.
+        let f = OperationalFacts {
+            jobs_readable: true,
+            failed_jobs: vec![FailedJobFact {
+                job_name: "DailyFullBackup".into(),
+                failure_count: 7,
+                message: "Cannot open backup device. Operating system error 5(Access is denied.)".into(),
+                run_at: Some("2026-05-31 02:00:00".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let c = evaluate(&f, "db");
+        let j = c
+            .iter()
+            .find(|c| c.id == "jobs.recent_failures")
+            .expect("failed backup job must be flagged");
+        assert_eq!(j.severity, "error", "a backup job failure is escalated to error");
+        assert_eq!(j.metric_value, "7", "30-day failure count is surfaced");
+        assert!(
+            j.recommendation.contains("Access is denied"),
+            "the engine failure message must be surfaced: {}",
+            j.recommendation
+        );
     }
 
     // --- Instant File Initialization ----------------------------------------

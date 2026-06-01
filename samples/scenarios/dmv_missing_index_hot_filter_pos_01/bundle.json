@@ -1,0 +1,13 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [],
+    "missing_indexes": [
+      { "schema_name": "dbo", "table_name": "Sales",
+        "equality_columns": ["CustomerID"], "inequality_columns": [],
+        "included_columns": ["OrderDate", "TotalCents"],
+        "avg_user_impact": 96.7, "user_seeks": 24180, "avg_total_user_cost": 14.6 }
+    ],
+    "partition_stats": []
+  }
+}
