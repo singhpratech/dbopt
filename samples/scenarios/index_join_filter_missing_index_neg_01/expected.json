@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["index.join_filter_missing_index"],
+  "server_version": 2025,
+  "category": "index"
+}

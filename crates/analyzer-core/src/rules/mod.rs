@@ -13,6 +13,7 @@ mod stats;
 mod index_design;
 // === optimizer-supremacy rule packs (2026-05, workflow wf_c93d48ba) ===
 mod joins;
+mod join_index;
 mod index_hints;
 mod antipatterns;
 mod config;
@@ -135,6 +136,7 @@ pub const REGISTRY: &[Rule] = &[
     ss(joins::function_on_join_column),
     ss(joins::outer_join_filtered_to_inner),
     ss(joins::distinct_with_join_fanout),
+    ss(join_index::join_filter_missing_index),
     // offline missing-index inference from query shape
     ss(index_hints::missing_index_from_predicate),
     ss(index_hints::order_by_forces_sort),
