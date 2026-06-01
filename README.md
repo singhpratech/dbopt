@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
   <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
-  <img src="https://img.shields.io/badge/rules-100-d4ff4e?style=flat-square&labelColor=0a0d12" alt="100 rules" />
+  <img src="https://img.shields.io/badge/rules-101-d4ff4e?style=flat-square&labelColor=0a0d12" alt="101 rules" />
   <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
   <img src="https://img.shields.io/badge/local--first-by%20default-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20React-7e879b?style=flat-square&labelColor=0a0d12" alt="Rust + React" />
@@ -95,7 +95,7 @@ dbopt takes the opposite stance on all four.
 
 |   | Lens | What it does |
 |---|------|--------------|
-| **01** | **Static** | A token-level T-SQL analyzer — **100 rules** across hygiene, sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb, statistics, transactions, security and index design. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
+| **01** | **Static** | A token-level T-SQL analyzer — **101 rules** across hygiene, sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb, statistics, transactions, security and index design. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
 | **02** | **Plan** | Fetches the *estimated* plan (`SET SHOWPLAN_XML`, compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, and spill risk. |
 | **03** | **Live** | Pulls DMVs (index usage, missing indexes, sizes) on demand, and the **sentinel** daemon polls Query Store, waits, deadlocks and index usage into a local SQLite time-series → a weekly **pain report**. |
 
@@ -134,7 +134,7 @@ cargo run -p eval -- --html   # → target/eval-report.html  (the live board)
 
 ## Lint in CI (offline, no connection)
 
-`dbopt lint` walks your `.sql` files, applies all 100 rules, and emits machine-readable
+`dbopt lint` walks your `.sql` files, applies all 101 rules, and emits machine-readable
 output — so a bad query fails the build *before* it ships. No database, no account, no upload.
 
 ```bash
@@ -214,7 +214,7 @@ Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No e
 ## Roadmap — one brand, every engine
 
 **SQL Server (2019 → 2025) is the product.** The **static analyzer + index advisor** are ship-grade
-(100 rules, self-graded F1 = 1.000 on 143 scenarios covering 72 of them; estimated/actual plan analysis; read-only DMV advisor). **Live
+(101 rules, self-graded F1 = 1.000 on 143 scenarios covering 72 of them; estimated/actual plan analysis; read-only DMV advisor). **Live
 capture (sentinel) + the health score** are included as an early-warning telemetry layer — a real
 head-start, not yet a full production monitor with alerting/trending. AI assistant + web UI round it out.
 

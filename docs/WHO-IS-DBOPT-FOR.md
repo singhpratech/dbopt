@@ -28,7 +28,7 @@ and it tells you the *exact* index to create — grounded in either the script's
 or the server's real usage.
 
 **Proof.**
-- The static analyzer runs **100 rules** in milliseconds with a self-graded **F1 = 1.000** on our
+- The static analyzer runs **101 rules** in milliseconds with a self-graded **F1 = 1.000** on our
   143-scenario corpus (covering 72 of those rules) — so the flags it's tested on are precise, not noise.
 - On a real 82 KB / 3000-line script it produced **2,249 findings in 0.02 s**, then **grouped them
   into a handful of ranked cards** instead of a flat 2,249-row dump.

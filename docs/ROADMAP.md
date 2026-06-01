@@ -64,7 +64,7 @@ Mapping per engine:
 | Catalog        | `sys.objects`/`sys.sql_modules`    | `information_schema`/`pg_proc`      | `information_schema`               |
 
 ### 2. Per-rule engine tags
-Audit the 100 rules: many sargability/hygiene *concepts* are universal (leading
+Audit the 101 rules: many sargability/hygiene *concepts* are universal (leading
 wildcard, function-on-column, SELECT *), even if the trigger syntax differs;
 plan-shape/locking/tempdb rules are largely SQL-Server-specific. Tag accordingly
 and add Postgres/MySQL rule families. Extend the eval corpus with an engine
