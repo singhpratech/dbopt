@@ -64,12 +64,86 @@ pub struct TopQueryRow {
 }
 
 /// One row of "regression detected" — query got slower across the window.
+/// `baseline_duration_ms` holds the rolling-mean per-execution baseline the
+/// z-score detector compared the latest sample against.
 #[derive(Debug, Clone, Serialize)]
 pub struct RegressionRow {
     pub query_id: i64,
     pub baseline_duration_ms: i64,
     pub current_duration_ms: i64,
     pub delta_pct: f64,
+}
+
+/// Z-score threshold (in standard deviations) above the rolling mean that the
+/// latest per-execution duration must clear to count as a regression. ~3σ is a
+/// conventional outlier cutoff: it keeps false positives low while still
+/// catching genuine slowdowns.
+pub const REGRESSION_Z_SCORE_K: f64 = 3.0;
+
+/// Minimum number of snapshot samples (including the current one) required
+/// before the z-score is trusted. Below this we have too little history to
+/// estimate a stable stddev, so the query is skipped (graceful fallback).
+pub const REGRESSION_MIN_SAMPLES: usize = 6;
+
+/// Minimum total executions across the sampled history. Guards against flagging
+/// rarely-run queries whose averages swing wildly on a single slow run.
+pub const REGRESSION_MIN_EXECUTIONS: i64 = 10;
+
+/// Minimum absolute increase (current − baseline mean, in ms-per-execution)
+/// before a statistical outlier is worth reporting. Filters out z-score spikes
+/// on sub-millisecond queries where the relative jump is noise.
+pub const REGRESSION_MIN_ABS_DELTA_MS: f64 = 5.0;
+
+/// Apply the rolling-mean + standard-deviation (z-score) regression test to one
+/// query's per-snapshot duration-per-execution series (oldest→newest).
+///
+/// Returns a [`RegressionRow`] only when the latest sample is a genuine outlier:
+/// enough samples and executions exist, the prior history has non-zero spread,
+/// the latest value exceeds `mean + REGRESSION_Z_SCORE_K * stddev`, and the
+/// absolute jump clears [`REGRESSION_MIN_ABS_DELTA_MS`]. Tiny or flat samples
+/// return `None` rather than being force-judged.
+fn detect_regression(query_id: i64, points: &[(f64, i64)]) -> Option<RegressionRow> {
+    if points.len() < REGRESSION_MIN_SAMPLES {
+        return None;
+    }
+    let total_exec: i64 = points.iter().map(|(_, e)| *e).sum();
+    if total_exec < REGRESSION_MIN_EXECUTIONS {
+        return None;
+    }
+    // Compare the most-recent sample against the rolling mean/stddev of the
+    // *prior* samples so the current outlier doesn't inflate its own baseline.
+    let (current, _) = *points.last().unwrap();
+    let prior = &points[..points.len() - 1];
+    let n = prior.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean = prior.iter().map(|(d, _)| *d).sum::<f64>() / n;
+    // Sample variance (Bessel's correction, n-1) for an unbiased stddev.
+    let variance = prior.iter().map(|(d, _)| (d - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let stddev = variance.sqrt();
+    // Flat history (no variation): no statistical basis to call an outlier.
+    if !(stddev > 0.0) || !mean.is_finite() {
+        return None;
+    }
+    let z = (current - mean) / stddev;
+    if z < REGRESSION_Z_SCORE_K {
+        return None;
+    }
+    if (current - mean) < REGRESSION_MIN_ABS_DELTA_MS {
+        return None;
+    }
+    let delta_pct = if mean > 0.0 {
+        (current / mean - 1.0) * 100.0
+    } else {
+        0.0
+    };
+    Some(RegressionRow {
+        query_id,
+        baseline_duration_ms: mean.round() as i64,
+        current_duration_ms: current.round() as i64,
+        delta_pct,
+    })
 }
 
 /// Aggregate pain summary for the report header.
@@ -535,46 +609,60 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Regressions: queries whose current-half-window duration is ≥2× the
-    /// baseline-half, with ≥10 executions in both halves.
+    /// Regressions: queries whose most-recent per-execution duration is a
+    /// statistical outlier versus that query's own recent history.
+    ///
+    /// For each query we read the snapshot series in `window`, derive the
+    /// per-snapshot mean duration-per-execution (`total_duration_ms /
+    /// executions`), then compute the rolling mean and (sample) standard
+    /// deviation of the *prior* snapshots. The latest snapshot is flagged when
+    /// it lands above `mean + Z_SCORE_K * stddev` (a z-score above the
+    /// configured threshold), the absolute jump clears
+    /// [`REGRESSION_MIN_ABS_DELTA_MS`], and there are enough samples and
+    /// executions to be meaningful. Tiny samples fall back gracefully: a query
+    /// with fewer than [`REGRESSION_MIN_SAMPLES`] snapshots is skipped rather
+    /// than judged against a noisy stddev. `baseline_duration_ms` carries the
+    /// rolling-mean baseline and `delta_pct` the percent change versus it.
     pub fn regressions_since(&self, window: TimeRange) -> anyhow::Result<Vec<RegressionRow>> {
-        let half = (window.to_ms() - window.from_ms()) / 2;
-        let mid = window.from_ms() + half;
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        // Pull the per-snapshot duration-per-execution series per query,
+        // oldest→newest, so the last element of each group is "current".
         let mut stmt = lock.prepare(
-            "WITH baseline AS (
-                 SELECT query_id, SUM(total_duration_ms) AS d, SUM(executions) AS e
-                 FROM query_store_snapshot
-                 WHERE captured_at >= ?1 AND captured_at < ?2
-                 GROUP BY query_id
-             ),
-             current AS (
-                 SELECT query_id, SUM(total_duration_ms) AS d, SUM(executions) AS e
-                 FROM query_store_snapshot
-                 WHERE captured_at >= ?2 AND captured_at < ?3
-                 GROUP BY query_id
-             )
-             SELECT b.query_id, b.d AS baseline_ms, c.d AS current_ms
-             FROM baseline b
-             JOIN current  c ON c.query_id = b.query_id
-             WHERE b.d > 0 AND b.e >= 10 AND c.e >= 10 AND CAST(c.d AS REAL) / b.d >= 2.0
-             ORDER BY (c.d - b.d) DESC
-             LIMIT 50",
+            "SELECT query_id, captured_at,
+                    CAST(total_duration_ms AS REAL) / executions AS dur_per_exec,
+                    executions
+             FROM query_store_snapshot
+             WHERE captured_at >= ?1 AND captured_at < ?2
+               AND executions > 0
+             ORDER BY query_id, captured_at",
         )?;
-        let rows = stmt
-            .query_map(params![window.from_ms(), mid, window.to_ms()], |r| {
-                let baseline: i64 = r.get(1)?;
-                let current: i64 = r.get(2)?;
-                let delta_pct = if baseline == 0 { 0.0 } else { (current as f64 / baseline as f64 - 1.0) * 100.0 };
-                Ok(RegressionRow {
-                    query_id: r.get(0)?,
-                    baseline_duration_ms: baseline,
-                    current_duration_ms: current,
-                    delta_pct,
-                })
+        // Each row: (query_id, dur_per_exec, executions).
+        let mut series: std::collections::BTreeMap<i64, Vec<(f64, i64)>> =
+            std::collections::BTreeMap::new();
+        let raw = stmt
+            .query_map(params![window.from_ms(), window.to_ms()], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        drop(stmt);
+        drop(lock);
+        for (qid, dur, exec) in raw {
+            series.entry(qid).or_default().push((dur, exec));
+        }
+
+        let mut out: Vec<RegressionRow> = Vec::new();
+        for (qid, points) in series {
+            if let Some(row) = detect_regression(qid, &points) {
+                out.push(row);
+            }
+        }
+        // Largest absolute slowdown first; cap the report list.
+        out.sort_by(|a, b| {
+            (b.current_duration_ms - b.baseline_duration_ms)
+                .cmp(&(a.current_duration_ms - a.baseline_duration_ms))
+        });
+        out.truncate(50);
+        Ok(out)
     }
 
     pub fn pain_summary(&self, window: TimeRange) -> anyhow::Result<PainSummary> {
@@ -1041,5 +1129,115 @@ mod tests {
         let rows = s.top_n_by_duration(TimeRange::last_days(365), 10).expect("top");
         assert_eq!(rows.len(), 1, "recent row survives");
         assert_eq!(rows[0].query_id, 2);
+    }
+
+    // ---- z-score regression detector --------------------------------------
+
+    /// A query whose latest sample spikes far above a stable history is flagged.
+    #[test]
+    fn detect_regression_flags_clear_outlier() {
+        // 8 steady ~100ms samples (10 execs each) then a 1000ms spike.
+        let mut pts: Vec<(f64, i64)> = (0..8).map(|i| (100.0 + (i % 2) as f64, 10)).collect();
+        pts.push((1000.0, 10));
+        let row = detect_regression(42, &pts).expect("clear spike should be flagged");
+        assert_eq!(row.query_id, 42);
+        assert_eq!(row.current_duration_ms, 1000);
+        assert!(
+            row.baseline_duration_ms >= 99 && row.baseline_duration_ms <= 101,
+            "baseline is the rolling mean of prior samples, got {}",
+            row.baseline_duration_ms
+        );
+        assert!(row.delta_pct > 800.0, "huge percent jump, got {}", row.delta_pct);
+    }
+
+    /// Too few samples → graceful fallback (no flag), never a panic or div-by-0.
+    #[test]
+    fn detect_regression_skips_tiny_sample() {
+        let pts = vec![(100.0, 10), (5000.0, 10)];
+        assert!(
+            detect_regression(1, &pts).is_none(),
+            "two samples is below REGRESSION_MIN_SAMPLES"
+        );
+        assert!(detect_regression(2, &[]).is_none(), "empty series");
+    }
+
+    /// A perfectly flat history has zero stddev → no statistical basis to flag,
+    /// even if the latest sample ticks up a hair.
+    #[test]
+    fn detect_regression_handles_flat_history() {
+        let mut pts: Vec<(f64, i64)> = (0..8).map(|_| (100.0, 10)).collect();
+        pts.push((101.0, 10)); // small bump, but prior stddev is 0
+        assert!(
+            detect_regression(7, &pts).is_none(),
+            "flat baseline (stddev 0) must not divide-by-zero or flag"
+        );
+    }
+
+    /// Within-noise variation that never clears 3σ is not a regression.
+    #[test]
+    fn detect_regression_ignores_within_noise() {
+        // Prior samples jitter 90..110; latest 112 is well under mean+3σ.
+        let mut pts: Vec<(f64, i64)> =
+            vec![90.0, 110.0, 95.0, 105.0, 100.0, 92.0, 108.0, 100.0]
+                .into_iter()
+                .map(|d| (d, 10))
+                .collect();
+        pts.push((112.0, 10));
+        assert!(
+            detect_regression(9, &pts).is_none(),
+            "a value inside normal jitter must not be flagged"
+        );
+    }
+
+    /// Rare queries (low total executions) are skipped even on a big spike.
+    #[test]
+    fn detect_regression_skips_rare_queries() {
+        let mut pts: Vec<(f64, i64)> = (0..8).map(|_| (100.0, 1)).collect();
+        pts.push((1000.0, 1)); // 9 total execs < REGRESSION_MIN_EXECUTIONS
+        assert!(
+            detect_regression(11, &pts).is_none(),
+            "too few executions to trust the average"
+        );
+    }
+
+    /// End-to-end through SQLite: a steady series + one spiked snapshot is
+    /// surfaced by `regressions_since`.
+    #[test]
+    fn regressions_since_surfaces_spike() {
+        let s = Storage::open_in_memory().expect("open");
+        let conn = ConnectionInfo {
+            server: "localhost,1433".into(),
+            database: Some("master".into()),
+            user: Some("sa".into()),
+            password: Some("x".into()),
+            trust_cert: Some(true),
+        };
+        let id = s.ensure_instance("t", &conn).expect("ensure");
+        let mk = |mins_ago: i64, dur: i64| QueryStoreRow {
+            captured_at: Utc::now() - chrono::Duration::minutes(mins_ago),
+            query_id: 1,
+            plan_id: 1,
+            total_duration_ms: dur,
+            cpu_ms: dur / 2,
+            logical_reads: 1,
+            executions: 10,
+            query_sql_text: Some("SELECT 1".into()),
+            last_execution_ms: Some(Utc::now().timestamp_millis()),
+        };
+        // 8 steady snapshots (~1000ms total / 10 execs = ~100ms each), newest last.
+        for i in 0..8 {
+            let dur = 1000 + (i % 2) * 10; // tiny jitter so stddev > 0
+            s.insert_query_store_row(id, &mk(50 - i, dur)).expect("steady");
+        }
+        // Current snapshot spikes 10×.
+        s.insert_query_store_row(id, &mk(1, 10_000)).expect("spike");
+
+        let regs = s.regressions_since(TimeRange::last_hours(1)).expect("regressions");
+        assert_eq!(regs.len(), 1, "the spiked query should be the sole regression");
+        assert_eq!(regs[0].query_id, 1);
+        assert!(
+            regs[0].current_duration_ms > regs[0].baseline_duration_ms,
+            "current must exceed the rolling-mean baseline"
+        );
     }
 }

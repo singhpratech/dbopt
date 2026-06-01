@@ -274,7 +274,7 @@ pub fn render_markdown(r: &WeeklyReport) -> String {
     }
 
     // ── Regressions ─────────────────────────────────────
-    let _ = writeln!(s, "## Regressions (≥2× slower vs. baseline half-window)");
+    let _ = writeln!(s, "## Regressions (latest run is a statistical outlier vs. its rolling baseline)");
     let _ = writeln!(s);
     if r.regressions.is_empty() {
         let _ = writeln!(s, "_No regressions detected._");
@@ -490,7 +490,7 @@ pub fn render_html(r: &WeeklyReport) -> String {
     }
 
     // ── Regressions ─────────────────────────────────────
-    body.push_str("<section><h2>Regressions · ≥2× slower vs. baseline half-window</h2>");
+    body.push_str("<section><h2>Regressions · latest run is a statistical outlier vs. its rolling baseline</h2>");
     if r.regressions.is_empty() {
         body.push_str("<p class=\"empty\">No regressions detected in window.</p>");
     } else {
