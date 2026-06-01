@@ -2,7 +2,7 @@
 
 # dbopt — Usage guide
 
-dbopt finds and fixes slow SQL **before** it reaches production. This guide walks the whole tool end to end: install → run → connect → each workspace → the CLI and the continuous monitor.
+dbopt finds and fixes slow SQL **before** it reaches production. This guide walks the whole tool end to end: install → run → connect → each workspace → the CLI and the on-demand pulse poller.
 
 > SQL Server (2019 → 2025) is the supported engine today. Everything is **local-first** — your queries, schema and metrics never leave the machine unless you explicitly pick a cloud AI model.
 
@@ -54,11 +54,11 @@ The left rail is grouped **START → OPERATE → INSPECT → SETUP**. Toggle **D
 
 ### START
 - **❤ Health** — the front door. One click fuses static analysis + advisor + monitor into a scored, ranked list of issues with a dual grade (Reliability / Efficiency). Each issue is clickable through to its remediation.
-- **▤ Analyze** — paste or load T-SQL. The analyzer runs in-browser (WebAssembly) and lists findings with severity, the offending line, the **concrete rewrite**, and the engine-level reasoning. Buttons: **Check syntax** (real `SET PARSEONLY`), **Estimated plan**, **Actual plan** (runs inside an always-rollback transaction; refuses DDL/EXEC/COMMIT). Set the target version (2019 / 2022 / 2025) so rewrites are never suggested above your engine.
+- **▤ Analyze** — paste or load T-SQL. The analyzer runs in-browser (WebAssembly) and lists findings with severity, the offending line, the **concrete rewrite**, and the engine-level reasoning. Buttons: **Check syntax** (real `SET PARSEONLY`), **Estimated plan**, **Actual plan** (runs inside an always-rollback transaction; refuses DDL/EXEC/COMMIT). Set the target version (2019 / 2022 / 2025) so rewrites are never suggested above your engine. *Offline index suggestions order the key columns by SARGable role (equality predicates before range/inequality), not by measured histogram selectivity — connect to confirm the most selective column leads.*
 - **⌬ Connection** — manage server profiles (see §3).
 
 ### OPERATE
-- **◉ Watch** — live vitals (CPU load, throughput, contention, waits) polled from DMVs, plus **Report** mode that keeps the top-50 queries by duration every few minutes. This is the UI view of the **sentinel** monitor (§6).
+- **◉ Watch** — on-demand **Live Pulse**: real-time vitals (CPU load, throughput, contention, waits) polled from DMVs while you watch, plus **Report** mode that keeps the top-50 queries by duration every few minutes. This is the UI view of the **sentinel** poller (§6). It is on-demand triage you start and read yourself — there is no paging or alerting.
 - **✦ Advise** — turns DMV usage stats into ranked, copy-paste T-SQL recommendations (missing/unused/duplicate indexes, etc.). *Empty advisor ≠ broken* — SQL Server resets DMV stats on restart, so a freshly-restarted instance just hasn't accumulated stats yet.
 - **⌖ Runs** — history of your analysis runs.
 - **⎯ Logs** — durable AI + analysis history (also downloadable as JSON/CSV). Persisted in `~/.dbopt/sentinel.db`.
@@ -82,9 +82,9 @@ dbopt bundle.zip                   # a script + plan bundle
 dbopt-backend                      # the web observatory (API + UI on :3690)
 ```
 
-## 6. Continuous monitoring (sentinel)
+## 6. On-demand pulse poller (sentinel)
 
-The **sentinel** daemon polls Query Store, waits, deadlocks, live requests, index usage and sizes into a local SQLite time-series, and builds a weekly **pain report**.
+The **sentinel** poller you start on demand samples Query Store, waits, deadlocks, live requests, index usage and sizes into a local SQLite time-series, and builds a **pain report** you read yourself. It is on-demand triage — a data-capture poller plus a report — not a hands-off APM: there is no paging, alerting, or escalation.
 
 ```bash
 # one-off poll of an instance

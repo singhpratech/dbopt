@@ -913,7 +913,7 @@ export function App() {
         )}
 
         {ui.workspace === "sentinel" && (
-          <Workspace title="Sentinel" subtitle="live pulse · continuous monitoring · weekly pain report">
+          <Workspace title="Sentinel" subtitle="live pulse · on-demand poller · pain report (no alerting)">
             <SentinelView
               conn={conn}
               onAnalyzeSql={(sql) => setUi({ ...ui, draft_sql: sql, draft_plan: "", workspace: "analyze" })}

@@ -300,11 +300,12 @@ export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig
             Sentinel isn't running yet.
           </div>
           <div style={{ ...mono, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 620 }}>
-            Click <b style={{ color: "var(--accent, #d4ff4e)" }}>START</b> to begin continuous
-            monitoring of your connected SQL Server. It polls Query Store, wait stats, deadlocks,
+            Click <b style={{ color: "var(--accent, #d4ff4e)" }}>START</b> to begin sampling your
+            connected SQL Server on demand. It polls Query Store, wait stats, deadlocks,
             live blocking, index usage, and table sizes into a local SQLite time-series, then rolls
-            them up into the weekly pain report below. Polling runs in the background — leave this
-            tab any time.
+            them up into the pain report below. Polling runs in the background while it's started —
+            leave this tab any time. It captures data and writes a report you read yourself; it does
+            not page or alert.
           </div>
           <div style={{ ...mono, color: "var(--text-dim)", marginTop: 10, opacity: 0.8 }}>
             Uses the connection from the Connection tab (SQL authentication).

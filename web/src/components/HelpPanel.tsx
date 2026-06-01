@@ -179,8 +179,8 @@ export function HelpPanel({
 
           {/* B3: Continuous monitoring (Sentinel) — explains WATCH/Sentinel and
               why the runtime signals read "not monitored yet" until it's run. */}
-          <section className="help-sentinel" aria-label="Continuous monitoring (Sentinel)">
-            <h3 className="help-section-title">Continuous monitoring (Sentinel)</h3>
+          <section className="help-sentinel" aria-label="On-demand pulse poller (Sentinel)">
+            <h3 className="help-section-title">On-demand pulse poller (Sentinel)</h3>
             <p className="help-sentinel-lead">
               A one-off scan reads SQL Server's <strong>current</strong> DMV counters — great for
               structural issues (missing / unused / duplicate indexes, columnstore candidates),
@@ -189,10 +189,11 @@ export function HelpPanel({
               single snapshot can't see a deadlock that happened last Tuesday at 2am.
             </p>
             <p className="help-sentinel-lead">
-              <strong>Sentinel</strong> (started with <code>WATCH</code>) is dbopt's continuous
-              poller. It samples those views on an interval and keeps a local time-series in{" "}
-              <code>~/.dbopt/sentinel.db</code>, so runtime pain accumulates into real history you
-              can grade against — and into the weekly pain report.
+              <strong>Sentinel</strong> (started with <code>WATCH</code>) is dbopt's on-demand
+              pulse poller. You start it, and it samples those views on an interval and keeps a
+              local time-series in <code>~/.dbopt/sentinel.db</code>, so runtime pain accumulates
+              into real history you can grade against — and into the pain report. It captures data
+              and writes a report you read yourself; it does not page or alert.
             </p>
             <p className="help-sentinel-why">
               <span className="health-signal-eye" aria-hidden>

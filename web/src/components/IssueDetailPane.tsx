@@ -903,6 +903,11 @@ export function buildTemplateRemediation(iss: Issue): Remediation {
               "Confirm the key + INCLUDE columns match your hottest predicates; do not blindly create wide indexes.",
           },
           {
+            title: "Offline key order is by SARGable role, not measured selectivity.",
+            detail:
+              "Without a connection the analyzer orders key columns by role (equality predicates before range/inequality), not by measured histogram selectivity. Connect (or check statistics) to confirm the most selective equality column leads.",
+          },
+          {
             title: "Prefer ONLINE on Enterprise/Developer (2016 SP2+) to avoid blocking DML.",
             detail: "Add WITH (ONLINE = ON) to the DDL if your edition supports it.",
           },

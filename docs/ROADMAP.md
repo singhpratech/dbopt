@@ -1,7 +1,9 @@
 # dbopt roadmap
 
-dbopt is a local-first database performance optimizer. v0.x is SQL-Server-complete;
-the headline work toward v1.0 is making it genuinely multi-engine.
+dbopt is a local-first database performance optimizer focused on being the deepest
+SQL Server static optimizer. SQL Server is the only supported engine today — 100% of
+the rules are SQL-Server-specific. Other engines (Postgres, MySQL) are exploratory
+directions, not committed releases or dates.
 
 ## v0.1 — SQL Server (shipped)
 
@@ -15,20 +17,23 @@ the headline work toward v1.0 is making it genuinely multi-engine.
 - Quality: 135 eval scenarios, self-graded F1 = 1.000 (covering 68 of the 100 rules; newer packs being
   backfilled); Rust unit + HTTP integration tests; Playwright UI e2e.
 
-## The engine seam (landed, foundation for v1.0)
+## The engine seam (landed — an exploratory foundation, not a committed multi-engine release)
 
 `analyzer-core` now has an `Engine` enum (`SqlServer | Postgres | MySql`, default
 `SqlServer`) that flows through `AnalyzeInput` → `analyze()` → `rules::run_all`.
 Each rule in the `REGISTRY` declares the engine(s) it applies to (`Rule { run, engines }`),
 and `run_all` skips rules that don't apply to the requested target. Today every rule
 is tagged `SqlServer`; analyzing with `engine: "postgres"` correctly yields zero
-findings until Postgres rules exist. This is the seam the rest of v1.0 builds on.
+findings until Postgres rules exist. This seam keeps the door open; it is not a
+promise that other engines will ship.
 
-## Future (futuristic) — multi-engine
+## Exploratory (not committed) — multi-engine
 
-> Deliberately *later*. SQL Server is the product and stays the priority; the
-> items below do not begin until the SQL Server analyzer is where we want it.
-> The engine seam already isolates this work so it never destabilizes the core.
+> Deliberately *later* and explicitly **exploratory** — no committed release or
+> date. SQL Server is the product and stays the priority; the items below are
+> directions we *could* take, not promises, and do not begin until the SQL Server
+> analyzer is where we want it. The engine seam already isolates this work so it
+> never destabilizes the core.
 
 ### 1. `Engine` connection trait (the big one)
 Abstract the live-server work that is currently SQL-Server-specific (tiberius +

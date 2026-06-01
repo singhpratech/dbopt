@@ -67,8 +67,9 @@ copy-paste DDL grounded in evidence."
 **Pain.** Stitching together DMV queries, Query Store, deadlock graphs and wait stats by hand,
 repeatedly, just to answer "is it healthy?"
 
-**Promise.** One **Health front-door** scores the database now; the **Sentinel** daemon watches
-it continuously and writes a weekly pain report.
+**Promise.** One **Health front-door** scores the database now; an optional **Sentinel** poller
+you start on demand samples it on a schedule and writes a pain report you read yourself. It is
+on-demand triage, not a hands-off APM with paging or alerting.
 
 **Proof.**
 - `POST /api/health/db` fuses the Advisor + static engine + Sentinel into a single ranked
