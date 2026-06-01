@@ -92,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
                 }],
                 db_path: db_path.clone(),
                 retention_days: sentinel::default_retention_days(),
+                alerting: Default::default(),
+                alert_eval_secs: sentinel::default_vitals_secs(),
             };
             let sentinel = Sentinel::start(cfg).await?;
             tracing::info!("sentinel running · ^C to stop · db {}", db_path.display());

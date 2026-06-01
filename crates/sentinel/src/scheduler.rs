@@ -14,18 +14,37 @@ use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
+use crate::alerts::AlertConfig;
 use crate::poll;
 use crate::storage::Storage;
 use crate::{ConnectionInfo, InstanceConfig};
 
+/// Everything the scheduler needs to launch its task tree.
+pub struct RunConfig {
+    pub instances: Vec<InstanceConfig>,
+    pub storage: Arc<Storage>,
+    pub shutdown: CancellationToken,
+    pub retention_days: u64,
+    /// Threshold alerting config (webhook + rules). Shared read-only across the
+    /// per-instance alert-evaluation tasks.
+    pub alerting: AlertConfig,
+    /// Cadence (seconds) of the alert-evaluation pass.
+    pub alert_eval_secs: u64,
+}
+
 /// Top-level driver. Returns once every spawned task has exited (i.e. the
 /// shutdown token was cancelled).
-pub async fn run(
-    instances: Vec<InstanceConfig>,
-    storage: Arc<Storage>,
-    shutdown: CancellationToken,
-    retention_days: u64,
-) {
+pub async fn run(cfg: RunConfig) {
+    let RunConfig {
+        instances,
+        storage,
+        shutdown,
+        retention_days,
+        alerting,
+        alert_eval_secs,
+    } = cfg;
+    let alerting = Arc::new(alerting);
+    let alert_period = Duration::from_secs(alert_eval_secs.max(1));
     let mut handles = Vec::new();
 
     // Housekeeping: prune aged-out telemetry so the SQLite store can't grow
@@ -178,6 +197,45 @@ pub async fn run(
                 poll::plan_cache::poll_plan_cache(&c, &s).await
             }),
         ));
+
+        // ---- threshold alerting ------------------------------------------
+        // Runs on its own cadence (just behind the vitals cadence so a sample
+        // is fresh), reads back the latest persisted telemetry for this
+        // instance, evaluates the rules, and persists+notifies new breaches.
+        // No live DB connection — purely a read of what the pollers captured.
+        {
+            let storage = storage.clone();
+            let shutdown = shutdown.clone();
+            let alerting = alerting.clone();
+            let inst_name = name.clone();
+            let label = format!("{name}/alerts");
+            handles.push(tokio::spawn(async move {
+                let mut ticker = interval(alert_period);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                tracing::info!(
+                    target: "sentinel::scheduler",
+                    "alert evaluator {label} started (period={:?})", alert_period
+                );
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            tracing::info!(target: "sentinel::scheduler", "alert evaluator {label} shutting down");
+                            break;
+                        }
+                        _ = ticker.tick() => {
+                            if let Err(e) =
+                                poll::alert_eval::evaluate_instance(&storage, &inst_name, &alerting).await
+                            {
+                                tracing::warn!(
+                                    target: "sentinel::scheduler",
+                                    "alert evaluator {label} failed: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }));
+        }
     }
 
     for h in handles {

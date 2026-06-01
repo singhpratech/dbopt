@@ -26,6 +26,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0005_deadlock_graph_hash", include_str!("../migrations/0005_deadlock_graph_hash.sql")),
     ("0006_query_baseline", include_str!("../migrations/0006_query_baseline.sql")),
     ("0007_vitals",         include_str!("../migrations/0007_vitals.sql")),
+    ("0008_alerts",         include_str!("../migrations/0008_alerts.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -406,6 +407,12 @@ impl Storage {
                 [cutoff_ms],
             )?;
         }
+        // The fired-alert log keys on fired_at, not captured_at — age it out too
+        // so a chatty instance can't grow the alert history without bound.
+        removed += conn.execute(
+            "DELETE FROM alerts_fired WHERE fired_at < ?1",
+            [cutoff_ms],
+        )?;
         // The durable baseline keys on last_updated_ms (it has no captured_at).
         // Age out baselines for queries that stopped running before the cutoff
         // so the table can't grow without bound either.
@@ -721,6 +728,191 @@ impl Storage {
         Ok(())
     }
 
+    // ---------- Fired alerts ---------------------------------------------
+    // The threshold engine records each breach here. De-dup lives in
+    // `should_fire_alert`: a standing condition only (re)fires when its state
+    // changes (rule wasn't firing last time) OR the cooldown has lapsed, so we
+    // don't write a row every single poll for the same ongoing problem.
+
+    /// Decide whether a freshly-evaluated breach of `rule_id` should be recorded
+    /// as a NEW alert, given the configured cooldown. Returns `true` when there
+    /// is no prior fire for this (instance, rule) OR the most-recent fire is
+    /// older than `cooldown_secs`. Pure read — no write.
+    pub fn should_fire_alert(
+        &self,
+        instance_id: i64,
+        rule_id: &str,
+        now: DateTime<Utc>,
+        cooldown_secs: u64,
+    ) -> bool {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let last_ms: Option<i64> = lock
+            .query_row(
+                "SELECT MAX(fired_at) FROM alerts_fired WHERE instance_id = ?1 AND rule_id = ?2",
+                params![instance_id, rule_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        match last_ms {
+            None => true, // never fired → new alert
+            Some(prev) => {
+                let elapsed = (now.timestamp_millis() - prev).max(0) / 1000;
+                elapsed >= cooldown_secs as i64
+            }
+        }
+    }
+
+    /// Persist a fired alert. Returns the new row id so the caller can later mark
+    /// it `notified`.
+    pub fn insert_fired_alert(
+        &self,
+        instance_id: i64,
+        fired_at: DateTime<Utc>,
+        rule_id: &str,
+        metric: &str,
+        value: f64,
+        threshold: f64,
+        severity: &str,
+        message: &str,
+    ) -> anyhow::Result<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO alerts_fired(instance_id, fired_at, rule_id, metric, value,
+                 threshold, severity, message, notified)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+            params![
+                instance_id,
+                fired_at.timestamp_millis(),
+                rule_id,
+                metric,
+                value,
+                threshold,
+                severity,
+                message,
+            ],
+        )?;
+        Ok(lock.last_insert_rowid())
+    }
+
+    /// Flag a fired-alert row as successfully delivered to the webhook.
+    pub fn mark_alert_notified(&self, id: i64) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute("UPDATE alerts_fired SET notified = 1 WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Most-recent fired alerts across all instances, newest first. Joins the
+    /// instance name so the UI can show "which server".
+    pub fn recent_alerts(&self, limit: i64) -> anyhow::Result<Vec<FiredAlertRow>> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let mut stmt = lock.prepare(
+            "SELECT a.id, i.name, a.fired_at, a.rule_id, a.metric, a.value,
+                    a.threshold, a.severity, a.message, a.notified
+             FROM alerts_fired AS a
+             JOIN instances AS i ON i.id = a.instance_id
+             ORDER BY a.fired_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(FiredAlertRow {
+                    id: r.get(0)?,
+                    instance_name: r.get(1)?,
+                    fired_at: ms_to_dt(r.get(2)?),
+                    rule_id: r.get(3)?,
+                    metric: r.get(4)?,
+                    value: r.get(5)?,
+                    threshold: r.get(6)?,
+                    severity: r.get(7)?,
+                    message: r.get(8)?,
+                    notified: r.get::<_, i64>(9)? != 0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    // ---------- Alert metric inputs ---------------------------------------
+    // These read back persisted telemetry into the scalar metrics the threshold
+    // engine compares. Each returns `None` when the surface has no data — so a
+    // metric we couldn't read produces NO alert (never a guessed value).
+
+    /// Signal-wait share of total resource waits over the most-recent wait
+    /// window, as a percent. `SUM(signal_wait_ms)/SUM(wait_time_ms) * 100` across
+    /// the rows captured at the newest `wait_stats_delta` instant. `None` when no
+    /// wait deltas have been captured or total wait was zero.
+    pub fn latest_signal_wait_pct(&self, instance_id: i64) -> Option<f64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let latest_ms: Option<i64> = lock
+            .query_row(
+                "SELECT MAX(captured_at) FROM wait_stats_delta WHERE instance_id = ?1",
+                [instance_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        let latest_ms = latest_ms?;
+        let (total, signal): (i64, i64) = lock
+            .query_row(
+                "SELECT COALESCE(SUM(wait_time_ms_delta),0), COALESCE(SUM(signal_wait_ms_delta),0)
+                 FROM wait_stats_delta WHERE instance_id = ?1 AND captured_at = ?2",
+                params![instance_id, latest_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        if total <= 0 {
+            return None;
+        }
+        Some((signal as f64 / total as f64) * 100.0)
+    }
+
+    /// Count of blocked sessions at the most-recent live-request snapshot
+    /// (rows with a non-null blocking_session_id). `None` when no live snapshot
+    /// has been captured yet.
+    pub fn latest_blocked_sessions(&self, instance_id: i64) -> Option<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let latest_ms: Option<i64> = lock
+            .query_row(
+                "SELECT MAX(captured_at) FROM live_request_snapshot WHERE instance_id = ?1",
+                [instance_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        let latest_ms = latest_ms?;
+        lock.query_row(
+            "SELECT COUNT(*) FROM live_request_snapshot
+             WHERE instance_id = ?1 AND captured_at = ?2 AND blocking_session_id IS NOT NULL",
+            params![instance_id, latest_ms],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Number of deadlock graphs captured for this instance since `since`.
+    pub fn deadlocks_since(&self, instance_id: i64, since: DateTime<Utc>) -> i64 {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT COUNT(*) FROM deadlock_capture WHERE instance_id = ?1 AND captured_at >= ?2",
+            params![instance_id, since.timestamp_millis()],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+    }
+
     // ---------- Deep vitals read-back -------------------------------------
     // The live "DEEP VITALS" surface reads the most-recent persisted sample of
     // each surface for one instance. Each returns `None`/empty when nothing has
@@ -736,6 +928,21 @@ impl Storage {
         lock.query_row(
             "SELECT id FROM instances WHERE server = ?1 ORDER BY id DESC LIMIT 1",
             [server],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Read-only instance lookup by its unique NAME (the scheduler's per-instance
+    /// label). Never creates a row — `None` when nothing has been captured for
+    /// this name yet.
+    pub fn get_instance_id_by_name(&self, name: &str) -> Option<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT id FROM instances WHERE name = ?1 LIMIT 1",
+            [name],
             |r| r.get::<_, i64>(0),
         )
         .optional()
@@ -1671,6 +1878,23 @@ pub struct PlanCacheRow {
     pub total_size_kb: i64,
 }
 
+/// One persisted fired-alert row (a threshold breach that was recorded). The
+/// `id` and `instance_name` are filled by the read-back; `notified` records
+/// whether the webhook POST succeeded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FiredAlertRow {
+    pub id: i64,
+    pub instance_name: String,
+    pub fired_at: DateTime<Utc>,
+    pub rule_id: String,
+    pub metric: String,
+    pub value: f64,
+    pub threshold: f64,
+    pub severity: String,
+    pub message: String,
+    pub notified: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2221,5 +2445,56 @@ mod tests {
             lock.query_row("SELECT COUNT(*) FROM cpu_pressure_snapshot", [], |r| r.get(0)).expect("count")
         };
         assert_eq!(remaining, 1, "only the fresh vitals row survives");
+    }
+
+    #[test]
+    fn fired_alert_persist_and_read_back() {
+        // End-to-end of the persistence half: a breach is recorded, then read
+        // back through the same API the /api/alerts handler uses.
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("prod", &test_conn()).expect("ensure");
+        let now = Utc::now();
+        s.insert_fired_alert(
+            id, now, "cpu.runnable_tasks_high", "Runnable tasks waiting for a CPU",
+            25.0, 10.0, "warning", "Runnable tasks waiting for a CPU: 25 >= 10",
+        )
+        .expect("insert alert");
+
+        let back = s.recent_alerts(50).expect("read back");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].rule_id, "cpu.runnable_tasks_high");
+        assert_eq!(back[0].value, 25.0);
+        assert_eq!(back[0].threshold, 10.0);
+        assert_eq!(back[0].severity, "warning");
+        assert_eq!(back[0].instance_name, "prod");
+        assert!(!back[0].notified, "not yet delivered");
+
+        s.mark_alert_notified(back[0].id).expect("mark");
+        let back2 = s.recent_alerts(50).expect("read back 2");
+        assert!(back2[0].notified, "marked delivered");
+    }
+
+    #[test]
+    fn alert_dedup_cooldown_suppresses_then_refires() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("prod", &test_conn()).expect("ensure");
+        let cooldown = 900u64; // 15 min
+
+        // First-ever breach → should fire.
+        let t0 = Utc::now();
+        assert!(s.should_fire_alert(id, "cpu.runnable_tasks_high", t0, cooldown));
+        s.insert_fired_alert(id, t0, "cpu.runnable_tasks_high", "m", 25.0, 10.0, "warning", "x")
+            .expect("insert");
+
+        // Same standing condition 1 minute later → suppressed (inside cooldown).
+        let t1 = t0 + chrono::Duration::minutes(1);
+        assert!(!s.should_fire_alert(id, "cpu.runnable_tasks_high", t1, cooldown));
+
+        // After the cooldown lapses → re-fires.
+        let t2 = t0 + chrono::Duration::seconds(cooldown as i64 + 1);
+        assert!(s.should_fire_alert(id, "cpu.runnable_tasks_high", t2, cooldown));
+
+        // A DIFFERENT rule is independent — fires immediately.
+        assert!(s.should_fire_alert(id, "tempdb.pagelatch_contention", t1, cooldown));
     }
 }

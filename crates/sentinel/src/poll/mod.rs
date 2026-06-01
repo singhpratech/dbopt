@@ -7,6 +7,7 @@
 //! gracefully: a missing DMV or a lack of VIEW SERVER STATE logs once and skips
 //! the tick rather than failing the whole daemon.
 
+pub mod alert_eval;
 pub mod cpu_pressure;
 pub mod deadlocks;
 pub mod index_usage;

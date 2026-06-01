@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
 import * as P from "../store/persist";
 import * as backend from "../api/backend";
-import type { LiveMetrics, LiveSession, DeepVitals } from "../api/backend";
+import type {
+  LiveMetrics,
+  LiveSession,
+  DeepVitals,
+  FiredAlert,
+  AlertConfig,
+  AlertRule,
+  WebhookFormat,
+} from "../api/backend";
 
 /**
  * Live Pulse — our own real-time vitals view of the connected instance. Polls
@@ -82,6 +90,10 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
   // DMV pull — they update on the same cadence but can be null until the
   // background monitor has captured its first sample for this server.
   const [vitals, setVitals] = useState<DeepVitals | null>(null);
+  // Fired-alert feed, read back from the persisted monitor store on the same
+  // cadence. Independent of the live pulse — a feed-fetch failure never breaks
+  // the charts.
+  const [alerts, setAlerts] = useState<FiredAlert[]>([]);
   const prevRef = useRef<LiveMetrics | null>(null);
 
   const tick = useCallback(async () => {
@@ -98,6 +110,11 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
       .fetchVitals(connInfo)
       .then((v) => setVitals(v))
       .catch(() => {/* keep last good vitals; the empty state covers first run */});
+    // Fired-alert feed: same cadence, own catch. Read-only store read.
+    backend
+      .fetchAlerts(50)
+      .then((a) => setAlerts(a))
+      .catch(() => {/* keep last good feed; honest empty state covers first run */});
     try {
       const m = await backend.liveMetrics(connInfo);
       setErr(null);
@@ -253,6 +270,9 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
 
       {/* ── deep vitals (persisted monitor read-back) ───── */}
       <DeepVitalsPanel vitals={vitals} />
+
+      {/* ── threshold alerts (fired feed + config) ──────── */}
+      <AlertsPanel alerts={alerts} />
 
       {/* ── wait breakdown now ──────────────────────────── */}
       <div className="live-section">
@@ -514,6 +534,227 @@ function VitalRow({ label, value, tone }: { label: string; value: string; tone?:
 
 function VitalNone({ label }: { label?: string }) {
   return <div className="dv-none">{label ?? "Not captured in the latest sample."}</div>;
+}
+
+/** Human label for a rule's threshold (handles the dynamic PLE floor). */
+function thresholdLabel(r: AlertRule): string {
+  if (r.threshold.kind === "fixed") {
+    const n = r.threshold.value;
+    return Number.isInteger(n) ? `${n}` : n.toFixed(1);
+  }
+  // Dynamic PLE floor — derived per server from buffer-pool size at runtime.
+  return `floor ≥ ${r.threshold.min_floor}s (per-4GB)`;
+}
+
+const CMP_GLYPH: Record<string, string> = { gt: ">", ge: "≥", lt: "<", le: "≤" };
+
+/**
+ * THRESHOLD ALERTS — the active half of the monitor. Shows the most-recent
+ * fired alerts (severity-toned, time, metric, measured vs threshold) read back
+ * from the persisted store, plus a small armed-rules + webhook config form.
+ * Honest empty state when nothing has fired. Our own vocabulary throughout.
+ */
+function AlertsPanel({ alerts }: { alerts: FiredAlert[] }) {
+  const [showCfg, setShowCfg] = useState(false);
+  const [cfg, setCfg] = useState<AlertConfig | null>(null);
+  const [loadingCfg, setLoadingCfg] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  const openCfg = useCallback(async () => {
+    setShowCfg((s) => !s);
+    if (cfg || loadingCfg) return;
+    setLoadingCfg(true);
+    try {
+      setCfg(await backend.getAlertConfig());
+    } catch {
+      /* leave null; the form shows a load error line */
+    } finally {
+      setLoadingCfg(false);
+    }
+  }, [cfg, loadingCfg]);
+
+  const save = useCallback(async () => {
+    if (!cfg) return;
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      const res = await backend.setAlertConfig(cfg);
+      setSaveMsg(res.reloaded ? "Saved — monitor reloaded with new thresholds." : "Saved.");
+    } catch (e: any) {
+      setSaveMsg(`Save failed: ${e?.message ?? String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [cfg]);
+
+  const armed = cfg?.rules.filter((r) => r.enabled).length ?? null;
+
+  return (
+    <div className="live-section">
+      <div className="live-section-h alerts-h">
+        <span>
+          THRESHOLD ALERTS
+          {alerts.length > 0 && <span className="dv-asof"> · {alerts.length} recent</span>}
+        </span>
+        <button className="alerts-cfg-btn" onClick={openCfg}>
+          {showCfg ? "▾ Hide settings" : "⚙ Settings"}
+          {armed != null && !showCfg ? ` · ${armed} armed` : ""}
+        </button>
+      </div>
+
+      {showCfg && (
+        <AlertConfigForm
+          cfg={cfg}
+          setCfg={setCfg}
+          loading={loadingCfg}
+          saving={saving}
+          saveMsg={saveMsg}
+          onSave={save}
+        />
+      )}
+
+      {alerts.length === 0 ? (
+        <div className="live-empty">No alerts fired — thresholds are armed.</div>
+      ) : (
+        <div className="alerts-feed">
+          {alerts.map((a) => (
+            <div className={`alert-row sev-${a.severity}`} key={a.id}>
+              <span className={`alert-sev sev-${a.severity}`}>{a.severity}</span>
+              <span className="alert-metric" title={a.rule_id}>{a.metric}</span>
+              <span className="alert-cmp">
+                {fmtAlertNum(a.value)} {CMP_GLYPH[guessCmp(a)] ?? "vs"} {fmtAlertNum(a.threshold)}
+              </span>
+              <span className="alert-inst" title={a.instance_name}>{a.instance_name}</span>
+              <span className="alert-when" title={new Date(a.fired_at).toLocaleString()}>
+                {fmtAgo(new Date(a.fired_at).getTime())}
+              </span>
+              <span className={`alert-deliver ${a.notified ? "ok" : ""}`}>
+                {a.notified ? "delivered" : "logged"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtAlertNum(n: number): string {
+  if (Number.isInteger(n)) return `${n}`;
+  return n.toFixed(1);
+}
+/** The feed row doesn't carry the comparator; infer the glyph from value vs
+ *  threshold for display (≥ when value above, < when below). Cosmetic only. */
+function guessCmp(a: FiredAlert): string {
+  return a.value >= a.threshold ? "ge" : "lt";
+}
+
+function AlertConfigForm({
+  cfg,
+  setCfg,
+  loading,
+  saving,
+  saveMsg,
+  onSave,
+}: {
+  cfg: AlertConfig | null;
+  setCfg: (c: AlertConfig) => void;
+  loading: boolean;
+  saving: boolean;
+  saveMsg: string | null;
+  onSave: () => void;
+}) {
+  if (loading && !cfg) return <div className="live-empty">Loading alert settings…</div>;
+  if (!cfg) return <div className="live-empty">Couldn't load alert settings.</div>;
+
+  const setRule = (idx: number, patch: Partial<AlertRule>) => {
+    const rules = cfg.rules.map((r, i) => (i === idx ? { ...r, ...patch } : r));
+    setCfg({ ...cfg, rules });
+  };
+
+  return (
+    <div className="alerts-cfg">
+      <div className="alerts-cfg-grid">
+        <label className="alerts-field">
+          <span>Notification webhook URL</span>
+          <input
+            type="text"
+            placeholder="https://… (optional — alerts are logged regardless)"
+            value={cfg.webhook_url ?? ""}
+            onChange={(e) => setCfg({ ...cfg, webhook_url: e.target.value || null })}
+          />
+        </label>
+        <label className="alerts-field">
+          <span>Payload format</span>
+          <select
+            value={cfg.webhook_format}
+            onChange={(e) => setCfg({ ...cfg, webhook_format: e.target.value as WebhookFormat })}
+          >
+            <option value="generic">Generic JSON</option>
+            <option value="slack">Slack incoming webhook</option>
+            <option value="teams">Teams incoming webhook</option>
+          </select>
+        </label>
+        <label className="alerts-field">
+          <span>Re-fire cooldown (seconds)</span>
+          <input
+            type="number"
+            min={0}
+            value={cfg.cooldown_secs}
+            onChange={(e) => setCfg({ ...cfg, cooldown_secs: Math.max(0, Number(e.target.value) || 0) })}
+          />
+        </label>
+      </div>
+
+      <div className="alerts-rules">
+        <div className="alerts-rules-head">
+          <span>ON</span>
+          <span>RULE</span>
+          <span className="r">THRESHOLD</span>
+          <span>SEVERITY</span>
+          <span>SOURCE</span>
+        </div>
+        {cfg.rules.map((r, i) => (
+          <div className="alerts-rule-row" key={`${r.id}-${i}`}>
+            <input
+              type="checkbox"
+              checked={r.enabled}
+              onChange={(e) => setRule(i, { enabled: e.target.checked })}
+              title="Arm / disarm this rule"
+            />
+            <span className="alerts-rule-metric" title={r.id}>{r.metric}</span>
+            <span className="alerts-rule-thr r">
+              {r.threshold.kind === "fixed" ? (
+                <>
+                  <span className="alerts-rule-cmp">{CMP_GLYPH[r.comparator] ?? r.comparator}</span>
+                  <input
+                    type="number"
+                    className="alerts-thr-input"
+                    value={r.threshold.value}
+                    onChange={(e) =>
+                      setRule(i, { threshold: { kind: "fixed", value: Number(e.target.value) || 0 } })
+                    }
+                  />
+                </>
+              ) : (
+                <span className="alerts-rule-dynamic" title="Derived per server from buffer-pool size">
+                  {thresholdLabel(r)}
+                </span>
+              )}
+            </span>
+            <span className={`alerts-rule-sev sev-${r.severity}`}>{r.severity}</span>
+            <span className="alerts-rule-src" title={r.source}>{r.source}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="alerts-cfg-actions">
+        <button onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save thresholds"}</button>
+        {saveMsg && <span className="alerts-save-msg">{saveMsg}</span>}
+      </div>
+    </div>
+  );
 }
 
 /**

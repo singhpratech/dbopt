@@ -43,6 +43,9 @@ pub fn router() -> Router {
         .route("/sentinel/report", get(sentinel_api::report_json))
         .route("/sentinel/report.md", get(sentinel_api::report_markdown))
         .route("/sentinel/report.html", get(sentinel_api::report_html))
+        // ---- threshold alerting (fired-alert feed + config) ------------
+        .route("/alerts", get(sentinel_api::alerts))
+        .route("/alerts/config", get(sentinel_api::get_alert_config).post(sentinel_api::set_alert_config))
         // ---- durable logs (AI + analysis history) ----------------------
         .route("/logs/ai",       get(logs::get_ai_log).post(logs::post_ai_log).delete(logs::delete_ai_log))
         .route("/logs/analysis", get(logs::get_analysis_runs).post(logs::post_analysis_run))

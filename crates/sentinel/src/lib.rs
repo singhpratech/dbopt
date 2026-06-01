@@ -14,12 +14,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+pub mod alerts;
 pub mod conn;
+pub mod notify;
 pub mod poll;
 pub mod report;
 pub mod scheduler;
 pub mod storage;
 
+pub use alerts::{AlertConfig, AlertRule, Comparator, FiredAlert, Severity, WebhookFormat};
 pub use storage::Storage;
 
 /// Connection info for a SQL Server instance the sentinel should poll.
@@ -93,6 +96,15 @@ pub struct SentinelConfig {
     /// `0` disables pruning (keep forever).
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
+    /// Threshold alerting: webhook + armed rules. `#[serde(default)]` so configs
+    /// written before alerting existed still deserialize and pick up the grounded
+    /// SPEC rule set (see `alerts::default_rules`).
+    #[serde(default)]
+    pub alerting: alerts::AlertConfig,
+    /// How often (seconds) the alert-evaluation pass reads back the latest
+    /// persisted vitals and checks the rules. Defaults to the vitals cadence.
+    #[serde(default = "default_vitals_secs")]
+    pub alert_eval_secs: u64,
 }
 
 /// Default retention window for captured telemetry (90 days).
@@ -141,8 +153,18 @@ impl Sentinel {
         let shutdown_for_task = shutdown.clone();
         let instances = config.instances.clone();
         let retention_days = config.retention_days;
+        let alerting = config.alerting.clone();
+        let alert_eval_secs = config.alert_eval_secs;
         let join = tokio::spawn(async move {
-            scheduler::run(instances, storage_for_task, shutdown_for_task, retention_days).await;
+            scheduler::run(scheduler::RunConfig {
+                instances,
+                storage: storage_for_task,
+                shutdown: shutdown_for_task,
+                retention_days,
+                alerting,
+                alert_eval_secs,
+            })
+            .await;
         });
 
         tracing::info!(target: "sentinel", "sentinel started with {} instance(s)", config.instances.len());

@@ -12,6 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use sentinel::{
+    alerts::AlertConfig,
     report::{render_html, render_markdown, render_weekly, WeeklyReport},
     storage::{Storage, TimeRange},
     ConnectionInfo, InstanceConfig, Sentinel, SentinelConfig,
@@ -52,6 +53,11 @@ fn config_path() -> PathBuf {
 struct PersistedConfig {
     autostart: bool,
     instances: Vec<PersistedInstance>,
+    /// Threshold-alerting config (webhook + rules). `#[serde(default)]` so configs
+    /// written before alerting existed still load and pick up the grounded SPEC
+    /// defaults; the user's edits are persisted here and survive a restart.
+    #[serde(default)]
+    alerting: AlertConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,8 +97,17 @@ fn write_persisted(cfg: &PersistedConfig) {
     }
 }
 
-/// Build a `SentinelConfig` from persisted instances with default cadences.
-fn build_config(instances: Vec<PersistedInstance>) -> SentinelConfig {
+/// Best-effort read of the persisted config (instances + alerting). `None` when
+/// the file is missing or unparseable.
+fn read_persisted() -> Option<PersistedConfig> {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PersistedConfig>(&raw).ok())
+}
+
+/// Build a `SentinelConfig` from persisted instances + alerting config with
+/// default cadences.
+fn build_config(instances: Vec<PersistedInstance>, alerting: AlertConfig) -> SentinelConfig {
     SentinelConfig {
         instances: instances
             .into_iter()
@@ -105,6 +120,8 @@ fn build_config(instances: Vec<PersistedInstance>) -> SentinelConfig {
             .collect(),
         db_path: SentinelConfig::default_db_path(),
         retention_days: sentinel::default_retention_days(),
+        alerting,
+        alert_eval_secs: sentinel::default_vitals_secs(),
     }
 }
 
@@ -138,7 +155,7 @@ pub async fn autostart_from_disk() {
         return;
     }
     let count = persisted.instances.len();
-    let cfg = build_config(persisted.instances);
+    let cfg = build_config(persisted.instances, persisted.alerting);
     match Sentinel::start(cfg).await {
         Ok(s) => {
             *guard = Some(s);
@@ -211,7 +228,10 @@ pub async fn start(Json(req): Json<StartReq>) -> impl IntoResponse {
         })
         .collect();
 
-    let cfg = build_config(persisted_instances.clone());
+    // Carry forward an existing alerting config (webhook + edited rules) so
+    // starting the daemon doesn't wipe the user's thresholds; default otherwise.
+    let alerting = read_persisted().map(|p| p.alerting).unwrap_or_default();
+    let cfg = build_config(persisted_instances.clone(), alerting.clone());
 
     match Sentinel::start(cfg).await {
         Ok(s) => {
@@ -220,6 +240,7 @@ pub async fn start(Json(req): Json<StartReq>) -> impl IntoResponse {
             write_persisted(&PersistedConfig {
                 autostart: true,
                 instances: persisted_instances,
+                alerting,
             });
             (
                 StatusCode::OK,
@@ -241,16 +262,13 @@ pub async fn stop() -> impl IntoResponse {
     if let Some(s) = guard.take() {
         s.stop().await;
     }
-    // Disable autostart but keep the instances so the user can re-enable.
-    // Best-effort: read the existing config (if any) to preserve instances.
-    let instances = std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<PersistedConfig>(&raw).ok())
-        .map(|p| p.instances)
-        .unwrap_or_default();
+    // Disable autostart but keep the instances + alerting config so the user can
+    // re-enable without re-entering anything. Best-effort.
+    let prior = read_persisted();
     write_persisted(&PersistedConfig {
         autostart: false,
-        instances,
+        instances: prior.as_ref().map(|p| p.instances.clone()).unwrap_or_default(),
+        alerting: prior.map(|p| p.alerting).unwrap_or_default(),
     });
     (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
@@ -395,5 +413,81 @@ pub async fn report_html(Query(q): Query<ReportQuery>) -> impl IntoResponse {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         body,
+    )
+}
+
+// ---------- alerts ---------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct AlertsQuery {
+    /// How many recent fired alerts to return (default 50, capped at 500).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// GET /api/alerts — the most-recent fired alerts read back from the sentinel
+/// store, newest first. Read-only: opens the SQLite store and reads `alerts_fired`
+/// — never touches a live server. Returns `{ alerts: [] }` (200, not an error)
+/// when the store doesn't exist yet or nothing has fired — an honest empty state.
+pub async fn alerts(Query(q): Query<AlertsQuery>) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let path = SentinelConfig::default_db_path();
+    let alerts = match Storage::open(&path) {
+        Ok(s) => s.recent_alerts(limit).unwrap_or_default(),
+        Err(_) => Vec::new(), // store not created yet → not an error
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "alerts": alerts })),
+    )
+}
+
+/// GET /api/alerts/config — the current alerting config (webhook + rules). Reads
+/// the persisted config; falls back to the grounded SPEC defaults when none has
+/// been written yet, so the UI always renders the armed rule set.
+pub async fn get_alert_config() -> impl IntoResponse {
+    let alerting = read_persisted().map(|p| p.alerting).unwrap_or_default();
+    (StatusCode::OK, Json(alerting))
+}
+
+/// POST /api/alerts/config — update the alerting config (webhook + rules). The
+/// new config is persisted to `sentinel-config.json` AND, if the daemon is
+/// running, it is restarted with the new config so the change takes effect
+/// without the user having to stop/start manually.
+pub async fn set_alert_config(Json(alerting): Json<AlertConfig>) -> impl IntoResponse {
+    // Preserve the existing instances + autostart flag; only the alerting block
+    // changes here.
+    let prior = read_persisted();
+    let instances = prior.as_ref().map(|p| p.instances.clone()).unwrap_or_default();
+    let autostart = prior.as_ref().map(|p| p.autostart).unwrap_or(false);
+    write_persisted(&PersistedConfig {
+        autostart,
+        instances: instances.clone(),
+        alerting: alerting.clone(),
+    });
+
+    // If the daemon is live, hot-reload it so the new thresholds apply now.
+    let slot = daemon_slot().await;
+    let mut guard = slot.lock().await;
+    let mut reloaded = false;
+    if guard.is_some() {
+        if let Some(s) = guard.take() {
+            s.stop().await;
+        }
+        let cfg = build_config(instances, alerting);
+        match Sentinel::start(cfg).await {
+            Ok(s) => {
+                *guard = Some(s);
+                reloaded = true;
+            }
+            Err(e) => {
+                tracing::warn!(target: "sentinel", "failed to restart with new alert config: {e}");
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "reloaded": reloaded })),
     )
 }

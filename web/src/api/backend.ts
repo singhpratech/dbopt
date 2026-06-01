@@ -352,6 +352,84 @@ export async function fetchVitals(info: ConnectionInfo): Promise<DeepVitals> {
   return r.json() as Promise<DeepVitals>;
 }
 
+// ---------- threshold alerting --------------------------------------------
+
+export type AlertSeverity = "info" | "warning" | "critical";
+export type Comparator = "gt" | "ge" | "lt" | "le";
+export type WebhookFormat = "generic" | "slack" | "teams";
+
+/** A persisted fired-alert (a threshold breach Sentinel recorded). */
+export type FiredAlert = {
+  id: number;
+  instance_name: string;
+  fired_at: string; // RFC3339
+  rule_id: string;
+  metric: string;
+  value: number;
+  threshold: number;
+  severity: AlertSeverity;
+  message: string;
+  notified: boolean;
+};
+
+/** A configurable alert threshold. `threshold` is tagged: a fixed number, or
+ *  the dynamic PLE floor (which derives from the buffer-pool size at runtime). */
+export type AlertThreshold =
+  | { kind: "fixed"; value: number }
+  | { kind: "ple_floor_per4_gb"; min_floor: number };
+
+export type AlertRule = {
+  id: string;
+  metric: string;
+  comparator: Comparator;
+  threshold: AlertThreshold;
+  severity: AlertSeverity;
+  enabled: boolean;
+  source: string;
+};
+
+export type AlertConfig = {
+  webhook_url: string | null;
+  webhook_format: WebhookFormat;
+  cooldown_secs: number;
+  rules: AlertRule[];
+};
+
+/** Recent fired alerts, newest first. Returns `[]` (not an error) when the
+ *  monitor store doesn't exist yet or nothing has fired. */
+export async function fetchAlerts(limit = 50): Promise<FiredAlert[]> {
+  const r = await fetch(`${BASE}/alerts?limit=${limit}`);
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `alerts fetch failed (${r.status})`);
+  }
+  const j = (await r.json()) as { alerts: FiredAlert[] };
+  return j.alerts ?? [];
+}
+
+/** The current alerting config (webhook + armed rules). Falls back to the
+ *  grounded default rule set server-side when none has been saved yet. */
+export async function getAlertConfig(): Promise<AlertConfig> {
+  const r = await fetch(`${BASE}/alerts/config`);
+  if (!r.ok) throw new Error(`alert config fetch failed (${r.status})`);
+  return r.json() as Promise<AlertConfig>;
+}
+
+/** Save the alerting config. If the monitor is running it hot-reloads so the
+ *  new thresholds take effect immediately. */
+export async function setAlertConfig(cfg: AlertConfig): Promise<{ ok: boolean; reloaded: boolean }> {
+  const r = await fetch(`${BASE}/alerts/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cfg),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `alert config save failed (${r.status})`);
+  }
+  return r.json() as Promise<{ ok: boolean; reloaded: boolean }>;
+}
+
 export async function pullDmv(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/dmv`, {
     method: "POST",
