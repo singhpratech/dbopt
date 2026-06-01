@@ -16,7 +16,7 @@ dbopt is **read-only**. It never executes DDL, never changes a setting, and — 
 
 | Tier | Access required | What dbopt can do | Result quality |
 |---|---|---|---|
-| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (101 rules: sargability, plan shape, deprecated syntax, hygiene, transactions, security, index design…). Version-aware (2019→2025). | Full, instantly. Great for code review / CI. |
+| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (102 rules: sargability, plan shape, deprecated syntax, hygiene, transactions, security, index design…). Version-aware (2019→2025). | Full, instantly. Great for code review / CI. |
 | **1 — Connect + read metadata** | A login that can connect, plus `VIEW DEFINITION` and `SHOWPLAN` | Reads object/index definitions; fetches **estimated** execution plans (compile-only, query is *not* run); database-scoped index analysis (usage, missing indexes, table sizes) where `VIEW DATABASE STATE` is granted. | Strong for a single database. |
 | **2 — Server state**  ⭐ | Tier 1 **+ `VIEW SERVER STATE`** | Unlocks server-scoped signals: **wait statistics, top queries by duration, blocking, I/O, the full Advisor depth, and the Health score's reliability lane.** | **This is the "real, full picture" tier.** |
 | **3 — Pulse poller** | Tier 2 **+ Query Store enabled** on each DB | The **Sentinel** poller (started on demand) samples Query Store, wait deltas, deadlocks (`system_health`), live blocking, index usage, and sizes into a local time-series → on-demand pain report + regression detection. (Data capture + report you read yourself — no paging or alerting.) | Trend/regression analysis over time. |

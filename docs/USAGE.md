@@ -87,7 +87,7 @@ dbopt lint ./db --format sarif > dbopt.sarif     # SARIF 2.1.0 → GitHub code s
 dbopt lint ./db --fail-on warning                # exit 1 on any finding ≥ warning (gates a PR)
 ```
 
-`dbopt lint` recursively discovers `.sql` files, applies all 101 rules, and exits **0** clean /
+`dbopt lint` recursively discovers `.sql` files, applies all 102 rules, and exits **0** clean /
 **1** findings at-or-above `--fail-on` (default `error`) / **2** usage error. See the **Lint in CI**
 section of the [README](../README.md) for a copy-paste GitHub Actions snippet.
 
