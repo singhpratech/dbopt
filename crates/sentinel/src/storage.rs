@@ -102,7 +102,7 @@ pub const REGRESSION_MIN_ABS_DELTA_MS: f64 = 5.0;
 /// the latest value exceeds `mean + REGRESSION_Z_SCORE_K * stddev`, and the
 /// absolute jump clears [`REGRESSION_MIN_ABS_DELTA_MS`]. Tiny or flat samples
 /// return `None` rather than being force-judged.
-fn detect_regression(query_id: i64, points: &[(f64, i64)]) -> Option<RegressionRow> {
+pub fn detect_regression(query_id: i64, points: &[(f64, i64)]) -> Option<RegressionRow> {
     if points.len() < REGRESSION_MIN_SAMPLES {
         return None;
     }

@@ -126,50 +126,46 @@ impl ReadStore {
         Ok((count, sample))
     }
 
-    /// Regressions in the window — the SAME half-vs-half ≥2× heuristic the
-    /// report uses (`Storage::regressions_since`), re-implemented here so we
-    /// stay within the backend edit scope.
+    /// Regressions in the window — the SAME rolling-mean + standard-deviation
+    /// (z-score) detector the report uses. We run the identical per-snapshot
+    /// duration-per-execution query and call `sentinel::storage::detect_regression`,
+    /// so the Health front-door and the pain report share ONE definition of
+    /// "regression" (previously this lane carried a divergent 2× half-window copy).
     pub fn regressions(&self, window: TimeRange) -> anyhow::Result<Vec<RegressionRow>> {
         let (from, to) = Self::from_ms(window);
-        let half = (to - from) / 2;
-        let mid = from + half;
+        // Per-snapshot duration-per-execution series per query, oldest→newest,
+        // so the last element of each group is the "current" sample.
         let mut stmt = self.conn.prepare(
-            "WITH baseline AS (
-                 SELECT query_id, SUM(total_duration_ms) AS d, SUM(executions) AS e
-                 FROM query_store_snapshot
-                 WHERE captured_at >= ?1 AND captured_at < ?2
-                 GROUP BY query_id
-             ),
-             current AS (
-                 SELECT query_id, SUM(total_duration_ms) AS d, SUM(executions) AS e
-                 FROM query_store_snapshot
-                 WHERE captured_at >= ?2 AND captured_at < ?3
-                 GROUP BY query_id
-             )
-             SELECT b.query_id, b.d AS baseline_ms, c.d AS current_ms
-             FROM baseline b
-             JOIN current  c ON c.query_id = b.query_id
-             WHERE b.d > 0 AND b.e >= 10 AND c.e >= 10 AND CAST(c.d AS REAL) / b.d >= 2.0
-             ORDER BY (c.d - b.d) DESC
-             LIMIT 50",
+            "SELECT query_id,
+                    CAST(total_duration_ms AS REAL) / executions AS dur_per_exec,
+                    executions
+             FROM query_store_snapshot
+             WHERE captured_at >= ?1 AND captured_at < ?2
+               AND executions > 0
+             ORDER BY query_id, captured_at",
         )?;
-        let rows = stmt
-            .query_map(params![from, mid, to], |r| {
-                let baseline: i64 = r.get(1)?;
-                let current: i64 = r.get(2)?;
-                let delta_pct = if baseline == 0 {
-                    0.0
-                } else {
-                    (current as f64 / baseline as f64 - 1.0) * 100.0
-                };
-                Ok(RegressionRow {
-                    query_id: r.get(0)?,
-                    baseline_duration_ms: baseline,
-                    current_duration_ms: current,
-                    delta_pct,
-                })
+        let raw = stmt
+            .query_map(params![from, to], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        drop(stmt);
+
+        let mut series: std::collections::BTreeMap<i64, Vec<(f64, i64)>> =
+            std::collections::BTreeMap::new();
+        for (qid, dur, exec) in raw {
+            series.entry(qid).or_default().push((dur, exec));
+        }
+        let mut out: Vec<RegressionRow> = series
+            .into_iter()
+            .filter_map(|(qid, points)| sentinel::storage::detect_regression(qid, &points))
+            .collect();
+        // Largest absolute slowdown first; cap the list (matches the report).
+        out.sort_by(|a, b| {
+            (b.current_duration_ms - b.baseline_duration_ms)
+                .cmp(&(a.current_duration_ms - a.baseline_duration_ms))
+        });
+        out.truncate(50);
+        Ok(out)
     }
 }

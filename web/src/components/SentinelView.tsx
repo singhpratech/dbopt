@@ -371,7 +371,7 @@ export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig
       })()}
 
       {/* ── Regressions ────────────────────────────────── */}
-      <Section title="REGRESSIONS (≥2× SLOWER VS. BASELINE HALF-WINDOW)">
+      <Section title="REGRESSIONS (STATISTICAL OUTLIERS · Z-SCORE VS. ROLLING BASELINE)">
         {report && report.regressions.length > 0 ? (
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>

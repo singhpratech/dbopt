@@ -1,7 +1,7 @@
 //! Regression enrichment — pull the matching regression row and quote deltas.
 //!
-//! `affected_object` is `query:{id}`. We re-run the same half-vs-half
-//! regression read the report uses and find the row whose `query_id` matches,
+//! `affected_object` is `query:{id}`. We re-run the same z-score regression
+//! read the report uses and find the row whose `query_id` matches,
 //! then frame baseline→current in the SAME currency as the problem
 //! (milliseconds AND %, playbook #2). Degrades to a generic ladder if the row
 //! has rolled off the window (honest — the regression may have self-resolved).
