@@ -33,11 +33,11 @@ fix it, with the reasoning cited**. It works statically and from the *estimated*
 execution, no locks, no load on production**. Nothing leaves your machine unless you explicitly choose a
 cloud model.
 
-> **One product, many engines.** **SQL Server is the first and only fully-supported engine** (2019 → 2025).
-> The static analyzer and index advisor are ship-grade; continuous capture (sentinel) and the health score
-> are included and improving — an early-warning telemetry layer, not yet a replacement for a full production
-> monitor. PostgreSQL and MySQL are next; the engine seam is already in place, so each new database is a
-> *flavor* of the same tool, not a separate product.
+> **The deepest SQL Server static optimizer.** **SQL Server is the only supported engine today** (2019 → 2025) —
+> 100% of the rules are SQL-Server-specific. The static analyzer and index advisor are ship-grade; on-demand
+> capture (sentinel) and the health score are an early-warning telemetry layer you read yourself — not a
+> 24/7 production monitor with alerting. PostgreSQL and MySQL are **exploratory directions, not committed
+> releases** — the engine seam exists, but no other engine ships until the SQL Server core is where we want it.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
 > monetizing your pain.
@@ -120,11 +120,11 @@ is not included in the prebuilt downloads.)*
 
 ## Quality bar — proven, not promised
 
-- **135 eval scenarios** (69 positive / 66 negative) · precision = recall = **F1 = 1.000** on the scenario
+- **143 eval scenarios** (73 positive / 70 negative) · precision = recall = **F1 = 1.000** on the scenario
   set (target ≥ 0.95). The harness is **self-graded** — the scenarios are hand-authored, so this proves
   "no regression on the cases we wrote," not a measured real-world false-positive rate. A held-out,
   third-party corpus is on the roadmap.
-- **68 of the 100 rules** are currently covered by a scenario; the newer rule packs are being backfilled.
+- **72 distinct rules** are currently covered by a scenario; the newer rule packs are still being backfilled.
   Each covered rule has both a positive case (proves it fires) and a negative case (proves it stays silent).
 - Rust unit + HTTP integration tests and a Playwright UI suite.
 
@@ -190,7 +190,7 @@ Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No e
 ## Roadmap — one brand, every engine
 
 **SQL Server (2019 → 2025) is the product.** The **static analyzer + index advisor** are ship-grade
-(100 rules, self-graded F1 = 1.000 on 135 scenarios covering 68 of them; estimated/actual plan analysis; read-only DMV advisor). **Live
+(100 rules, self-graded F1 = 1.000 on 143 scenarios covering 72 of them; estimated/actual plan analysis; read-only DMV advisor). **Live
 capture (sentinel) + the health score** are included as an early-warning telemetry layer — a real
 head-start, not yet a full production monitor with alerting/trending. AI assistant + web UI round it out.
 
