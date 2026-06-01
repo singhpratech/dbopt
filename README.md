@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
   <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
-  <img src="https://img.shields.io/badge/rules-59-d4ff4e?style=flat-square&labelColor=0a0d12" alt="59 rules" />
+  <img src="https://img.shields.io/badge/rules-100-d4ff4e?style=flat-square&labelColor=0a0d12" alt="100 rules" />
   <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
   <img src="https://img.shields.io/badge/local--first-by%20default-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20React-7e879b?style=flat-square&labelColor=0a0d12" alt="Rust + React" />
@@ -95,7 +95,7 @@ dbopt takes the opposite stance on all four.
 
 |   | Lens | What it does |
 |---|------|--------------|
-| **01** | **Static** | A token-level T-SQL analyzer — **59 rules** across hygiene, sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb, statistics and index design. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
+| **01** | **Static** | A token-level T-SQL analyzer — **100 rules** across hygiene, sargability, deprecated syntax, modern rewrites, plan-shape, locking, tempdb, statistics, transactions, security and index design. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
 | **02** | **Plan** | Fetches the *estimated* plan (`SET SHOWPLAN_XML`, compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, and spill risk. |
 | **03** | **Live** | Pulls DMVs (index usage, missing indexes, sizes) on demand, and the **sentinel** daemon polls Query Store, waits, deadlocks and index usage into a local SQLite time-series → a weekly **pain report**. |
 
@@ -120,9 +120,12 @@ is not included in the prebuilt downloads.)*
 
 ## Quality bar — proven, not promised
 
-- **135 eval scenarios** · precision = recall = **F1 = 1.000** (target ≥ 0.95).
-- **100% positive and 100% negative coverage** — every rule has a scenario that proves it fires when it
-  should *and* stays silent when it shouldn't.
+- **135 eval scenarios** (69 positive / 66 negative) · precision = recall = **F1 = 1.000** on the scenario
+  set (target ≥ 0.95). The harness is **self-graded** — the scenarios are hand-authored, so this proves
+  "no regression on the cases we wrote," not a measured real-world false-positive rate. A held-out,
+  third-party corpus is on the roadmap.
+- **68 of the 100 rules** are currently covered by a scenario; the newer rule packs are being backfilled.
+  Each covered rule has both a positive case (proves it fires) and a negative case (proves it stays silent).
 - Rust unit + HTTP integration tests and a Playwright UI suite.
 
 ```bash
@@ -187,7 +190,7 @@ Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No e
 ## Roadmap — one brand, every engine
 
 **SQL Server (2019 → 2025) is the product.** The **static analyzer + index advisor** are ship-grade
-(59 rules, F1 = 1.000 on 135 scenarios; estimated/actual plan analysis; read-only DMV advisor). **Live
+(100 rules, self-graded F1 = 1.000 on 135 scenarios covering 68 of them; estimated/actual plan analysis; read-only DMV advisor). **Live
 capture (sentinel) + the health score** are included as an early-warning telemetry layer — a real
 head-start, not yet a full production monitor with alerting/trending. AI assistant + web UI round it out.
 

@@ -28,8 +28,8 @@ and it tells you the *exact* index to create — grounded in either the script's
 or the server's real usage.
 
 **Proof.**
-- The static analyzer runs **52 rules** in milliseconds with **F1 = 1.000** on our 113-scenario
-  corpus — so the flags you see are precise, not noise.
+- The static analyzer runs **100 rules** in milliseconds with a self-graded **F1 = 1.000** on our
+  135-scenario corpus (covering 68 of those rules) — so the flags it's tested on are precise, not noise.
 - On a real 82 KB / 3000-line script it produced **2,249 findings in 0.02 s**, then **grouped them
   into a handful of ranked cards** instead of a flat 2,249-row dump.
 
@@ -117,8 +117,8 @@ Server 2019–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
 ## 4. Engineering Manager / Decision-maker
 *"Will it help my team, and can I trust the output?"*
 
-- **Trust:** verified live against SQL Server **2019, 2022, and 2025**; static-rule **F1 = 1.000**
-  across 113 tagged scenarios; **never reads your data**; never auto-executes changes.
+- **Trust:** verified live against SQL Server **2019, 2022, and 2025**; static-rule self-graded **F1 = 1.000**
+  across 135 tagged scenarios (68 of 100 rules covered); **never reads your data**; never auto-executes changes.
 - **Coverage:** version-aware 2019→2025 (a 2022 rewrite is never suggested against a 2019 target).
 - **Adoption is low-friction:** a developer can get value with **zero database access** (static
   analysis) on day one, then opt into deeper, connection-backed analysis as access is granted.

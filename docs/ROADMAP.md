@@ -12,8 +12,8 @@ the headline work toward v1.0 is making it genuinely multi-engine.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
 - AI assistant (local Ollama + cloud providers, fanout) grounded on the static findings.
 - Web "observatory" UI; durable AI + analysis logs.
-- Quality: 113 eval scenarios, F1 = 1.000, 100% positive + 100% negative rule coverage;
-  Rust unit + HTTP integration tests; Playwright UI e2e.
+- Quality: 135 eval scenarios, self-graded F1 = 1.000 (covering 68 of the 100 rules; newer packs being
+  backfilled); Rust unit + HTTP integration tests; Playwright UI e2e.
 
 ## The engine seam (landed, foundation for v1.0)
 
@@ -59,7 +59,7 @@ Mapping per engine:
 | Catalog        | `sys.objects`/`sys.sql_modules`    | `information_schema`/`pg_proc`      | `information_schema`               |
 
 ### 2. Per-rule engine tags
-Audit the 52 rules: many sargability/hygiene *concepts* are universal (leading
+Audit the 100 rules: many sargability/hygiene *concepts* are universal (leading
 wildcard, function-on-column, SELECT *), even if the trigger syntax differs;
 plan-shape/locking/tempdb rules are largely SQL-Server-specific. Tag accordingly
 and add Postgres/MySQL rule families. Extend the eval corpus with an engine
