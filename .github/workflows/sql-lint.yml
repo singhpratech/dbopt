@@ -1,0 +1,42 @@
+name: sql-lint
+
+# Lint .sql files with dbopt and upload the results to GitHub code scanning so
+# findings appear inline on the PR diff and in the Security tab. Fully offline:
+# no database connection is made.
+#
+# This is a standalone, opt-in workflow — wire your own .sql path(s) into the
+# `dbopt lint` step below.
+
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # required for upload-sarif
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build dbopt
+        run: cargo build -p analyzer-cli --release
+
+      # Emit SARIF. `|| true` so a non-zero exit (findings crossed --fail-on)
+      # never fails the job here — the SARIF upload is what surfaces findings,
+      # and code scanning enforces any blocking policy.
+      - name: lint .sql -> SARIF
+        run: |
+          ./target/release/dbopt lint samples --format sarif > dbopt.sarif || true
+
+      - name: upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: dbopt.sarif
+          category: dbopt

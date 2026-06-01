@@ -1,0 +1,9 @@
+# Source and build inputs — only the compiled ./out is shipped in the .vsix.
+src/**
+tsconfig.json
+.vscodeignore
+.gitignore
+node_modules/**
+out/**/*.map
+**/*.ts
+**/tsconfig.tsbuildinfo

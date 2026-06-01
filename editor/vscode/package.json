@@ -1,0 +1,81 @@
+{
+  "name": "dbopt-vscode",
+  "displayName": "dbopt — T-SQL linter",
+  "description": "Lint T-SQL files with the dbopt engine. Findings appear as native inline squiggles in the editor and the Problems panel — fully offline, no database connection required.",
+  "version": "0.3.6",
+  "publisher": "dbopt",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/singhpratech/dbopt.git",
+    "directory": "editor/vscode"
+  },
+  "homepage": "https://dbopt.org",
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "sql",
+    "t-sql",
+    "linter",
+    "performance",
+    "sarif"
+  ],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "activationEvents": [
+    "onLanguage:sql",
+    "workspaceContains:**/*.sql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dbopt.lintCurrentFile",
+        "title": "dbopt: Lint current file",
+        "category": "dbopt"
+      }
+    ],
+    "configuration": {
+      "title": "dbopt",
+      "properties": {
+        "dbopt.binaryPath": {
+          "type": "string",
+          "default": "dbopt",
+          "markdownDescription": "Path to the `dbopt` executable. Use a bare name (`dbopt`) to resolve it on your `PATH`, or an absolute path (e.g. `/usr/local/bin/dbopt`, `C:\\\\Tools\\\\dbopt.exe`)."
+        },
+        "dbopt.lintOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically lint a .sql file every time it is saved."
+        },
+        "dbopt.serverVersion": {
+          "type": "string",
+          "enum": [
+            "default",
+            "2014",
+            "2016",
+            "2017",
+            "2019",
+            "2022",
+            "2025"
+          ],
+          "default": "default",
+          "markdownDescription": "Target engine version passed to `dbopt lint --server-version`. `default` lets dbopt pick its own default and omits the flag."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# dbopt pre-commit hook — block a commit if any staged .sql file has an
+# error-level (or worse) finding.
+#
+# Install:
+#   cp editor/hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+# or symlink it:
+#   ln -sf ../../editor/hooks/pre-commit .git/hooks/pre-commit
+#
+# Configuration (environment variables):
+#   DBOPT_BIN       path to the dbopt binary (default: dbopt, resolved on PATH)
+#   DBOPT_FAIL_ON   threshold: info|warning|error|critical (default: error)
+#
+# Skip once with:  git commit --no-verify
+
+set -euo pipefail
+
+DBOPT_BIN="${DBOPT_BIN:-dbopt}"
+DBOPT_FAIL_ON="${DBOPT_FAIL_ON:-error}"
+
+# Collect staged, still-present .sql files (Added/Copied/Modified — not deletions).
+mapfile -t sql_files < <(git diff --cached --name-only --diff-filter=ACM -z \
+  | tr '\0' '\n' \
+  | grep -iE '\.sql$' || true)
+
+if [ "${#sql_files[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+# Ensure the binary is available before we try to lint.
+if ! command -v "$DBOPT_BIN" >/dev/null 2>&1 && [ ! -x "$DBOPT_BIN" ]; then
+  echo "dbopt pre-commit: '$DBOPT_BIN' not found on PATH." >&2
+  echo "  Install dbopt or set DBOPT_BIN to the binary path. Skip with: git commit --no-verify" >&2
+  exit 1
+fi
+
+echo "dbopt: linting ${#sql_files[@]} staged .sql file(s) (fail-on: ${DBOPT_FAIL_ON})..."
+
+# dbopt lint exits 1 if any finding is at/above --fail-on; that blocks the commit.
+if "$DBOPT_BIN" lint "${sql_files[@]}" --format human --fail-on "$DBOPT_FAIL_ON"; then
+  exit 0
+else
+  status=$?
+  echo "" >&2
+  echo "dbopt pre-commit: blocked — findings at/above '${DBOPT_FAIL_ON}'." >&2
+  echo "  Fix them, or bypass once with: git commit --no-verify" >&2
+  exit "$status"
+fi
