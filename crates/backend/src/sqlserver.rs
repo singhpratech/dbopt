@@ -668,6 +668,89 @@ pub struct OperationalFacts {
     pub backups_readable: bool,
     pub last_full_backup_age_hours: Option<i64>,
     pub last_log_backup_age_hours: Option<i64>,
+
+    // --- DBCC CHECKDB integrity (per connected database) -------------------
+    /// True only when DBCC DBINFO actually returned a parseable
+    /// dbi_dbccLastKnownGood row. Like `backups_readable`, this is the honesty
+    /// guard: we only ever emit a "stale / never run" integrity check when this
+    /// is `true`, so a permission/parse gap can never masquerade as a finding.
+    pub checkdb_readable: bool,
+    /// Whole days since the last successful DBCC CHECKDB for the connected
+    /// database. `None` while `checkdb_readable` means the 1900-01-01 sentinel
+    /// (or a NULL marker) was read → integrity check has NEVER run.
+    pub checkdb_last_good_age_days: Option<i64>,
+    /// READ_ONLY databases never update the CHECKDB marker, so a "stale" verdict
+    /// would be a false alarm. We suppress the check when this is `true`.
+    pub db_is_read_only: Option<bool>,
+
+    // --- High-availability replica health (AG only) ------------------------
+    /// True only when sys.dm_hadr_database_replica_states was readable. An empty
+    /// result (server not in an AG) is NOT a failure — `hadr_replicas` is simply
+    /// empty and no HADR check is emitted.
+    pub hadr_readable: bool,
+    /// One row per (replica, database) where HADR is configured. Empty when the
+    /// instance is not in an Availability Group.
+    pub hadr_replicas: Vec<HadrReplicaFact>,
+
+    // --- Scheduled-maintenance (Agent) job failures ------------------------
+    /// True only when msdb job history was readable. A permission gap leaves
+    /// this `false` so "no failures" can never masquerade as health.
+    pub jobs_readable: bool,
+    /// Enabled jobs whose outcome row failed within the lookback window.
+    pub failed_jobs: Vec<FailedJobFact>,
+
+    // --- Instant File Initialization (instance-wide) -----------------------
+    /// `Some(true)`/`Some(false)` only when sys.dm_server_services exposed the
+    /// `instant_file_initialization_enabled` column (SQL Server 2016 SP1+ /
+    /// 2012 SP4+). `None` on older builds (column absent) → no check.
+    pub ifi_enabled: Option<bool>,
+
+    // --- tempdb data-file count vs cores -----------------------------------
+    /// Count of tempdb ROWS (data) files from sys.master_files.
+    pub tempdb_data_files: Option<i64>,
+    /// True when the tempdb data files are NOT all the same size (the round-robin
+    /// allocator is defeated by unequal sizes). `None` when unreadable / single
+    /// file.
+    pub tempdb_files_unequal: Option<bool>,
+
+    // --- Dangerous global trace flags --------------------------------------
+    /// True only when DBCC TRACESTATUS(-1) was readable. An empty global-flag
+    /// result is NOT a failure — `global_trace_flags` is simply empty.
+    pub trace_flags_readable: bool,
+    /// Globally-enabled trace-flag numbers (Global = 1).
+    pub global_trace_flags: Vec<i64>,
+}
+
+/// One (replica, database) row from `sys.dm_hadr_database_replica_states`,
+/// joined to the replica/group names. All best-effort: every field is read
+/// defensively, and the whole vec is empty when the instance is not in an AG.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct HadrReplicaFact {
+    pub ag_name: String,
+    pub replica_server_name: String,
+    pub database_name: String,
+    /// NOT SYNCHRONIZING / SYNCHRONIZING / SYNCHRONIZED.
+    pub synchronization_state: String,
+    /// NOT_HEALTHY / PARTIALLY_HEALTHY / HEALTHY.
+    pub synchronization_health: String,
+    /// `availability_mode_desc`: SYNCHRONOUS_COMMIT / ASYNCHRONOUS_COMMIT.
+    pub availability_mode: String,
+    pub is_suspended: bool,
+    pub suspend_reason: Option<String>,
+    pub redo_queue_size_kb: Option<i64>,
+    pub redo_rate_kb: Option<i64>,
+}
+
+/// One failed Agent-job outcome row from msdb job history within the lookback.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FailedJobFact {
+    pub job_name: String,
+    /// Most-recent failure timestamp, formatted by `msdb.dbo.agent_datetime`.
+    pub run_at: Option<String>,
+    /// Count of failed outcome rows for this job within the lookback window.
+    pub failure_count: i64,
+    /// The latest failure message (truncated server-side).
+    pub message: String,
 }
 
 /// Gather operational-health facts (server config, current-DB settings, log VLF
@@ -740,6 +823,143 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
             if let Some(r) = rows.first() {
                 f.last_full_backup_age_hours = r.get::<i64, _>(0);
                 f.last_log_backup_age_hours = r.get::<i64, _>(1);
+            }
+        }
+    }
+
+    // Whether the connected DB is READ_ONLY (suppresses a false "stale CHECKDB"
+    // alarm — the integrity marker never advances on a read-only database).
+    if let Ok(s) = client
+        .simple_query("SELECT CAST(is_read_only AS BIT) FROM sys.databases WHERE database_id = DB_ID()")
+        .await
+    {
+        if let Ok(rows) = s.into_first_result().await {
+            f.db_is_read_only = rows.first().and_then(|r| r.get::<bool, _>(0));
+        }
+    }
+
+    // Last successful DBCC CHECKDB for the connected database. DBCC has no FROM,
+    // so we capture DBINFO into a temp table and pivot the dbi_dbccLastKnownGood
+    // field. The 1900-01-01 sentinel (or a NULL value) means CHECKDB has never
+    // succeeded → `checkdb_last_good_age_days = None` while `checkdb_readable`.
+    // READ-ONLY: DBCC DBINFO only reads the boot page; it never touches data.
+    let q_checkdb = "SET NOCOUNT ON; \
+        DECLARE @dbinfo TABLE (ParentObject NVARCHAR(255), Object NVARCHAR(255), Field NVARCHAR(255), Value NVARCHAR(255)); \
+        INSERT INTO @dbinfo EXEC ('DBCC DBINFO() WITH TABLERESULTS, NO_INFOMSGS'); \
+        DECLARE @lkg DATETIME = (SELECT TRY_CONVERT(DATETIME, MAX(Value)) FROM @dbinfo WHERE Field = 'dbi_dbccLastKnownGood'); \
+        SELECT CASE WHEN @lkg IS NULL OR @lkg <= '1900-01-01' THEN NULL \
+                    ELSE CAST(DATEDIFF(DAY, @lkg, GETDATE()) AS BIGINT) END AS age_days";
+    if let Ok(s) = client.simple_query(q_checkdb).await {
+        if let Ok(rows) = s.into_first_result().await {
+            // The batch ran → the integrity marker is genuinely readable. A NULL
+            // age now honestly means "never run", not "couldn't look".
+            f.checkdb_readable = true;
+            f.checkdb_last_good_age_days = rows.first().and_then(|r| r.get::<i64, _>(0));
+        }
+    }
+
+    // High-availability replica health. These DMVs return rows ONLY where an
+    // Availability Group is configured; an empty result is not a failure (we
+    // mirror the DMV-empty-is-not-broken rule). The whole probe is wrapped so an
+    // older build (DMVs absent pre-2012) or a permission gap leaves it unread.
+    let q_hadr = "SELECT ag.name AS ag_name, ar.replica_server_name, drs.database_name, \
+               drs.synchronization_state_desc, drs.synchronization_health_desc, \
+               ar.availability_mode_desc, CAST(drs.is_suspended AS BIT) AS is_suspended, \
+               drs.suspend_reason_desc, \
+               CAST(drs.redo_queue_size AS BIGINT) AS redo_queue_size, \
+               CAST(drs.redo_rate AS BIGINT) AS redo_rate \
+        FROM sys.dm_hadr_database_replica_states AS drs \
+        JOIN sys.availability_replicas AS ar ON drs.replica_id = ar.replica_id \
+        JOIN sys.availability_groups   AS ag ON ar.group_id   = ag.group_id";
+    if let Ok(s) = client.simple_query(q_hadr).await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.hadr_readable = true;
+            for r in rows {
+                f.hadr_replicas.push(HadrReplicaFact {
+                    ag_name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                    replica_server_name: r.get::<&str, _>(1).unwrap_or("").to_string(),
+                    database_name: r.get::<&str, _>(2).unwrap_or("").to_string(),
+                    synchronization_state: r.get::<&str, _>(3).unwrap_or("").to_string(),
+                    synchronization_health: r.get::<&str, _>(4).unwrap_or("").to_string(),
+                    availability_mode: r.get::<&str, _>(5).unwrap_or("").to_string(),
+                    is_suspended: r.get::<bool, _>(6).unwrap_or(false),
+                    suspend_reason: r.get::<&str, _>(7).map(|s| s.to_string()),
+                    redo_queue_size_kb: r.get::<i64, _>(8),
+                    redo_rate_kb: r.get::<i64, _>(9),
+                });
+            }
+        }
+    }
+
+    // Failed scheduled-maintenance jobs (msdb Agent history) within a 30-day
+    // lookback. step_id = 0 is the job-outcome row (not an individual step);
+    // run_status = 0 is Failed. Best-effort: unreadable msdb (Azure SQL DB /
+    // restricted login) leaves `jobs_readable = false` so a permission gap can
+    // never read as "no failures".
+    let q_jobs = "SELECT j.name AS job_name, COUNT(*) AS failure_count, \
+               MAX(msdb.dbo.agent_datetime(h.run_date, h.run_time)) AS last_run_at, \
+               CAST(MAX(LEFT(h.message, 500)) AS NVARCHAR(500)) AS last_message \
+        FROM msdb.dbo.sysjobhistory AS h \
+        JOIN msdb.dbo.sysjobs       AS j ON h.job_id = j.job_id \
+        WHERE h.run_status = 0 AND h.step_id = 0 AND j.enabled = 1 \
+          AND msdb.dbo.agent_datetime(h.run_date, h.run_time) >= DATEADD(DAY, -30, GETDATE()) \
+        GROUP BY j.name \
+        ORDER BY last_run_at DESC";
+    if let Ok(s) = client.simple_query(q_jobs).await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.jobs_readable = true;
+            for r in rows {
+                f.failed_jobs.push(FailedJobFact {
+                    job_name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                    failure_count: r.get::<i64, _>(1).unwrap_or(0),
+                    run_at: r.get::<&str, _>(2).map(|s| s.to_string()),
+                    message: r.get::<&str, _>(3).unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+
+    // Instant File Initialization (instance-wide). VERSION-GATE: the
+    // `instant_file_initialization_enabled` column exists only on SQL Server
+    // 2016 SP1+ / 2012 SP4+. On older builds the query fails and `ifi_enabled`
+    // stays None → no check (the same honest pattern as sys.dm_db_log_info).
+    let q_ifi = "SELECT CAST(CASE WHEN UPPER(LTRIM(RTRIM(instant_file_initialization_enabled))) = 'Y' \
+               THEN 1 ELSE 0 END AS BIT) \
+        FROM sys.dm_server_services WHERE filename LIKE '%sqlservr.exe%'";
+    if let Ok(s) = client.simple_query(q_ifi).await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.ifi_enabled = rows.first().and_then(|r| r.get::<bool, _>(0));
+        }
+    }
+
+    // tempdb data-file count + whether the files are equally sized. Recommended
+    // count is min(cores, 8); unequal sizes defeat the round-robin allocator.
+    let q_tempdb = "SELECT CAST(COUNT(*) AS BIGINT) AS file_count, \
+               CAST(CASE WHEN MIN(size) = MAX(size) THEN 0 ELSE 1 END AS BIT) AS unequal \
+        FROM sys.master_files WHERE database_id = 2 AND type_desc = 'ROWS'";
+    if let Ok(s) = client.simple_query(q_tempdb).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.first() {
+                f.tempdb_data_files = r.get::<i64, _>(0);
+                f.tempdb_files_unequal = r.get::<bool, _>(1);
+            }
+        }
+    }
+
+    // Globally-enabled trace flags. DBCC has no FROM, so capture TRACESTATUS(-1)
+    // into a temp table and keep only Global = 1. An empty result is NOT a
+    // failure — `trace_flags_readable` is true with an empty `global_trace_flags`.
+    let q_tf = "SET NOCOUNT ON; \
+        DECLARE @ts TABLE (TraceFlag INT, Status INT, Global INT, [Session] INT); \
+        INSERT INTO @ts EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS'); \
+        SELECT CAST(TraceFlag AS BIGINT) FROM @ts WHERE Global = 1";
+    if let Ok(s) = client.simple_query(q_tf).await {
+        if let Ok(rows) = s.into_first_result().await {
+            f.trace_flags_readable = true;
+            for r in rows {
+                if let Some(tf) = r.get::<i64, _>(0) {
+                    f.global_trace_flags.push(tf);
+                }
             }
         }
     }

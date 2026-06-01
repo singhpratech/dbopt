@@ -17,7 +17,7 @@ use crate::sqlserver::OperationalFacts;
 pub struct OperationalCheck {
     pub id: &'static str,
     pub severity: &'static str, // critical | error | warning | info
-    pub kind: &'static str,     // config | log | backup
+    pub kind: &'static str,     // config | log | backup | integrity | hadr | jobs
     pub title: String,
     pub consequence: String,
     pub recommendation: String,
@@ -27,6 +27,25 @@ pub struct OperationalCheck {
 }
 
 const WEEK_HOURS: i64 = 24 * 7;
+
+/// Days since the last good DBCC CHECKDB before we call it stale. Conservative
+/// default aligned with the First-Responder-Kit guidance (a fortnight).
+const CHECKDB_STALE_DAYS: i64 = 14;
+
+/// Agent-job failure lookback window (days). Conservative default — matches the
+/// 30-day window of the gatherer query.
+const JOBS_LOOKBACK_DAYS: i64 = 30;
+
+/// tempdb data-file recommendation cap (Microsoft guidance: one file per
+/// logical processor, capped at 8).
+const TEMPDB_FILE_CAP: i64 = 8;
+
+/// High-risk global trace flags that disable safety/perf mechanisms (lock
+/// escalation, checkpoints, IFI, ghost cleanup, …). Source: brentozar.com
+/// trace-flags-enabled-globally. We name the risky ones explicitly and do NOT
+/// blanket-condemn — 4199/3226 are commonly legitimate and are excluded here.
+const HIGH_RISK_TRACE_FLAGS: &[i64] =
+    &[652, 661, 1211, 1224, 1806, 2330, 3505, 4138, 8649];
 
 /// Apply best-practice thresholds to measured facts. Pure + deterministic, so
 /// it's unit-tested below. `db_name` is only used to build copy-paste DDL.
@@ -227,12 +246,203 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
         }
     }
 
+    // --- DBCC CHECKDB integrity (only when the marker was actually readable) -
+    // Honesty gates: suppress for READ_ONLY databases (the marker never advances
+    // there), and only ever claim "never run" when the marker was readable —
+    // exactly mirroring the backup pattern above.
+    if f.checkdb_readable && f.db_is_read_only != Some(true) {
+        match f.checkdb_last_good_age_days {
+            None => out.push(OperationalCheck {
+                id: "integrity.checkdb_never",
+                severity: "critical",
+                kind: "integrity",
+                title: format!("DBCC CHECKDB has never run on [{db}]"),
+                consequence: "Storage-level corruption could be silently accumulating with no integrity check to catch it before it causes data loss.".into(),
+                recommendation: "Run DBCC CHECKDB off-peak (or against a restored copy if I/O-sensitive), then schedule a weekly integrity-check job. 'Never run' is higher severity than merely stale.".into(),
+                metric_label: "Last good CHECKDB".into(),
+                metric_value: "never".into(),
+                fix_sql: Some(format!("DBCC CHECKDB([{db}]) WITH NO_INFOMSGS, ALL_ERRORMSGS;")),
+            }),
+            Some(days) if days >= CHECKDB_STALE_DAYS => out.push(OperationalCheck {
+                id: "integrity.checkdb_stale",
+                severity: "critical",
+                kind: "integrity",
+                title: format!("Last successful DBCC CHECKDB on [{db}] is {days} day(s) old"),
+                consequence: "Corruption introduced since the last check would go undetected, widening the window in which a backup could itself be carrying corrupt pages.".into(),
+                recommendation: "Run DBCC CHECKDB off-peak (or against a restored copy if I/O-sensitive), then verify the weekly integrity-check job is actually running.".into(),
+                metric_label: "Last good CHECKDB (days ago)".into(),
+                metric_value: days.to_string(),
+                fix_sql: Some(format!("DBCC CHECKDB([{db}]) WITH NO_INFOMSGS, ALL_ERRORMSGS;")),
+            }),
+            _ => {}
+        }
+    }
+
+    // --- High-availability replica health (no-op when not in an AG) ---------
+    // The gatherer returns rows only where HADR is configured, so an empty
+    // `hadr_replicas` (the common case) emits nothing — DMV-empty-is-not-broken.
+    for r in &f.hadr_replicas {
+        let is_synchronous = r.availability_mode.eq_ignore_ascii_case("SYNCHRONOUS_COMMIT");
+        let unhealthy = r.synchronization_health.eq_ignore_ascii_case("NOT_HEALTHY");
+        let bad_sync_state = is_synchronous
+            && matches!(
+                r.synchronization_state.to_ascii_uppercase().as_str(),
+                "NOT SYNCHRONIZING" | "NOT SYNCHRONIZED"
+            );
+        if unhealthy || bad_sync_state || r.is_suspended {
+            let reason = if r.is_suspended {
+                format!(
+                    "data movement is suspended ({})",
+                    r.suspend_reason.as_deref().unwrap_or("reason unknown")
+                )
+            } else if unhealthy {
+                "synchronization health is NOT_HEALTHY".into()
+            } else {
+                format!("a synchronous replica is in state '{}'", r.synchronization_state)
+            };
+            out.push(OperationalCheck {
+                id: "hadr.replica_unhealthy",
+                severity: "critical",
+                kind: "hadr",
+                title: format!(
+                    "Availability replica '{}' is unhealthy for [{}]",
+                    r.replica_server_name, r.database_name
+                ),
+                consequence: "A suspended or not-synchronizing synchronous replica means a failover would lose committed data or block — high-availability protection is not actually in place right now.".into(),
+                recommendation: format!(
+                    "AG '{}' — {reason}. Resume data movement and root-cause the bottleneck (single redo thread, I/O stall, or long read-only queries blocking redo on the secondary).",
+                    r.ag_name
+                ),
+                metric_label: "Sync state / health".into(),
+                metric_value: format!("{} / {}", r.synchronization_state, r.synchronization_health),
+                // Resume DDL is replica-specific and operator-reviewed; we describe.
+                fix_sql: None,
+            });
+        }
+    }
+
+    // --- Failed scheduled-maintenance jobs (only when msdb was readable) ----
+    // Honesty gate: emit nothing when job history is unreadable, so a permission
+    // gap never masquerades as "no failures".
+    if f.jobs_readable {
+        for j in &f.failed_jobs {
+            // Backup / integrity-check jobs are a direct data-loss / RPO exposure
+            // — escalate those above an ordinary maintenance-job failure.
+            let lname = j.job_name.to_ascii_lowercase();
+            let critical = lname.contains("backup")
+                || lname.contains("checkdb")
+                || lname.contains("integrity");
+            let severity = if critical { "error" } else { "warning" };
+            let when = j.run_at.as_deref().unwrap_or("recently");
+            out.push(OperationalCheck {
+                id: "jobs.recent_failures",
+                severity,
+                kind: "jobs",
+                title: format!("Scheduled job '{}' failed in the last {JOBS_LOOKBACK_DAYS} days", j.job_name),
+                consequence: if critical {
+                    "A failed backup or integrity job is a direct data-loss / recovery-objective exposure — recovery may not be possible when it's needed.".into()
+                } else {
+                    "A failing maintenance job means the work it does (index/stats upkeep, cleanup) silently isn't happening.".into()
+                },
+                recommendation: format!(
+                    "Last failure {when}: {}. Fix the failing step and attach a failure-notification operator so silent failures stop.",
+                    j.message.trim()
+                ),
+                metric_label: "Failures (30d)".into(),
+                metric_value: j.failure_count.to_string(),
+                fix_sql: None,
+            });
+        }
+    }
+
+    // --- Instant File Initialization (version-gated by the gatherer) --------
+    // `ifi_enabled` is None on builds where the column doesn't exist, so a
+    // `Some(false)` here is a genuine measured "OFF".
+    if f.ifi_enabled == Some(false) {
+        out.push(OperationalCheck {
+            id: "config.ifi_disabled",
+            severity: "warning",
+            kind: "config",
+            title: "Instant File Initialization is not enabled".into(),
+            consequence: "Data-file growths and restores zero-initialize first, stalling autogrowth under load and lengthening restore time (a longer recovery-time objective).".into(),
+            recommendation: "Grant 'Perform Volume Maintenance Tasks' to the database-engine service account so data-file growths and restores skip zero-initialization. Note: this helps DATA files only — log files are always zeroed.".into(),
+            metric_label: "Instant File Initialization".into(),
+            metric_value: "OFF".into(),
+            fix_sql: None,
+        });
+    }
+
+    // --- tempdb data-file count vs cores ------------------------------------
+    if let (Some(files), Some(cpu)) = (f.tempdb_data_files, f.cpu_count) {
+        let recommended = cpu.min(TEMPDB_FILE_CAP).max(1);
+        if files < recommended {
+            // A single file on a many-core box is the strongest signal.
+            let severity = if files <= 1 { "warning" } else { "info" };
+            out.push(OperationalCheck {
+                id: "tempdb.too_few_files",
+                severity,
+                kind: "config",
+                title: format!("tempdb has {files} data file(s) for {cpu} logical processors"),
+                consequence: "Too few tempdb data files concentrate allocation-page (GAM/SGAM/PFS) activity onto one file, producing PAGELATCH_UP contention under concurrent load.".into(),
+                recommendation: format!(
+                    "Add equally sized tempdb data files up to {recommended} (one per core, capped at {TEMPDB_FILE_CAP}); keep all files the same size and growth. Trace flags 1117/1118 are no-ops on 2016+, so don't rely on them there."
+                ),
+                metric_label: "tempdb data files (recommended)".into(),
+                metric_value: format!("{files} ({recommended})"),
+                fix_sql: None,
+            });
+        } else if f.tempdb_files_unequal == Some(true) {
+            // Enough files, but unequal sizes defeat the round-robin allocator.
+            out.push(OperationalCheck {
+                id: "tempdb.unequal_files",
+                severity: "info",
+                kind: "config",
+                title: "tempdb data files are not equally sized".into(),
+                consequence: "The round-robin allocator favours the largest free file, so unequal sizes concentrate allocations and re-introduce contention.".into(),
+                recommendation: "Resize all tempdb data files to the same size and configure identical autogrowth.".into(),
+                metric_label: "tempdb files equal-size".into(),
+                metric_value: "no".into(),
+                fix_sql: None,
+            });
+        }
+    }
+
+    // --- Dangerous global trace flags (no-op when none are set) -------------
+    // Honesty gate: emit nothing when TRACESTATUS returned no global flags.
+    if f.trace_flags_readable {
+        let risky: Vec<i64> = f
+            .global_trace_flags
+            .iter()
+            .copied()
+            .filter(|tf| HIGH_RISK_TRACE_FLAGS.contains(tf))
+            .collect();
+        if !risky.is_empty() {
+            let list = risky
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(OperationalCheck {
+                id: "config.dangerous_trace_flag",
+                severity: "warning",
+                kind: "config",
+                title: format!("High-risk global trace flag(s) enabled instance-wide: {list}"),
+                consequence: "These flags disable safety/performance mechanisms (lock escalation, checkpoints, instant file init, ghost cleanup) for the whole instance — often left over from a one-off fix.".into(),
+                recommendation: "Confirm each flag is still intentional and still recommended for this version. Remove high-risk flags unless a documented reason exists; prefer a supported database-scoped configuration where one exists.".into(),
+                metric_label: "High-risk global trace flags".into(),
+                metric_value: list,
+                fix_sql: None,
+            });
+        }
+    }
+
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sqlserver::{FailedJobFact, HadrReplicaFact};
 
     #[test]
     fn unreadable_msdb_never_claims_missing_backup() {
@@ -276,5 +486,235 @@ mod tests {
         let c = evaluate(&bad, "db");
         let pv = c.iter().find(|c| c.id == "config.page_verify_not_checksum").expect("flagged");
         assert_eq!(pv.severity, "error");
+    }
+
+    // --- CHECKDB integrity --------------------------------------------------
+
+    #[test]
+    fn checkdb_unreadable_never_claims_stale() {
+        // checkdb_readable = false → we couldn't look. Emit NO integrity check.
+        let f = OperationalFacts { checkdb_readable: false, checkdb_last_good_age_days: None, ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "integrity"));
+    }
+
+    #[test]
+    fn checkdb_never_run_is_critical_when_readable() {
+        let f = OperationalFacts { checkdb_readable: true, checkdb_last_good_age_days: None, ..Default::default() };
+        let c = evaluate(&f, "db");
+        let chk = c.iter().find(|c| c.id == "integrity.checkdb_never").expect("never-run flagged");
+        assert_eq!(chk.severity, "critical");
+    }
+
+    #[test]
+    fn checkdb_stale_flags_old_marker_but_not_fresh() {
+        let stale = OperationalFacts { checkdb_readable: true, checkdb_last_good_age_days: Some(30), ..Default::default() };
+        assert!(evaluate(&stale, "db").iter().any(|c| c.id == "integrity.checkdb_stale"));
+        let fresh = OperationalFacts { checkdb_readable: true, checkdb_last_good_age_days: Some(3), ..Default::default() };
+        assert!(!evaluate(&fresh, "db").iter().any(|c| c.kind == "integrity"));
+    }
+
+    #[test]
+    fn checkdb_suppressed_for_read_only_database() {
+        // READ_ONLY DB never updates the marker → would false-alarm. Suppress it.
+        let f = OperationalFacts {
+            checkdb_readable: true,
+            checkdb_last_good_age_days: None,
+            db_is_read_only: Some(true),
+            ..Default::default()
+        };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "integrity"));
+    }
+
+    // --- HADR replica health ------------------------------------------------
+
+    #[test]
+    fn hadr_no_op_when_not_in_an_ag() {
+        // Empty replica list (the common non-AG case) → no HADR check.
+        let f = OperationalFacts { hadr_readable: true, hadr_replicas: vec![], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "hadr"));
+    }
+
+    #[test]
+    fn hadr_healthy_synchronized_replica_is_clean() {
+        let f = OperationalFacts {
+            hadr_readable: true,
+            hadr_replicas: vec![HadrReplicaFact {
+                synchronization_state: "SYNCHRONIZED".into(),
+                synchronization_health: "HEALTHY".into(),
+                availability_mode: "SYNCHRONOUS_COMMIT".into(),
+                is_suspended: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "hadr"));
+    }
+
+    #[test]
+    fn hadr_unhealthy_or_suspended_replica_is_critical() {
+        let suspended = OperationalFacts {
+            hadr_readable: true,
+            hadr_replicas: vec![HadrReplicaFact {
+                replica_server_name: "NODE2".into(),
+                database_name: "sales".into(),
+                synchronization_state: "SYNCHRONIZED".into(),
+                synchronization_health: "HEALTHY".into(),
+                availability_mode: "SYNCHRONOUS_COMMIT".into(),
+                is_suspended: true,
+                suspend_reason: Some("SUSPEND_FROM_REDO".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let c = evaluate(&suspended, "db");
+        let h = c.iter().find(|c| c.id == "hadr.replica_unhealthy").expect("suspended flagged");
+        assert_eq!(h.severity, "critical");
+
+        let not_healthy = OperationalFacts {
+            hadr_readable: true,
+            hadr_replicas: vec![HadrReplicaFact {
+                synchronization_state: "NOT SYNCHRONIZING".into(),
+                synchronization_health: "NOT_HEALTHY".into(),
+                availability_mode: "SYNCHRONOUS_COMMIT".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(evaluate(&not_healthy, "db").iter().any(|c| c.id == "hadr.replica_unhealthy"));
+    }
+
+    #[test]
+    fn hadr_async_not_synchronizing_is_not_flagged_on_state_alone() {
+        // ASYNCHRONOUS replicas are expected to lag; "NOT SYNCHRONIZING" state
+        // alone (with HEALTHY health, not suspended) must not trip the check.
+        let f = OperationalFacts {
+            hadr_readable: true,
+            hadr_replicas: vec![HadrReplicaFact {
+                synchronization_state: "SYNCHRONIZING".into(),
+                synchronization_health: "HEALTHY".into(),
+                availability_mode: "ASYNCHRONOUS_COMMIT".into(),
+                is_suspended: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "hadr"));
+    }
+
+    // --- Failed Agent jobs --------------------------------------------------
+
+    #[test]
+    fn jobs_unreadable_never_claims_no_failures() {
+        // jobs_readable = false → we couldn't look. Emit NO jobs check even if
+        // the (stale) vec somehow held entries.
+        let f = OperationalFacts { jobs_readable: false, failed_jobs: vec![FailedJobFact::default()], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "jobs"));
+    }
+
+    #[test]
+    fn jobs_readable_with_no_failures_is_clean() {
+        let f = OperationalFacts { jobs_readable: true, failed_jobs: vec![], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "jobs"));
+    }
+
+    #[test]
+    fn jobs_backup_failure_escalates_above_ordinary_job() {
+        let f = OperationalFacts {
+            jobs_readable: true,
+            failed_jobs: vec![
+                FailedJobFact { job_name: "Nightly Backup".into(), failure_count: 2, message: "device error".into(), ..Default::default() },
+                FailedJobFact { job_name: "Index Reorg".into(), failure_count: 1, message: "timeout".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let c = evaluate(&f, "db");
+        let backup = c.iter().find(|c| c.title.contains("Nightly Backup")).expect("backup job flagged");
+        assert_eq!(backup.severity, "error");
+        let reorg = c.iter().find(|c| c.title.contains("Index Reorg")).expect("reorg job flagged");
+        assert_eq!(reorg.severity, "warning");
+    }
+
+    // --- Instant File Initialization ----------------------------------------
+
+    #[test]
+    fn ifi_unknown_version_emits_nothing() {
+        // None = column absent on this build → no check (no guess).
+        let f = OperationalFacts { ifi_enabled: None, ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.id == "config.ifi_disabled"));
+    }
+
+    #[test]
+    fn ifi_off_warns_on_is_clean() {
+        let off = OperationalFacts { ifi_enabled: Some(false), ..Default::default() };
+        assert!(evaluate(&off, "db").iter().any(|c| c.id == "config.ifi_disabled"));
+        let on = OperationalFacts { ifi_enabled: Some(true), ..Default::default() };
+        assert!(!evaluate(&on, "db").iter().any(|c| c.id == "config.ifi_disabled"));
+    }
+
+    // --- tempdb data files --------------------------------------------------
+
+    #[test]
+    fn tempdb_single_file_on_many_cores_warns() {
+        let f = OperationalFacts { tempdb_data_files: Some(1), cpu_count: Some(16), ..Default::default() };
+        let c = evaluate(&f, "db");
+        let t = c.iter().find(|c| c.id == "tempdb.too_few_files").expect("flagged");
+        assert_eq!(t.severity, "warning");
+    }
+
+    #[test]
+    fn tempdb_at_recommended_count_is_clean() {
+        // 8 files capped at 8 for a 32-core box → recommended met → clean.
+        let f = OperationalFacts { tempdb_data_files: Some(8), cpu_count: Some(32), ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.id == "tempdb.too_few_files"));
+    }
+
+    #[test]
+    fn tempdb_unequal_sizes_flagged_when_count_ok() {
+        let f = OperationalFacts {
+            tempdb_data_files: Some(8),
+            cpu_count: Some(8),
+            tempdb_files_unequal: Some(true),
+            ..Default::default()
+        };
+        assert!(evaluate(&f, "db").iter().any(|c| c.id == "tempdb.unequal_files"));
+    }
+
+    #[test]
+    fn tempdb_unknown_facts_emit_nothing() {
+        // cpu_count known but file count unknown → no check (no guess).
+        let f = OperationalFacts { cpu_count: Some(8), tempdb_data_files: None, ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.kind == "config" && c.id.starts_with("tempdb")));
+    }
+
+    // --- Dangerous global trace flags ---------------------------------------
+
+    #[test]
+    fn trace_flags_no_op_when_none_global() {
+        let f = OperationalFacts { trace_flags_readable: true, global_trace_flags: vec![], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.id == "config.dangerous_trace_flag"));
+    }
+
+    #[test]
+    fn trace_flags_benign_not_condemned() {
+        // 4199 / 3226 are commonly legitimate — must NOT be flagged.
+        let f = OperationalFacts { trace_flags_readable: true, global_trace_flags: vec![4199, 3226], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.id == "config.dangerous_trace_flag"));
+    }
+
+    #[test]
+    fn trace_flags_high_risk_warns() {
+        let f = OperationalFacts { trace_flags_readable: true, global_trace_flags: vec![1211, 4199], ..Default::default() };
+        let c = evaluate(&f, "db");
+        let tf = c.iter().find(|c| c.id == "config.dangerous_trace_flag").expect("flagged");
+        assert_eq!(tf.severity, "warning");
+        // Only the high-risk flag should appear in the metric, not 4199.
+        assert!(tf.metric_value.contains("1211"));
+        assert!(!tf.metric_value.contains("4199"));
+    }
+
+    #[test]
+    fn trace_flags_unreadable_emits_nothing() {
+        let f = OperationalFacts { trace_flags_readable: false, global_trace_flags: vec![], ..Default::default() };
+        assert!(!evaluate(&f, "db").iter().any(|c| c.id == "config.dangerous_trace_flag"));
     }
 }
