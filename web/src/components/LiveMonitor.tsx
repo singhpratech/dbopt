@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SqlConnectionConfig } from "../store/persist";
 import * as P from "../store/persist";
 import * as backend from "../api/backend";
-import type { LiveMetrics, LiveSession } from "../api/backend";
+import type { LiveMetrics, LiveSession, DeepVitals } from "../api/backend";
 
 /**
  * Live Pulse — our own real-time vitals view of the connected instance. Polls
@@ -39,6 +39,29 @@ function fmtDur(ms: number): string {
   const m = Math.floor(s / 60);
   return `${m}m${Math.round(s % 60)}s`;
 }
+/** Kilobytes → human size (deep-vitals memory/plan-cache fields are KB). */
+function fmtKB(kb: number): string {
+  if (kb >= 1048576) return `${(kb / 1048576).toFixed(1)} GB`;
+  if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
+  return `${fmtInt(kb)} KB`;
+}
+function fmtMs(ms: number): string {
+  if (ms < 1) return `${ms.toFixed(2)} ms`;
+  if (ms < 10) return `${ms.toFixed(1)} ms`;
+  return `${Math.round(ms)} ms`;
+}
+function fmtPct(n: number): string {
+  return `${n.toFixed(n >= 10 ? 0 : 1)}%`;
+}
+/** Compact "x ago" for the deep-vitals capture instant. */
+function fmtAgo(epochMs: number): string {
+  const s = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m ago`;
+}
 
 export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
   const connected = !!conn.server && (conn.auth_mode !== "sql" || !!conn.user);
@@ -55,17 +78,28 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
   });
   const [err, setErr] = useState<string | null>(null);
   const [lastTickMs, setLastTickMs] = useState<number | null>(null);
+  // Deep vitals are read back from the persisted monitor store, not the live
+  // DMV pull — they update on the same cadence but can be null until the
+  // background monitor has captured its first sample for this server.
+  const [vitals, setVitals] = useState<DeepVitals | null>(null);
   const prevRef = useRef<LiveMetrics | null>(null);
 
   const tick = useCallback(async () => {
+    const connInfo = {
+      server: conn.server,
+      database: conn.database,
+      user: conn.user,
+      password: conn.password,
+      trust_cert: conn.trust_cert,
+    } as any;
+    // Deep vitals read back the persisted monitor store; a failure here must
+    // NOT take down the live pulse, so it has its own catch and runs alongside.
+    backend
+      .fetchVitals(connInfo)
+      .then((v) => setVitals(v))
+      .catch(() => {/* keep last good vitals; the empty state covers first run */});
     try {
-      const m = await backend.liveMetrics({
-        server: conn.server,
-        database: conn.database,
-        user: conn.user,
-        password: conn.password,
-        trust_cert: conn.trust_cert,
-      } as any);
+      const m = await backend.liveMetrics(connInfo);
       setErr(null);
       const prev = prevRef.current;
       let batchRate = 0;
@@ -217,6 +251,9 @@ export function LiveMonitor({ conn }: { conn: SqlConnectionConfig }) {
         />
       </div>
 
+      {/* ── deep vitals (persisted monitor read-back) ───── */}
+      <DeepVitalsPanel vitals={vitals} />
+
       {/* ── wait breakdown now ──────────────────────────── */}
       <div className="live-section">
         <div className="live-section-h">WAIT BREAKDOWN — NOW</div>
@@ -313,6 +350,170 @@ function Tile({ label, value, tone }: { label: string; value: string; tone?: "er
       <div className="live-tile-v">{value}</div>
     </div>
   );
+}
+
+type Tone = "err" | "warn" | undefined;
+
+/**
+ * DEEP VITALS — the deepest telemetry the background monitor persists, read
+ * back from the local store (not the live DMV pull). Surfaces an experienced
+ * operator's "is the server under pressure right now" view across five
+ * surfaces: scheduler pressure, memory headroom, storage I/O latency, tempdb
+ * allocation contention and plan-cache health. Our own vocabulary throughout.
+ *
+ * Honest empty state: until the monitor lands its first sample for this server
+ * (within ~a minute of starting), every surface reads "no data yet".
+ */
+function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
+  const v = vitals;
+  const captured = v?.captured_at ?? null;
+
+  return (
+    <div className="live-section">
+      <div className="live-section-h">
+        DEEP VITALS
+        {captured != null && (
+          <span className="dv-asof"> · captured {fmtAgo(captured)}</span>
+        )}
+      </div>
+
+      {!v || !v.has_data ? (
+        <div className="live-empty">
+          No deep vitals captured yet — start the monitor; the first sample lands within ~a minute.
+        </div>
+      ) : (
+        <div className="dv-grid">
+          {/* CPU PRESSURE */}
+          <VitalCard title="CPU PRESSURE">
+            {v.cpu_pressure ? (() => {
+              const c = v.cpu_pressure;
+              // Runnable tasks waiting on a CPU, relative to online schedulers,
+              // is the textbook pressure signal. Flag when tasks queue up.
+              const ratio = c.online_schedulers > 0 ? c.runnable_tasks / c.online_schedulers : 0;
+              const tone: Tone = c.runnable_tasks === 0 ? undefined : ratio >= 1 ? "err" : "warn";
+              return (
+                <>
+                  <VitalRow label="Runnable tasks waiting" value={fmtInt(c.runnable_tasks)} tone={tone} />
+                  <VitalRow label="Online schedulers" value={fmtInt(c.online_schedulers)} />
+                  <VitalRow label="Work queue (no worker)" value={fmtInt(c.work_queue)} tone={c.work_queue > 0 ? "warn" : undefined} />
+                  <VitalRow label="Active / current workers" value={`${fmtInt(c.active_workers)} / ${fmtInt(c.current_workers)}`} />
+                  <VitalRow label="Pending disk I/O" value={fmtInt(c.pending_disk_io)} />
+                </>
+              );
+            })() : <VitalNone />}
+          </VitalCard>
+
+          {/* MEMORY HEADROOM */}
+          <VitalCard title="MEMORY HEADROOM">
+            {v.memory_headroom ? (() => {
+              const mh = v.memory_headroom;
+              // Low page-life-expectancy = buffer-pool churn; any pending grant
+              // means queries are queued for workspace memory.
+              const pleTone: Tone = mh.page_life_expectancy < 300 ? "err" : mh.page_life_expectancy < 900 ? "warn" : undefined;
+              const fill = mh.target_server_memory_kb > 0
+                ? (mh.total_server_memory_kb / mh.target_server_memory_kb) * 100
+                : 0;
+              return (
+                <>
+                  <VitalRow label="Cache retention (PLE)" value={`${fmtInt(mh.page_life_expectancy)}s`} tone={pleTone} />
+                  <VitalRow label="Pending memory grants" value={fmtInt(mh.pending_memory_grants)} tone={mh.pending_memory_grants > 0 ? "warn" : undefined} />
+                  <VitalRow label="Granted workspace" value={fmtKB(mh.granted_memory_kb)} />
+                  <VitalRow label="In use / target" value={`${fmtKB(mh.total_server_memory_kb)} / ${fmtKB(mh.target_server_memory_kb)}`} />
+                  <VitalRow label="Buffer pool filled" value={fmtPct(Math.min(100, fill))} />
+                </>
+              );
+            })() : <VitalNone />}
+          </VitalCard>
+
+          {/* I/O LATENCY */}
+          <VitalCard title="I/O LATENCY">
+            {v.io_latency.length > 0 ? (
+              <div className="dv-iotable">
+                <div className="dv-io-head">
+                  <span>FILE</span>
+                  <span className="r">READ</span>
+                  <span className="r">WRITE</span>
+                </div>
+                {v.io_latency.slice(0, 5).map((f) => {
+                  const worst = Math.max(f.avg_read_latency_ms, f.avg_write_latency_ms);
+                  const tone: Tone = worst >= 20 ? "err" : worst >= 10 ? "warn" : undefined;
+                  return (
+                    <div className={`dv-io-row${tone ? ` tone-${tone}` : ""}`} key={`${f.database_name}/${f.file_logical_name}`}>
+                      <span className="dv-io-file" title={`${f.database_name} · ${f.file_logical_name} (${f.file_type})`}>
+                        {f.database_name} / {f.file_logical_name}
+                      </span>
+                      <span className="r">{fmtMs(f.avg_read_latency_ms)}</span>
+                      <span className="r">{fmtMs(f.avg_write_latency_ms)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : <VitalNone label="No file I/O in the last window." />}
+          </VitalCard>
+
+          {/* TEMPDB CONTENTION */}
+          <VitalCard title="TEMPDB CONTENTION">
+            {v.tempdb_contention ? (() => {
+              const t = v.tempdb_contention;
+              const tone: Tone = t.pagelatch_waiters === 0 ? undefined : t.pagelatch_waiters >= 5 ? "err" : "warn";
+              return (
+                <>
+                  <VitalRow label="PFS page waiters" value={fmtInt(t.pfs_waiters)} tone={t.pfs_waiters > 0 ? "warn" : undefined} />
+                  <VitalRow label="GAM page waiters" value={fmtInt(t.gam_waiters)} tone={t.gam_waiters > 0 ? "warn" : undefined} />
+                  <VitalRow label="SGAM page waiters" value={fmtInt(t.sgam_waiters)} tone={t.sgam_waiters > 0 ? "warn" : undefined} />
+                  <VitalRow label="Total contention wait" value={fmtMs(t.total_wait_ms)} tone={tone} />
+                  <VitalRow label="tempdb data files" value={fmtInt(t.tempdb_data_files)} />
+                </>
+              );
+            })() : <VitalNone />}
+          </VitalCard>
+
+          {/* PLAN CACHE HEALTH */}
+          <VitalCard title="PLAN CACHE HEALTH">
+            {v.plan_cache ? (() => {
+              const p = v.plan_cache;
+              // A cache dominated by single-use ad-hoc plans wastes memory and
+              // hints at missing parameterization.
+              const pctCount = p.total_plan_count > 0 ? (p.single_use_plan_count / p.total_plan_count) * 100 : 0;
+              const pctSize = p.total_size_kb > 0 ? (p.single_use_size_kb / p.total_size_kb) * 100 : 0;
+              const tone: Tone = pctSize >= 50 ? "err" : pctSize >= 25 ? "warn" : undefined;
+              return (
+                <>
+                  <VitalRow label="Single-use plans" value={`${fmtInt(p.single_use_plan_count)} of ${fmtInt(p.total_plan_count)}`} />
+                  <VitalRow label="Single-use share (count)" value={fmtPct(pctCount)} />
+                  <VitalRow label="Single-use cache size" value={fmtKB(p.single_use_size_kb)} />
+                  <VitalRow label="Single-use share (size)" value={fmtPct(pctSize)} tone={tone} />
+                  <VitalRow label="Total cache size" value={fmtKB(p.total_size_kb)} />
+                </>
+              );
+            })() : <VitalNone />}
+          </VitalCard>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VitalCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="dv-card">
+      <div className="dv-card-h">{title}</div>
+      <div className="dv-card-body">{children}</div>
+    </div>
+  );
+}
+
+function VitalRow({ label, value, tone }: { label: string; value: string; tone?: Tone }) {
+  return (
+    <div className="dv-row">
+      <span className="dv-row-l">{label}</span>
+      <span className={`dv-row-v${tone ? ` tone-${tone}` : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+function VitalNone({ label }: { label?: string }) {
+  return <div className="dv-none">{label ?? "Not captured in the latest sample."}</div>;
 }
 
 /**

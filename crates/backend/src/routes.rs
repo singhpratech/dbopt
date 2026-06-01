@@ -24,6 +24,7 @@ pub fn router() -> Router {
         .route("/health/issue/detail", post(crate::health::enrichment::issue_detail))
         .route("/dmv", post(dmv))
         .route("/monitor/live", post(monitor_live))
+        .route("/monitor/vitals", post(monitor_vitals))
         .route("/explain", post(explain))
         .route("/plan/actual", post(plan_actual))
         .route("/validate", post(validate))
@@ -146,6 +147,19 @@ async fn monitor_live(Json(req): Json<ConnectReq>) -> impl IntoResponse {
         Ok(m) => (StatusCode::OK, Json(m)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
+}
+
+/// POST /api/monitor/vitals — the most-recent DEEP-VITALS sample of each
+/// surface (CPU pressure, memory headroom, per-file I/O latency, tempdb
+/// allocation contention, plan-cache health) that the background monitor has
+/// persisted for the connected server.
+///
+/// Read-only: opens the sentinel SQLite store and reads it back — it never
+/// touches the live server. If the store doesn't exist yet, or the server has
+/// never been monitored, it returns 200 with `has_data: false` (an honest empty
+/// state, NOT an error) so the UI can prompt the user to start the monitor.
+async fn monitor_vitals(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+    (StatusCode::OK, Json(sentinel_api::deep_vitals(&req.server))).into_response()
 }
 
 async fn databases(Json(req): Json<ConnectReq>) -> impl IntoResponse {

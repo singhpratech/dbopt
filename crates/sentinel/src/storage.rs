@@ -52,6 +52,14 @@ impl TimeRange {
     fn to_ms(&self) -> i64 { self.to.timestamp_millis() }
 }
 
+/// Convert a stored `captured_at` (unix epoch millis) back to a UTC timestamp,
+/// the inverse of the `timestamp_millis()` we persist with. An out-of-range
+/// value (never produced by our own writers) falls back to `now` rather than
+/// panicking — mirrors the same defensive conversion in `health::enrichment`.
+fn ms_to_dt(ms: i64) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
+}
+
 /// One row of "top queries by duration" — what the report uses.
 #[derive(Debug, Clone, Serialize)]
 pub struct TopQueryRow {
@@ -713,7 +721,181 @@ impl Storage {
         Ok(())
     }
 
-    /// Most recent per-file cumulative IO snapshot for this instance, keyed by
+    // ---------- Deep vitals read-back -------------------------------------
+    // The live "DEEP VITALS" surface reads the most-recent persisted sample of
+    // each surface for one instance. Each returns `None`/empty when nothing has
+    // been captured yet (honest empty state, never an error).
+
+    /// Read-only instance lookup by SERVER name. Unlike `ensure_instance` this
+    /// NEVER creates a row — a read of vitals for an unmonitored server returns
+    /// `None` so the caller can answer "no data yet" instead of conjuring an
+    /// empty instance. We match on `server` (not the unique `name`) because the
+    /// live UI knows the server it is connected to, not the daemon's label.
+    pub fn get_instance_id(&self, server: &str) -> Option<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT id FROM instances WHERE server = ?1 ORDER BY id DESC LIMIT 1",
+            [server],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Most-recent CPU/scheduler-pressure sample for this instance.
+    pub fn latest_cpu_pressure(&self, instance_id: i64) -> Option<CpuPressureRow> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT captured_at, online_schedulers, runnable_tasks, work_queue,
+                    current_workers, active_workers, pending_disk_io
+             FROM cpu_pressure_snapshot
+             WHERE instance_id = ?1
+             ORDER BY captured_at DESC LIMIT 1",
+            [instance_id],
+            |r| {
+                Ok(CpuPressureRow {
+                    captured_at: ms_to_dt(r.get(0)?),
+                    online_schedulers: r.get(1)?,
+                    runnable_tasks: r.get(2)?,
+                    work_queue: r.get(3)?,
+                    current_workers: r.get(4)?,
+                    active_workers: r.get(5)?,
+                    pending_disk_io: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Most-recent memory-headroom sample for this instance.
+    pub fn latest_memory_headroom(&self, instance_id: i64) -> Option<MemoryHeadroomRow> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT captured_at, page_life_expectancy, pending_memory_grants,
+                    granted_memory_kb, target_server_memory_kb, total_server_memory_kb
+             FROM memory_headroom_snapshot
+             WHERE instance_id = ?1
+             ORDER BY captured_at DESC LIMIT 1",
+            [instance_id],
+            |r| {
+                Ok(MemoryHeadroomRow {
+                    captured_at: ms_to_dt(r.get(0)?),
+                    page_life_expectancy: r.get(1)?,
+                    pending_memory_grants: r.get(2)?,
+                    granted_memory_kb: r.get(3)?,
+                    target_server_memory_kb: r.get(4)?,
+                    total_server_memory_kb: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Every per-file IO-latency row at the MOST-RECENT captured_at for this
+    /// instance (one tick captures one row per active file). Empty when none.
+    pub fn latest_io_latency(&self, instance_id: i64) -> Vec<IoLatencyRow> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        // Find the newest capture instant, then return every file row at it.
+        let latest_ms: Option<i64> = lock
+            .query_row(
+                "SELECT MAX(captured_at) FROM io_latency_delta WHERE instance_id = ?1",
+                [instance_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        let Some(at) = latest_ms else { return Vec::new() };
+        let mut stmt = match lock.prepare(
+            "SELECT captured_at, database_name, file_logical_name, file_type,
+                    reads_delta, writes_delta, read_stall_ms_delta, write_stall_ms_delta,
+                    avg_read_latency_ms, avg_write_latency_ms
+             FROM io_latency_delta
+             WHERE instance_id = ?1 AND captured_at = ?2
+             ORDER BY (avg_read_latency_ms + avg_write_latency_ms) DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![instance_id, at], |r| {
+            Ok(IoLatencyRow {
+                captured_at: ms_to_dt(r.get(0)?),
+                database_name: r.get(1)?,
+                file_logical_name: r.get(2)?,
+                file_type: r.get(3)?,
+                reads_delta: r.get(4)?,
+                writes_delta: r.get(5)?,
+                read_stall_ms_delta: r.get(6)?,
+                write_stall_ms_delta: r.get(7)?,
+                avg_read_latency_ms: r.get(8)?,
+                avg_write_latency_ms: r.get(9)?,
+            })
+        });
+        match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Most-recent tempdb allocation-page contention sample for this instance.
+    pub fn latest_tempdb_contention(&self, instance_id: i64) -> Option<TempdbContentionRow> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT captured_at, pagelatch_waiters, pfs_waiters, gam_waiters,
+                    sgam_waiters, total_wait_ms, tempdb_data_files
+             FROM tempdb_contention_snapshot
+             WHERE instance_id = ?1
+             ORDER BY captured_at DESC LIMIT 1",
+            [instance_id],
+            |r| {
+                Ok(TempdbContentionRow {
+                    captured_at: ms_to_dt(r.get(0)?),
+                    pagelatch_waiters: r.get(1)?,
+                    pfs_waiters: r.get(2)?,
+                    gam_waiters: r.get(3)?,
+                    sgam_waiters: r.get(4)?,
+                    total_wait_ms: r.get(5)?,
+                    tempdb_data_files: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Most-recent plan-cache-health sample for this instance.
+    pub fn latest_plan_cache(&self, instance_id: i64) -> Option<PlanCacheRow> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT captured_at, single_use_plan_count, single_use_size_kb,
+                    total_plan_count, total_size_kb
+             FROM plan_cache_snapshot
+             WHERE instance_id = ?1
+             ORDER BY captured_at DESC LIMIT 1",
+            [instance_id],
+            |r| {
+                Ok(PlanCacheRow {
+                    captured_at: ms_to_dt(r.get(0)?),
+                    single_use_plan_count: r.get(1)?,
+                    single_use_size_kb: r.get(2)?,
+                    total_plan_count: r.get(3)?,
+                    total_size_kb: r.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Most-recent per-file cumulative IO snapshot for this instance, keyed by
     /// (database_name, file_logical_name) → (num_of_reads, num_of_writes,
     /// io_stall_read_ms, io_stall_write_ms). The IO-latency poller diffs the
     /// current cumulative reading against this to derive per-window deltas.
@@ -1899,6 +2081,96 @@ mod tests {
             .query_row("SELECT avg_read_latency_ms FROM io_latency_delta", [], |r| r.get(0))
             .expect("avg");
         assert!((avg - 9.0).abs() < 1e-9, "io latency round-trips, got {avg}");
+    }
+
+    /// Read-back path: insert one sample on each deep-vitals surface, then read
+    /// the most-recent of each through the new `latest_*` methods and the
+    /// read-only `get_instance_id` lookup. This is what the live "DEEP VITALS"
+    /// API surfaces, so a round-trip here proves the column mapping + ordering.
+    #[test]
+    fn vitals_read_back_latest() {
+        let s = Storage::open_in_memory().expect("open");
+        let conn = ConnectionInfo {
+            server: "vitals-host,1433".into(),
+            database: Some("master".into()),
+            user: Some("sa".into()),
+            password: Some("x".into()),
+            trust_cert: Some(true),
+        };
+        let id = s.ensure_instance("vitals-test", &conn).expect("ensure");
+
+        // Read-only lookup resolves by SERVER and never creates a row.
+        assert_eq!(s.get_instance_id("vitals-host,1433"), Some(id));
+        assert!(s.get_instance_id("not-monitored,1433").is_none());
+        let before = s.instance_count().expect("count");
+        let _ = s.get_instance_id("still-not-monitored,1433");
+        assert_eq!(s.instance_count().expect("count"), before, "read must not create instances");
+
+        // Nothing captured yet → every surface is empty.
+        assert!(s.latest_cpu_pressure(id).is_none());
+        assert!(s.latest_io_latency(id).is_empty());
+
+        let older = Utc::now() - chrono::Duration::minutes(5);
+        let newer = Utc::now() - chrono::Duration::minutes(1);
+
+        // Two CPU samples — the newer one must win.
+        s.insert_cpu_pressure(id, &CpuPressureRow {
+            captured_at: older, online_schedulers: 8, runnable_tasks: 0, work_queue: 0,
+            current_workers: 20, active_workers: 5, pending_disk_io: 0,
+        }).expect("cpu old");
+        s.insert_cpu_pressure(id, &CpuPressureRow {
+            captured_at: newer, online_schedulers: 8, runnable_tasks: 7, work_queue: 2,
+            current_workers: 40, active_workers: 12, pending_disk_io: 3,
+        }).expect("cpu new");
+        let cpu = s.latest_cpu_pressure(id).expect("cpu latest");
+        assert_eq!(cpu.runnable_tasks, 7, "most-recent CPU sample wins");
+        assert_eq!(cpu.work_queue, 2);
+
+        s.insert_memory_headroom(id, &MemoryHeadroomRow {
+            captured_at: newer, page_life_expectancy: 850, pending_memory_grants: 1,
+            granted_memory_kb: 4096, target_server_memory_kb: 8_000_000, total_server_memory_kb: 7_900_000,
+        }).expect("mem");
+        let mem = s.latest_memory_headroom(id).expect("mem latest");
+        assert_eq!(mem.page_life_expectancy, 850);
+        assert_eq!(mem.pending_memory_grants, 1);
+
+        // IO: two files at the SAME (newest) instant + one stale file earlier.
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: older, database_name: "db".into(), file_logical_name: "stale".into(),
+            file_type: "ROWS".into(), reads_delta: 1, writes_delta: 1, read_stall_ms_delta: 1,
+            write_stall_ms_delta: 1, avg_read_latency_ms: 1.0, avg_write_latency_ms: 1.0,
+        }).expect("io stale");
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: newer, database_name: "db".into(), file_logical_name: "data".into(),
+            file_type: "ROWS".into(), reads_delta: 100, writes_delta: 10, read_stall_ms_delta: 900,
+            write_stall_ms_delta: 50, avg_read_latency_ms: 9.0, avg_write_latency_ms: 5.0,
+        }).expect("io data");
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: newer, database_name: "db".into(), file_logical_name: "log".into(),
+            file_type: "LOG".into(), reads_delta: 0, writes_delta: 200, read_stall_ms_delta: 0,
+            write_stall_ms_delta: 400, avg_read_latency_ms: 0.0, avg_write_latency_ms: 2.0,
+        }).expect("io log");
+        let io = s.latest_io_latency(id);
+        assert_eq!(io.len(), 2, "only the two files at the newest instant, not the stale one");
+        // Ordered by combined latency DESC — the high-read 'data' file leads.
+        assert_eq!(io[0].file_logical_name, "data");
+        assert!((io[0].avg_read_latency_ms - 9.0).abs() < 1e-9);
+
+        s.insert_tempdb_contention(id, &TempdbContentionRow {
+            captured_at: newer, pagelatch_waiters: 4, pfs_waiters: 3, gam_waiters: 1,
+            sgam_waiters: 0, total_wait_ms: 220, tempdb_data_files: 1,
+        }).expect("tempdb");
+        let td = s.latest_tempdb_contention(id).expect("tempdb latest");
+        assert_eq!(td.pfs_waiters, 3);
+        assert_eq!(td.tempdb_data_files, 1);
+
+        s.insert_plan_cache(id, &PlanCacheRow {
+            captured_at: newer, single_use_plan_count: 6000, single_use_size_kb: 300_000,
+            total_plan_count: 7000, total_size_kb: 400_000,
+        }).expect("plan");
+        let pc = s.latest_plan_cache(id).expect("plan latest");
+        assert_eq!(pc.single_use_plan_count, 6000);
+        assert_eq!(pc.total_plan_count, 7000);
     }
 
     /// The cumulative per-file IO snapshot used by the IO-latency delta poller

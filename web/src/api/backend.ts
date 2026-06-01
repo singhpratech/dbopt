@@ -294,6 +294,64 @@ export async function liveMetrics(info: ConnectionInfo): Promise<LiveMetrics> {
   return r.json() as Promise<LiveMetrics>;
 }
 
+// ---- Deep vitals (persisted scheduler/memory/IO/tempdb/plan-cache) -------
+// Read-back of the background monitor's deepest telemetry. Field names mirror
+// the persisted row structs (snake_case). Any surface can be null when the
+// monitor hasn't captured it yet; io_latency is [] in that case.
+export type CpuPressure = {
+  captured_at: string;
+  online_schedulers: number; runnable_tasks: number; work_queue: number;
+  current_workers: number; active_workers: number; pending_disk_io: number;
+};
+export type MemoryHeadroom = {
+  captured_at: string;
+  page_life_expectancy: number; pending_memory_grants: number; granted_memory_kb: number;
+  target_server_memory_kb: number; total_server_memory_kb: number;
+};
+export type IoLatencyFile = {
+  captured_at: string;
+  database_name: string; file_logical_name: string; file_type: string;
+  reads_delta: number; writes_delta: number; read_stall_ms_delta: number; write_stall_ms_delta: number;
+  avg_read_latency_ms: number; avg_write_latency_ms: number;
+};
+export type TempdbContention = {
+  captured_at: string;
+  pagelatch_waiters: number; pfs_waiters: number; gam_waiters: number; sgam_waiters: number;
+  total_wait_ms: number; tempdb_data_files: number;
+};
+export type PlanCacheHealth = {
+  captured_at: string;
+  single_use_plan_count: number; single_use_size_kb: number;
+  total_plan_count: number; total_size_kb: number;
+};
+export type DeepVitals = {
+  has_data: boolean;
+  /** Newest captured_at across surfaces (epoch ms), or null when empty. */
+  captured_at: number | null;
+  cpu_pressure: CpuPressure | null;
+  memory_headroom: MemoryHeadroom | null;
+  io_latency: IoLatencyFile[];
+  tempdb_contention: TempdbContention | null;
+  plan_cache: PlanCacheHealth | null;
+};
+
+/** The most-recent deep-vitals sample of each surface the background monitor
+ *  has persisted for this server. Read-only — reads the local telemetry store,
+ *  never the live server. Returns `has_data:false` (200, not an error) when the
+ *  monitor hasn't captured anything for this server yet. */
+export async function fetchVitals(info: ConnectionInfo): Promise<DeepVitals> {
+  const r = await fetch(`${BASE}/monitor/vitals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(info),
+  });
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error ?? `vitals fetch failed (${r.status})`);
+  }
+  return r.json() as Promise<DeepVitals>;
+}
+
 export async function pullDmv(info: ConnectionInfo) {
   const r = await fetch(`${BASE}/dmv`, {
     method: "POST",

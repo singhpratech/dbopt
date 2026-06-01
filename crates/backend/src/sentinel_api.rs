@@ -285,6 +285,70 @@ pub fn monitoring_age_secs() -> Option<i64> {
     Storage::open(&path).ok().and_then(|s| s.monitoring_age_secs())
 }
 
+/// Read the most-recent DEEP-VITALS sample of each surface for `server` out of
+/// the sentinel store, shaped for the live UI's "DEEP VITALS" panel.
+///
+/// Honest empty state, never an error: if the store doesn't exist yet, or the
+/// server has never been monitored (no instance row), every surface is `null`
+/// (I/O latency `[]`) and `has_data` is `false`. `captured_at` is the newest
+/// instant across all surfaces present (epoch millis), or `null` when empty —
+/// the UI shows it as "as of …".
+pub fn deep_vitals(server: &str) -> serde_json::Value {
+    let empty = || {
+        serde_json::json!({
+            "has_data": false,
+            "captured_at": serde_json::Value::Null,
+            "cpu_pressure": serde_json::Value::Null,
+            "memory_headroom": serde_json::Value::Null,
+            "io_latency": [],
+            "tempdb_contention": serde_json::Value::Null,
+            "plan_cache": serde_json::Value::Null,
+        })
+    };
+
+    let path = SentinelConfig::default_db_path();
+    let storage = match Storage::open(&path) {
+        Ok(s) => s,
+        Err(_) => return empty(), // store not created yet → not an error
+    };
+    let Some(instance_id) = storage.get_instance_id(server) else {
+        return empty(); // server never monitored → not an error
+    };
+
+    let cpu = storage.latest_cpu_pressure(instance_id);
+    let mem = storage.latest_memory_headroom(instance_id);
+    let io = storage.latest_io_latency(instance_id);
+    let tempdb = storage.latest_tempdb_contention(instance_id);
+    let plan = storage.latest_plan_cache(instance_id);
+
+    // Newest captured_at across whichever surfaces have data (millis).
+    let captured_at_ms = [
+        cpu.as_ref().map(|r| r.captured_at.timestamp_millis()),
+        mem.as_ref().map(|r| r.captured_at.timestamp_millis()),
+        io.first().map(|r| r.captured_at.timestamp_millis()),
+        tempdb.as_ref().map(|r| r.captured_at.timestamp_millis()),
+        plan.as_ref().map(|r| r.captured_at.timestamp_millis()),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+
+    let has_data =
+        cpu.is_some() || mem.is_some() || !io.is_empty() || tempdb.is_some() || plan.is_some();
+
+    // The row structs derive Serialize, so each maps straight to JSON; the field
+    // names match the storage row structs (snake_case), which the UI consumes.
+    serde_json::json!({
+        "has_data": has_data,
+        "captured_at": captured_at_ms,
+        "cpu_pressure": cpu,
+        "memory_headroom": mem,
+        "io_latency": io,
+        "tempdb_contention": tempdb,
+        "plan_cache": plan,
+    })
+}
+
 pub fn build_report(window: TimeRange) -> WeeklyReport {
     let path = SentinelConfig::default_db_path();
     match Storage::open(&path) {
