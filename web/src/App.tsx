@@ -12,6 +12,7 @@ import { ProvidersPanel } from "./components/ProvidersPanel";
 import { LlmChat } from "./components/LlmChat";
 import { AiLogs } from "./components/AiLogs";
 import { SentinelView } from "./components/SentinelView";
+import { WorkloadPanel } from "./components/WorkloadPanel";
 import { AnalysisHistory } from "./components/AnalysisHistory";
 import { AdvisorPanel } from "./components/AdvisorPanel";
 import { HealthOverview } from "./components/HealthOverview";
@@ -61,6 +62,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGrou
   { key: "connection", glyph: "⌬", label: "Connection", group: "START" },
   // OPERATE — the live, prescriptive, audit surfaces.
   { key: "sentinel",   glyph: "◉", label: "WATCH",   group: "OPERATE", dba: true },
+  { key: "workload",   glyph: "⧗", label: "WORKLOAD", group: "OPERATE", dba: true },
   { key: "advisor",    glyph: "✦", label: "ADVISE",  group: "OPERATE", dba: true },
   { key: "history",    glyph: "⌖", label: "RUNS",    group: "OPERATE" },
   { key: "logs",       glyph: "⎯", label: "LOGS",    group: "OPERATE", dba: true },
@@ -913,6 +915,15 @@ export function App() {
         {ui.workspace === "sentinel" && (
           <Workspace title="Sentinel" subtitle="live pulse · continuous monitoring · weekly pain report">
             <SentinelView
+              conn={conn}
+              onAnalyzeSql={(sql) => setUi({ ...ui, draft_sql: sql, draft_plan: "", workspace: "analyze" })}
+            />
+          </Workspace>
+        )}
+
+        {ui.workspace === "workload" && (
+          <Workspace title="Workload" subtitle="slowest queries from the engine's captured history · send any to ANALYZE">
+            <WorkloadPanel
               conn={conn}
               onAnalyzeSql={(sql) => setUi({ ...ui, draft_sql: sql, draft_plan: "", workspace: "analyze" })}
             />

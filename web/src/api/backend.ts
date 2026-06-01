@@ -346,6 +346,30 @@ export async function qstoreStatus(info: ConnectionInfo): Promise<QStoreStatus> 
   return json as QStoreStatus;
 }
 
+export type SlowQuery = {
+  query_id: number;
+  sql_text: string;
+  executions: number;
+  avg_duration_ms: number;
+  max_duration_ms: number;
+  avg_cpu_ms: number;
+  avg_logical_reads: number;
+};
+
+/** Top long-running queries from the engine's captured workload history,
+ *  ranked by average duration. Read-only telemetry: reads the engine's
+ *  persisted query stats only — never executes the queries or reads table rows. */
+export async function qstoreTop(info: ConnectionInfo, limit = 25): Promise<SlowQuery[]> {
+  const r = await fetch(`${BASE}/qstore/top`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...info, limit }),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((json as any).error ?? `workload query failed (${r.status})`);
+  return ((json as any).queries ?? []) as SlowQuery[];
+}
+
 /** Set the connected DB's Query Store capture mode (runs DDL — caller must
  *  preview + confirm first). mode is allowlisted server-side to AUTO|ALL|NONE. */
 export async function qstoreSetCapture(info: ConnectionInfo, mode: "AUTO" | "ALL" | "NONE"): Promise<{ ok: boolean; message?: string }> {

@@ -228,7 +228,7 @@ export type Theme = "dark" | "light";
 export type Mode = "developer" | "dba";
 
 export interface UiPrefs {
-  workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "history" | "advisor" | "settings";
+  workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "workload" | "history" | "advisor" | "settings";
   server_version: 2019 | 2022 | 2025;
   theme: Theme;
   mode: Mode;
