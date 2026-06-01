@@ -6,6 +6,7 @@ import type {
   LiveMetrics,
   LiveSession,
   DeepVitals,
+  VitalPoint,
   FiredAlert,
   AlertConfig,
   AlertRule,
@@ -387,6 +388,16 @@ type Tone = "err" | "warn" | undefined;
 function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
   const v = vitals;
   const captured = v?.captured_at ?? null;
+  // The backend always sends `series`, but guard against a stale/older response
+  // so a missing trend object can never crash the panel — every series is just
+  // an empty list, which the Sparkline renders as "building trend…".
+  const series = v?.series ?? {
+    cpu_runnable_tasks: [],
+    memory_ple: [],
+    plan_cache_single_use: [],
+    tempdb_total_waiters: [],
+    io_worst_latency_ms: [],
+  };
 
   return (
     <div className="live-section">
@@ -404,7 +415,18 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
       ) : (
         <div className="dv-grid">
           {/* CPU PRESSURE */}
-          <VitalCard title="CPU PRESSURE">
+          <VitalCard
+            title="CPU PRESSURE"
+            spark={
+              <Sparkline
+                points={series.cpu_runnable_tasks}
+                fmt={(n) => fmtInt(n)}
+                unit="tasks waiting"
+                color="var(--chart-cpu)"
+                band={expectedBand(series.cpu_runnable_tasks)}
+              />
+            }
+          >
             {v.cpu_pressure ? (() => {
               const c = v.cpu_pressure;
               // Runnable tasks waiting on a CPU, relative to online schedulers,
@@ -424,7 +446,18 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
           </VitalCard>
 
           {/* MEMORY HEADROOM */}
-          <VitalCard title="MEMORY HEADROOM">
+          <VitalCard
+            title="MEMORY HEADROOM"
+            spark={
+              <Sparkline
+                points={series.memory_ple}
+                fmt={(n) => `${fmtInt(n)}s`}
+                unit="PLE"
+                color="var(--chart-batch)"
+                band={expectedBand(series.memory_ple)}
+              />
+            }
+          >
             {v.memory_headroom ? (() => {
               const mh = v.memory_headroom;
               // Low page-life-expectancy = buffer-pool churn; any pending grant
@@ -446,7 +479,18 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
           </VitalCard>
 
           {/* I/O LATENCY */}
-          <VitalCard title="I/O LATENCY">
+          <VitalCard
+            title="I/O LATENCY"
+            spark={
+              <Sparkline
+                points={series.io_worst_latency_ms}
+                fmt={(n) => fmtMs(n)}
+                unit="worst/file"
+                color="var(--chart-io)"
+                band={expectedBand(series.io_worst_latency_ms)}
+              />
+            }
+          >
             {v.io_latency.length > 0 ? (
               <div className="dv-iotable">
                 <div className="dv-io-head">
@@ -472,7 +516,18 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
           </VitalCard>
 
           {/* TEMPDB CONTENTION */}
-          <VitalCard title="TEMPDB CONTENTION">
+          <VitalCard
+            title="TEMPDB CONTENTION"
+            spark={
+              <Sparkline
+                points={series.tempdb_total_waiters}
+                fmt={(n) => fmtInt(n)}
+                unit="page waiters"
+                color="var(--chart-wait)"
+                band={expectedBand(series.tempdb_total_waiters)}
+              />
+            }
+          >
             {v.tempdb_contention ? (() => {
               const t = v.tempdb_contention;
               const tone: Tone = t.pagelatch_waiters === 0 ? undefined : t.pagelatch_waiters >= 5 ? "err" : "warn";
@@ -489,7 +544,18 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
           </VitalCard>
 
           {/* PLAN CACHE HEALTH */}
-          <VitalCard title="PLAN CACHE HEALTH">
+          <VitalCard
+            title="PLAN CACHE HEALTH"
+            spark={
+              <Sparkline
+                points={series.plan_cache_single_use}
+                fmt={(n) => fmtInt(n)}
+                unit="single-use plans"
+                color="var(--chart-cpu)"
+                band={expectedBand(series.plan_cache_single_use)}
+              />
+            }
+          >
             {v.plan_cache ? (() => {
               const p = v.plan_cache;
               // A cache dominated by single-use ad-hoc plans wastes memory and
@@ -514,10 +580,20 @@ function DeepVitalsPanel({ vitals }: { vitals: DeepVitals | null }) {
   );
 }
 
-function VitalCard({ title, children }: { title: string; children: React.ReactNode }) {
+function VitalCard({
+  title,
+  children,
+  spark,
+}: {
+  title: string;
+  children: React.ReactNode;
+  /** Optional inline-SVG recent-trend sparkline rendered under the title. */
+  spark?: React.ReactNode;
+}) {
   return (
     <div className="dv-card">
       <div className="dv-card-h">{title}</div>
+      {spark && <div className="dv-card-spark">{spark}</div>}
       <div className="dv-card-body">{children}</div>
     </div>
   );
@@ -813,4 +889,117 @@ function LiveChart({
       </svg>
     </div>
   );
+}
+
+/**
+ * Inline-SVG sparkline for a deep-vital's recent trend. Dependency-free (no
+ * chart library): an area+line over the persisted history, auto-scaled to the
+ * window's own range so flat series don't look noisy. Each point carries a
+ * <title> so hovering shows the exact value + timestamp (the X-axis is time,
+ * the Y-axis the native unit). Anomaly points (out-of-band) get a marker dot.
+ * Renders nothing when there is no trend yet — the card's value still shows.
+ */
+function Sparkline({
+  points,
+  fmt,
+  unit,
+  color,
+  band,
+}: {
+  /** [captured_at_ms, value], oldest→newest (freshest last). */
+  points: VitalPoint[];
+  /** Formats a value for the hover tooltip (native unit). */
+  fmt: (v: number) => string;
+  /** Short unit label shown after the value range (e.g. "tasks", "s", "ms"). */
+  unit?: string;
+  color: string;
+  /** Optional "expected" band [lo, hi] from this instance's own history; points
+   *  outside it are flagged as anomalies with a marker. */
+  band?: [number, number] | null;
+}) {
+  const n = points.length;
+  if (n === 0) {
+    return <div className="dv-spark-empty">building trend…</div>;
+  }
+  const W = 132;
+  const H = 26;
+  const pad = 2;
+  const vals = points.map((p) => p[1]);
+  const lo = Math.min(...vals);
+  const hi = Math.max(...vals);
+  const span = hi - lo || 1; // flat series → flat mid-line, never /0
+  const x = (i: number) => (n <= 1 ? W - pad : pad + (i / (n - 1)) * (W - pad * 2));
+  const y = (v: number) => H - pad - ((v - lo) / span) * (H - pad * 2);
+  const line = points.map((p, i) => `${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(" ");
+  const area =
+    n > 1
+      ? `M ${x(0).toFixed(1)},${(H - pad).toFixed(1)} L ${points
+          .map((p, i) => `${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`)
+          .join(" L ")} L ${x(n - 1).toFixed(1)},${(H - pad).toFixed(1)} Z`
+      : "";
+  const lastX = x(n - 1);
+  const lastY = y(points[n - 1][1]);
+  const isAnom = (v: number) => (band ? v < band[0] || v > band[1] : false);
+  const rangeLabel = lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`;
+
+  return (
+    <div className="dv-spark" style={{ ["--c" as any]: color }}>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="dv-spark-svg" aria-hidden="true">
+        {/* shaded expected band, if we have one */}
+        {band && (
+          <rect
+            x={0}
+            width={W}
+            y={Math.min(y(band[0]), y(band[1]))}
+            height={Math.abs(y(band[0]) - y(band[1])) || 1}
+            className="dv-spark-band"
+          />
+        )}
+        {n > 1 && <path d={area} className="dv-spark-area" />}
+        {n > 1 && <polyline points={line} className="dv-spark-line" />}
+        {/* anomaly markers + an always-on leading dot */}
+        {points.map((p, i) =>
+          isAnom(p[1]) ? (
+            <circle key={i} cx={x(i)} cy={y(p[1])} r={2} className="dv-spark-anom">
+              <title>{`${fmt(p[1])} · ${fmtAgo(p[0])} · out of expected band`}</title>
+            </circle>
+          ) : null,
+        )}
+        <circle cx={lastX} cy={lastY} r={1.8} className="dv-spark-dot">
+          <title>{`${fmt(points[n - 1][1])} · ${fmtAgo(points[n - 1][0])}`}</title>
+        </circle>
+        {/* invisible wide hit-targets so every point is hoverable */}
+        {points.map((p, i) => (
+          <rect
+            key={`h${i}`}
+            x={x(i) - (W / n) / 2}
+            width={W / n}
+            y={0}
+            height={H}
+            className="dv-spark-hit"
+          >
+            <title>{`${fmt(p[1])} · ${fmtAgo(p[0])}`}</title>
+          </rect>
+        ))}
+      </svg>
+      <div className="dv-spark-meta">
+        <span className="dv-spark-range">{rangeLabel}{unit ? ` ${unit}` : ""}</span>
+        <span className="dv-spark-n">{n} pts</span>
+      </div>
+    </div>
+  );
+}
+
+/** Build a symmetric "expected" band [mean−k·σ, mean+k·σ] from a series' own
+ *  recent history — a lightweight stand-in for the durable Welford baseline so
+ *  out-of-band points pop on the sparkline. `null` when there's too little
+ *  history (< 4 pts) or no spread, so we never invent a band. */
+function expectedBand(points: VitalPoint[], k = 2): [number, number] | null {
+  if (points.length < 4) return null;
+  const v = points.map((p) => p[1]);
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  const variance = v.reduce((a, b) => a + (b - mean) ** 2, 0) / (v.length - 1);
+  const sd = Math.sqrt(variance);
+  if (!(sd > 0)) return null;
+  return [mean - k * sd, mean + k * sd];
 }

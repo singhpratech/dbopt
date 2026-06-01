@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
-import type { Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
+import type { BaselineTrend, Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
 import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
@@ -158,6 +158,9 @@ export function HealthOverview({
             score={live ? report!.efficiency_score : null}
             provisional={provisional}
           />
+          {/* Today vs this instance's OWN rolling baseline — the trend behind the
+              grade. "Baseline forming" until a workload accumulates a baseline. */}
+          {live && <BaselineTrendBadge trend={report!.baseline_trend} />}
         </div>
         <div className="health-head-row2">
           <div className="health-head-meta">
@@ -497,6 +500,50 @@ function GradeBlock({
             sublabel
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "Today vs rolling baseline" badge beside the two grades. It reads the durable
+ * per-query baseline the monitor accumulates (Welford mean/variance per query)
+ * and shows how the current workload compares to this instance's OWN normal —
+ * a percent delta plus a z-score band (steady / elevated / regressed).
+ *
+ * Honest empty state: until a query has a mature baseline the backend sends no
+ * trend, and we render "Baseline forming" rather than a fabricated number.
+ */
+function BaselineTrendBadge({ trend }: { trend?: BaselineTrend }) {
+  if (!trend) {
+    return (
+      <div className="health-baseline forming" title="The trend builds as a workload runs; each query accumulates a rolling mean/variance baseline. Until one is mature, there is nothing honest to compare against yet.">
+        <div className="health-baseline-label">vs baseline</div>
+        <div className="health-baseline-val forming">Baseline forming</div>
+        <div className="health-baseline-sub">needs a workload to compare</div>
+      </div>
+    );
+  }
+  const up = trend.delta_pct >= 0;
+  const sign = up ? "+" : "";
+  // Band drives the color: steady (in-band), elevated (≥1.5σ), regressed (≥3σ).
+  const bandClass =
+    trend.band === "regressed" ? "tone-err" : trend.band === "elevated" ? "tone-warn" : "tone-ok";
+  const bandWord =
+    trend.band === "regressed" ? "regressed" : trend.band === "elevated" ? "elevated" : "steady";
+  const title =
+    `Across ${trend.tracked_queries} tracked ${trend.tracked_queries === 1 ? "query" : "queries"} with a mature baseline: ` +
+    `now ~${Math.round(trend.current_mean_ms)} ms/exec vs a baseline of ~${Math.round(trend.baseline_mean_ms)} ms/exec ` +
+    `(worst z-score ${trend.worst_z_score.toFixed(1)}).`;
+  return (
+    <div className={`health-baseline ${bandClass}`} title={title}>
+      <div className="health-baseline-label">vs baseline</div>
+      <div className={`health-baseline-val ${bandClass}`}>
+        {sign}{trend.delta_pct.toFixed(trend.delta_pct >= 100 || trend.delta_pct <= -100 ? 0 : 1)}%
+        <span className="health-baseline-band">{bandWord}</span>
+      </div>
+      <div className="health-baseline-sub">
+        {Math.round(trend.current_mean_ms)} vs {Math.round(trend.baseline_mean_ms)} ms/exec
       </div>
     </div>
   );

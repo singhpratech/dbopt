@@ -152,6 +152,19 @@ export interface SignalSummary {
   regressed_queries: number;
 }
 
+/** "Today vs rolling baseline" trend behind the health grade, from the durable
+ *  per-query baseline. Absent (UI: "baseline forming") until a query has a
+ *  mature baseline — every value is measured, never guessed. */
+export interface BaselineTrend {
+  tracked_queries: number;
+  baseline_mean_ms: number;
+  current_mean_ms: number;
+  /** Positive = slower than this instance's own normal. */
+  delta_pct: number;
+  worst_z_score: number;
+  band: "steady" | "elevated" | "regressed";
+}
+
 export interface HealthReport {
   engine: string;
   generated_at: string;
@@ -169,6 +182,9 @@ export interface HealthReport {
   efficiency_score: number;
   efficiency_grade: string;
   is_learning: boolean;
+  /** "Today vs rolling baseline" trend behind the grade. Absent until a query
+   *  has a mature durable baseline ("baseline forming"). */
+  baseline_trend?: BaselineTrend;
   counts: SeverityCounts;
   issues: Issue[];
   signals: SignalSummary;

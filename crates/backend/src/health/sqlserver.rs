@@ -354,6 +354,28 @@ impl HealthProvider for SqlServerHealthProvider {
         let scores = score_report(&issues, &signals, monitoring_secs);
         let counts = count_severities(&issues);
 
+        // "Today vs rolling baseline" trend behind the grade, from the durable
+        // per-query baseline. `None` (UI: "baseline forming") until a query has
+        // accumulated a mature baseline — never a fabricated delta. The z-score
+        // bands map to REGRESSION_Z_SCORE_K (3σ = regressed) and a midpoint.
+        let baseline_trend = sentinel_api::health_baseline_summary(&req.server).map(|b| {
+            let band = if b.worst_z_score >= sentinel::storage::REGRESSION_Z_SCORE_K {
+                "regressed"
+            } else if b.worst_z_score >= sentinel::storage::REGRESSION_Z_SCORE_K / 2.0 {
+                "elevated"
+            } else {
+                "steady"
+            };
+            super::BaselineTrend {
+                tracked_queries: b.tracked_queries,
+                baseline_mean_ms: b.baseline_mean_ms,
+                current_mean_ms: b.current_mean_ms,
+                delta_pct: b.delta_pct,
+                worst_z_score: b.worst_z_score,
+                band: band.to_string(),
+            }
+        });
+
         Ok(HealthReport {
             engine: "sqlserver".to_string(),
             generated_at: Utc::now(),
@@ -375,6 +397,7 @@ impl HealthProvider for SqlServerHealthProvider {
             action_plan,
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
+            baseline_trend,
             counts,
             issues,
             signals,

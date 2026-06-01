@@ -57,6 +57,10 @@ pub struct HealthReport {
     /// monitor hasn't captured anything yet). Lets the UI say "monitoring for 2h"
     /// vs "7 days" instead of implying the grade is backed by long history.
     pub monitoring_age_secs: Option<i64>,
+    /// "Today vs rolling baseline" trend behind the grade, built from the durable
+    /// per-query baseline. `None` when no query has a mature baseline yet — the
+    /// UI then shows "baseline forming" rather than a fabricated delta.
+    pub baseline_trend: Option<BaselineTrend>,
     pub counts: SeverityCounts,
     pub issues: Vec<Issue>,
     pub signals: SignalSummary,
@@ -122,6 +126,27 @@ pub struct Issue {
     /// counters), `estimated` (SQL Server's own projection), or `heuristic`
     /// (rule of thumb). (Default `observed`.)
     pub confidence: String,
+}
+
+/// "Today vs rolling baseline" trend behind the health grade, derived from the
+/// durable per-query baseline ([`sentinel::storage::query_baseline`]). Every
+/// value is MEASURED — when no query has a mature baseline this whole struct is
+/// `None` on the report ("baseline forming"), never a guessed delta.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaselineTrend {
+    /// How many queries with a mature durable baseline back this trend.
+    pub tracked_queries: i64,
+    /// Mean per-query baseline duration-per-execution (ms).
+    pub baseline_mean_ms: f64,
+    /// Mean per-query latest observed duration-per-execution (ms).
+    pub current_mean_ms: f64,
+    /// Percent change of current vs baseline (positive = slower than normal).
+    pub delta_pct: f64,
+    /// Worst single-query z-score of latest-vs-baseline.
+    pub worst_z_score: f64,
+    /// `"steady" | "elevated" | "regressed"` — banded from the worst z-score so
+    /// the UI can color the badge without re-deriving the rule.
+    pub band: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

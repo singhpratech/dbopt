@@ -14,7 +14,7 @@ use axum::{
 use sentinel::{
     alerts::AlertConfig,
     report::{render_html, render_markdown, render_weekly, WeeklyReport},
-    storage::{Storage, TimeRange},
+    storage::{Storage, TimeRange, VitalMetric},
     ConnectionInfo, InstanceConfig, Sentinel, SentinelConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -321,6 +321,15 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
             "io_latency": [],
             "tempdb_contention": serde_json::Value::Null,
             "plan_cache": serde_json::Value::Null,
+            // Same shape as the populated path so the UI never special-cases a
+            // missing key — every series is just an empty list.
+            "series": {
+                "cpu_runnable_tasks": [],
+                "memory_ple": [],
+                "plan_cache_single_use": [],
+                "tempdb_total_waiters": [],
+                "io_worst_latency_ms": [],
+            },
         })
     };
 
@@ -338,6 +347,34 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
     let io = storage.latest_io_latency(instance_id);
     let tempdb = storage.latest_tempdb_contention(instance_id);
     let plan = storage.latest_plan_cache(instance_id);
+
+    // Recent trend behind each headline scalar — the sparkline source. Each is a
+    // list of [captured_at_ms, value] pairs, oldest→newest (freshest last),
+    // capped to the last `SERIES_LIMIT` captures. Empty when nothing recorded.
+    const SERIES_LIMIT: usize = 60;
+    let series = |m: VitalMetric| -> serde_json::Value {
+        serde_json::Value::Array(
+            storage
+                .recent_vital_series(instance_id, m, SERIES_LIMIT)
+                .into_iter()
+                .map(|(at, v)| serde_json::json!([at, v]))
+                .collect(),
+        )
+    };
+    let io_series = serde_json::Value::Array(
+        storage
+            .recent_io_latency_series(instance_id, SERIES_LIMIT)
+            .into_iter()
+            .map(|(at, v)| serde_json::json!([at, v]))
+            .collect(),
+    );
+    let series = serde_json::json!({
+        "cpu_runnable_tasks": series(VitalMetric::CpuRunnableTasks),
+        "memory_ple": series(VitalMetric::MemoryPle),
+        "plan_cache_single_use": series(VitalMetric::PlanCacheSingleUse),
+        "tempdb_total_waiters": series(VitalMetric::TempdbTotalWaiters),
+        "io_worst_latency_ms": io_series,
+    });
 
     // Newest captured_at across whichever surfaces have data (millis).
     let captured_at_ms = [
@@ -364,7 +401,20 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
         "io_latency": io,
         "tempdb_contention": tempdb,
         "plan_cache": plan,
+        "series": series,
     })
+}
+
+/// Read the "today vs rolling baseline" summary for `server` out of the durable
+/// query-baseline table, for the health-grade trend badge. `None` when the store
+/// doesn't exist, the server was never monitored, or no query has accumulated a
+/// mature baseline yet — the UI then renders "baseline forming" rather than a
+/// fabricated delta. Read-only; never touches the live server.
+pub fn health_baseline_summary(server: &str) -> Option<sentinel::storage::HealthBaselineSummary> {
+    let path = SentinelConfig::default_db_path();
+    let storage = Storage::open(&path).ok()?;
+    let instance_id = storage.get_instance_id(server)?;
+    storage.health_baseline_summary(instance_id)
 }
 
 pub fn build_report(window: TimeRange) -> WeeklyReport {

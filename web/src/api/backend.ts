@@ -5,6 +5,7 @@ import type { ProviderConfig } from "../store/persist";
 // alongside the fetch helper (mirrors how Recommendation lives here).
 export type {
   HealthReport,
+  BaselineTrend,
   Issue,
   IssueSeverity,
   FixAction,
@@ -324,6 +325,26 @@ export type PlanCacheHealth = {
   single_use_plan_count: number; single_use_size_kb: number;
   total_plan_count: number; total_size_kb: number;
 };
+/** One recent-trend point: [captured_at_ms, value]. Oldest→newest (freshest
+ *  last) so a sparkline's last point is the most recent reading. */
+export type VitalPoint = [number, number];
+
+/** Recent time-series behind each headline deep-vital, for inline sparklines.
+ *  Each is capped to the last ~60 captures and is `[]` until the monitor has
+ *  recorded enough samples for this server (honest empty state). */
+export type VitalSeries = {
+  /** CPU LOAD — runnable tasks queued for a scheduler. */
+  cpu_runnable_tasks: VitalPoint[];
+  /** MEMORY HEADROOM — page-life-expectancy (seconds). */
+  memory_ple: VitalPoint[];
+  /** PLAN CACHE — single-use ad-hoc plan count. */
+  plan_cache_single_use: VitalPoint[];
+  /** CONTENTION (tempdb) — allocation-page waiters per tick. */
+  tempdb_total_waiters: VitalPoint[];
+  /** I/O LATENCY — worst avg read/write latency across files per tick (ms). */
+  io_worst_latency_ms: VitalPoint[];
+};
+
 export type DeepVitals = {
   has_data: boolean;
   /** Newest captured_at across surfaces (epoch ms), or null when empty. */
@@ -333,6 +354,9 @@ export type DeepVitals = {
   io_latency: IoLatencyFile[];
   tempdb_contention: TempdbContention | null;
   plan_cache: PlanCacheHealth | null;
+  /** Recent trend per headline scalar — the sparkline source. Always present
+   *  (empty lists when the monitor hasn't captured a trend yet). */
+  series: VitalSeries;
 };
 
 /** The most-recent deep-vitals sample of each surface the background monitor

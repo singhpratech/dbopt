@@ -1077,6 +1077,169 @@ impl Storage {
         .flatten()
     }
 
+    // ---------- Deep-vitals RECENT SERIES (sparkline source) --------------
+    // The live "DEEP VITALS" cards show not just the most-recent value but a
+    // short trend behind it. Each headline scalar reads back as a time-series of
+    // (captured_at_ms, value) pairs, oldest→newest (so the last element is the
+    // freshest point), capped to the last `limit` rows. Empty when nothing has
+    // been captured — an honest empty state, never a fabricated point.
+
+    /// The set of headline deep-vitals scalars a sparkline can plot. Each maps to
+    /// one `(table, column)` whose per-instance time-series the UI charts. Kept as
+    /// a fixed enum (never user input) so the table/column names are compile-time
+    /// constants — no SQL injection surface.
+    fn vital_series_source(metric: VitalMetric) -> (&'static str, &'static str) {
+        match metric {
+            // CPU LOAD: runnable tasks queued for a scheduler (the textbook
+            // CPU-pressure signal).
+            VitalMetric::CpuRunnableTasks => ("cpu_pressure_snapshot", "runnable_tasks"),
+            // MEMORY HEADROOM: page-life-expectancy (seconds; falling = churn).
+            VitalMetric::MemoryPle => ("memory_headroom_snapshot", "page_life_expectancy"),
+            // PLAN-CACHE: count of single-use ad-hoc plans.
+            VitalMetric::PlanCacheSingleUse => ("plan_cache_snapshot", "single_use_plan_count"),
+            // CONTENTION (tempdb): total allocation-page waiters this tick.
+            VitalMetric::TempdbTotalWaiters => ("tempdb_contention_snapshot", "pagelatch_waiters"),
+        }
+    }
+
+    /// Read the recent time-series of one headline deep-vitals scalar for this
+    /// instance, oldest→newest (freshest last), capped to the last `limit`
+    /// captures. Returns `(captured_at_ms, value)` pairs; empty when nothing has
+    /// been captured. This is the source the UI charts as inline sparklines.
+    ///
+    /// I/O latency is per-file (many rows per tick), so it is NOT a single scalar
+    /// series here — `recent_io_latency_series` handles it separately.
+    pub fn recent_vital_series(
+        &self,
+        instance_id: i64,
+        metric: VitalMetric,
+        limit: usize,
+    ) -> Vec<(i64, f64)> {
+        let (table, column) = Self::vital_series_source(metric);
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        // Take the newest `limit` rows DESC, then reverse to oldest→newest so the
+        // chart's last point is the freshest. Table/column are compile-time
+        // constants from the enum above — never user input.
+        let sql = format!(
+            "SELECT captured_at, CAST({column} AS REAL)
+             FROM {table}
+             WHERE instance_id = ?1
+             ORDER BY captured_at DESC
+             LIMIT ?2"
+        );
+        let mut stmt = match lock.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![instance_id, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        });
+        let mut v: Vec<(i64, f64)> = match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => return Vec::new(),
+        };
+        v.reverse(); // DESC → oldest-first (freshest last)
+        v
+    }
+
+    /// Recent time-series of the WORST per-tick file I/O latency (max of avg
+    /// read/write across all files at each capture instant), oldest→newest,
+    /// capped to `limit`. Collapsing per-file rows to one worst-latency value per
+    /// tick gives the I/O card a single sparkline that pops when any file stalls.
+    /// Empty when no I/O has been captured.
+    pub fn recent_io_latency_series(&self, instance_id: i64, limit: usize) -> Vec<(i64, f64)> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let sql = "SELECT captured_at, MAX(MAX(avg_read_latency_ms, avg_write_latency_ms))
+             FROM io_latency_delta
+             WHERE instance_id = ?1
+             GROUP BY captured_at
+             ORDER BY captured_at DESC
+             LIMIT ?2";
+        let mut stmt = match lock.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![instance_id, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        });
+        let mut v: Vec<(i64, f64)> = match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => return Vec::new(),
+        };
+        v.reverse();
+        v
+    }
+
+    // ---------- Health today-vs-baseline -----------------------------------
+
+    /// Summarize how this instance's CURRENT query workload compares to its
+    /// PERSISTED rolling baseline ([`query_baseline`]), for the health-grade
+    /// "today vs rolling baseline" badge.
+    ///
+    /// Across every query that has a mature durable baseline
+    /// ([`DURABLE_BASELINE_MIN_COUNT`] samples), we sum the baseline mean
+    /// duration-per-execution and the latest observed value, then express the
+    /// change as a percent delta and a representative z-score (the worst single
+    /// query's z, so one regressing query isn't averaged away). Returns `None`
+    /// when no query has accumulated enough history yet — the caller renders
+    /// "baseline forming" rather than a fabricated number.
+    pub fn health_baseline_summary(&self, instance_id: i64) -> Option<HealthBaselineSummary> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let mut stmt = lock
+            .prepare(
+                "SELECT count, mean, m2, last_value_ms
+                 FROM query_baseline
+                 WHERE instance_id = ?1 AND count >= ?2",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(params![instance_id, DURABLE_BASELINE_MIN_COUNT], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+
+        if rows.is_empty() {
+            return None; // no mature baseline yet → "baseline forming"
+        }
+
+        let mut baseline_sum = 0.0f64;
+        let mut current_sum = 0.0f64;
+        let mut worst_z = 0.0f64;
+        for (count, mean, m2, last_value_ms) in &rows {
+            baseline_sum += *mean;
+            current_sum += *last_value_ms;
+            // Per-query z-score of the latest sample vs its own baseline.
+            if *count >= 2 {
+                let var = m2 / (*count as f64 - 1.0);
+                if var.is_finite() && var > 0.0 {
+                    let z = (last_value_ms - mean) / var.sqrt();
+                    if z > worst_z {
+                        worst_z = z;
+                    }
+                }
+            }
+        }
+        let delta_pct = if baseline_sum > 0.0 {
+            (current_sum / baseline_sum - 1.0) * 100.0
+        } else {
+            0.0
+        };
+        Some(HealthBaselineSummary {
+            tracked_queries: rows.len() as i64,
+            baseline_mean_ms: baseline_sum / rows.len() as f64,
+            current_mean_ms: current_sum / rows.len() as f64,
+            delta_pct,
+            worst_z_score: worst_z,
+        })
+    }
+
     /// Most-recent plan-cache-health sample for this instance.
     pub fn latest_plan_cache(&self, instance_id: i64) -> Option<PlanCacheRow> {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
@@ -1868,6 +2031,41 @@ pub struct TempdbContentionRow {
     pub tempdb_data_files: i64,
 }
 
+/// Which headline deep-vitals scalar a recent-series read-back plots. Fixed set
+/// (never user input) so the underlying table/column names stay compile-time
+/// constants — see [`Storage::recent_vital_series`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VitalMetric {
+    /// CPU LOAD — runnable tasks queued for a scheduler.
+    CpuRunnableTasks,
+    /// MEMORY HEADROOM — page-life-expectancy (seconds).
+    MemoryPle,
+    /// PLAN CACHE — single-use ad-hoc plan count.
+    PlanCacheSingleUse,
+    /// CONTENTION (tempdb) — allocation-page waiters this tick.
+    TempdbTotalWaiters,
+}
+
+/// "Today vs rolling baseline" summary across this instance's durable query
+/// baselines. Powers the health-grade trend badge. All values are MEASURED from
+/// the persisted [`query_baseline`] table — never fabricated; when no query has
+/// a mature baseline yet, [`Storage::health_baseline_summary`] returns `None`
+/// and the UI renders "baseline forming" instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HealthBaselineSummary {
+    /// Number of queries with a mature durable baseline behind this summary.
+    pub tracked_queries: i64,
+    /// Mean per-query baseline duration-per-execution (ms) across them.
+    pub baseline_mean_ms: f64,
+    /// Mean per-query latest observed duration-per-execution (ms).
+    pub current_mean_ms: f64,
+    /// Percent change of the summed current vs summed baseline.
+    pub delta_pct: f64,
+    /// Worst single-query z-score of latest-vs-baseline (so one regressing query
+    /// isn't averaged away). 0 when nothing exceeds its baseline.
+    pub worst_z_score: f64,
+}
+
 /// One plan-cache-health observation (single-use ad-hoc plans vs total).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanCacheRow {
@@ -2395,6 +2593,100 @@ mod tests {
         let pc = s.latest_plan_cache(id).expect("plan latest");
         assert_eq!(pc.single_use_plan_count, 6000);
         assert_eq!(pc.total_plan_count, 7000);
+    }
+
+    /// Recent-series read-back: several CPU samples come back oldest→newest
+    /// (freshest last), capped to the requested limit, and an unmonitored metric
+    /// is an honest empty Vec — this is the sparkline source the UI charts.
+    #[test]
+    fn recent_vital_series_oldest_to_newest_capped() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+
+        // Nothing captured yet → empty series (honest empty state).
+        assert!(s.recent_vital_series(id, VitalMetric::CpuRunnableTasks, 60).is_empty());
+        assert!(s.recent_io_latency_series(id, 60).is_empty());
+
+        // Five CPU samples at increasing times with runnable_tasks 1..=5.
+        let base = Utc::now() - chrono::Duration::minutes(10);
+        for i in 0..5i64 {
+            s.insert_cpu_pressure(id, &CpuPressureRow {
+                captured_at: base + chrono::Duration::minutes(i),
+                online_schedulers: 8,
+                runnable_tasks: i + 1,
+                work_queue: 0,
+                current_workers: 20,
+                active_workers: 5,
+                pending_disk_io: 0,
+            }).expect("cpu");
+        }
+
+        // Full series: oldest→newest, freshest (runnable=5) last.
+        let full = s.recent_vital_series(id, VitalMetric::CpuRunnableTasks, 60);
+        assert_eq!(full.len(), 5);
+        assert_eq!(full.first().map(|p| p.1), Some(1.0), "oldest first");
+        assert_eq!(full.last().map(|p| p.1), Some(5.0), "freshest last");
+        // captured_at strictly increasing.
+        assert!(full.windows(2).all(|w| w[0].0 < w[1].0), "ascending by time");
+
+        // Cap honored: the newest 3, still oldest→newest within the window.
+        let capped = s.recent_vital_series(id, VitalMetric::CpuRunnableTasks, 3);
+        assert_eq!(capped.len(), 3);
+        assert_eq!(
+            capped.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![3.0, 4.0, 5.0],
+            "the newest three, oldest→newest"
+        );
+
+        // A metric with no rows for this instance is still an empty series.
+        assert!(s.recent_vital_series(id, VitalMetric::MemoryPle, 60).is_empty());
+
+        // I/O latency: two files at the same instant collapse to one worst-of value.
+        let t = Utc::now() - chrono::Duration::minutes(1);
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: t, database_name: "db".into(), file_logical_name: "data".into(),
+            file_type: "ROWS".into(), reads_delta: 1, writes_delta: 1, read_stall_ms_delta: 1,
+            write_stall_ms_delta: 1, avg_read_latency_ms: 4.0, avg_write_latency_ms: 9.0,
+        }).expect("io1");
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: t, database_name: "db".into(), file_logical_name: "log".into(),
+            file_type: "LOG".into(), reads_delta: 0, writes_delta: 1, read_stall_ms_delta: 0,
+            write_stall_ms_delta: 1, avg_read_latency_ms: 0.0, avg_write_latency_ms: 2.0,
+        }).expect("io2");
+        let io = s.recent_io_latency_series(id, 60);
+        assert_eq!(io.len(), 1, "two files at one instant → one worst-of point");
+        assert!((io[0].1 - 9.0).abs() < 1e-9, "worst latency across files wins, got {}", io[0].1);
+    }
+
+    /// Health today-vs-baseline summary: with no mature baseline it is `None`
+    /// ("baseline forming"); once durable baselines exist a later spike shows a
+    /// positive delta and a high worst-z, fed straight from `query_baseline`.
+    #[test]
+    fn health_baseline_summary_reflects_persisted_baselines() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+
+        // No baselines yet → None (UI: "baseline forming").
+        assert!(s.health_baseline_summary(id).is_none());
+
+        // Build a mature, steady baseline for one query (8 ~100ms samples).
+        for i in 0..8 {
+            s.observe_and_detect_regression(id, 1, 100.0 + (i % 2) as f64).expect("obs");
+        }
+        // Still steady: latest ~= baseline, so delta is near zero and z is low.
+        let steady = s.health_baseline_summary(id).expect("mature baseline");
+        assert_eq!(steady.tracked_queries, 1);
+        assert!(steady.delta_pct.abs() < 25.0, "steady delta near zero, got {}", steady.delta_pct);
+
+        // Now a spike folds in: the latest value jumps far above the baseline.
+        s.observe_and_detect_regression(id, 1, 1000.0).expect("spike");
+        let spiked = s.health_baseline_summary(id).expect("still mature");
+        assert!(spiked.delta_pct > 100.0, "current far above baseline, got {}", spiked.delta_pct);
+        // The summary judges the latest value against the baseline AS IT STANDS
+        // (the spike is itself folded in, count→9), so the z is the persisted,
+        // self-inclusive outlier score — still well above the within-noise band.
+        assert!(spiked.worst_z_score > 2.5, "spike is a clear outlier, got z={}", spiked.worst_z_score);
+        assert!(spiked.current_mean_ms > spiked.baseline_mean_ms);
     }
 
     /// The cumulative per-file IO snapshot used by the IO-latency delta poller

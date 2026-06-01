@@ -1856,6 +1856,40 @@ kbd {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+/* When the baseline-trend badge is present, give it its own slim third column.
+   It is the last child; the two grades keep equal width and it sizes to fit. */
+.health-grades:has(.health-baseline) {
+  grid-template-columns: 1fr 1fr minmax(150px, 0.7fr);
+}
+@media (max-width: 760px) {
+  .health-grades:has(.health-baseline) { grid-template-columns: 1fr 1fr; }
+  .health-grades:has(.health-baseline) .health-baseline { grid-column: 1 / -1; }
+}
+/* Today vs this instance's OWN rolling baseline. */
+.health-baseline {
+  display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  padding: 10px 14px; border: 1px solid var(--line); background: var(--bg-elev);
+  min-width: 0;
+}
+.health-baseline-label {
+  font: 10px var(--f-tech); letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.health-baseline-val {
+  font: 22px var(--f-tech); font-variant-numeric: tabular-nums; color: var(--text-strong);
+  display: flex; align-items: baseline; gap: 8px;
+}
+.health-baseline-val.forming { font-size: 14px; color: var(--text-dim); }
+.health-baseline-band {
+  font: 9.5px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600;
+}
+.health-baseline-sub { font: 10px var(--f-mono); color: var(--text-muted); }
+.health-baseline.tone-ok  .health-baseline-val,
+.health-baseline.tone-ok  .health-baseline-band { color: var(--ok); }
+.health-baseline.tone-warn .health-baseline-val,
+.health-baseline.tone-warn .health-baseline-band { color: var(--warn); }
+.health-baseline.tone-err  .health-baseline-val,
+.health-baseline.tone-err  .health-baseline-band { color: var(--crit); }
 .health-grade {
   display: flex;
   align-items: center;
@@ -4299,6 +4333,26 @@ kbd {
 .dv-row-v.tone-err  { color: var(--crit); font-weight: 600; }
 .dv-row-v.tone-warn { color: var(--warn); }
 .dv-none { font: 11px var(--f-mono); color: var(--text-muted); padding: 2px 0; }
+
+/* recent-trend sparkline under each deep-vital title (no chart library) */
+.dv-card-spark { display: flex; flex-direction: column; gap: 3px; }
+.dv-spark { position: relative; }
+.dv-spark-svg { width: 100%; height: 26px; display: block; overflow: visible; }
+.dv-spark-band { fill: var(--c); opacity: 0.08; }
+.dv-spark-area { fill: var(--c); opacity: 0.12; }
+.dv-spark-line {
+  fill: none; stroke: var(--c); stroke-width: 1.4; vector-effect: non-scaling-stroke;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+.dv-spark-dot  { fill: var(--c); }
+.dv-spark-anom { fill: var(--crit); stroke: var(--bg-panel); stroke-width: 0.6; }
+.dv-spark-hit  { fill: transparent; cursor: crosshair; }
+.dv-spark-meta {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+}
+.dv-spark-range { font: 10px var(--f-mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dv-spark-n { font: 9px var(--f-mono); letter-spacing: 0.05em; color: var(--text-muted); }
+.dv-spark-empty { font: 10px var(--f-mono); color: var(--text-muted); padding: 5px 0; }
 
 /* per-file I/O latency mini-table inside the I/O card */
 .dv-iotable { display: flex; flex-direction: column; gap: 4px; }
