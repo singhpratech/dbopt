@@ -132,6 +132,30 @@ is not included in the prebuilt downloads.)*
 cargo run -p eval -- --html   # → target/eval-report.html  (the live board)
 ```
 
+## Lint in CI (offline, no connection)
+
+`dbopt lint` walks your `.sql` files, applies all 100 rules, and emits machine-readable
+output — so a bad query fails the build *before* it ships. No database, no account, no upload.
+
+```bash
+dbopt lint ./db --format human                 # pretty, grouped by file (default)
+dbopt lint ./db --format json                   # machine-readable findings
+dbopt lint ./db --format sarif > dbopt.sarif     # SARIF 2.1.0 for code-scanning tools
+dbopt lint ./db --fail-on warning                # exit 1 if any finding ≥ warning (gates a PR)
+```
+
+Exit codes: **0** clean · **1** findings at/above `--fail-on` (default `error`) · **2** usage error.
+
+Wire it into GitHub Actions — findings show up inline in the PR via code scanning:
+
+```yaml
+- run: dbopt lint ./db --format sarif > dbopt.sarif || true
+- uses: github/codeql-action/upload-sarif@v3
+  with: { sarif_file: dbopt.sarif }
+```
+
+The SARIF also opens in the VS Code **SARIF Viewer** extension (findings land in the Problems panel).
+
 ## Build from source
 
 Prefer to build it yourself (or hacking on dbopt)? You'll need Rust, Node 18+ and `wasm-pack`:

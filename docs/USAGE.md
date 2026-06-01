@@ -80,7 +80,16 @@ dbopt query.sql                    # static findings for a script
 dbopt plan.sqlplan                 # analyze a saved plan
 dbopt bundle.zip                   # a script + plan bundle
 dbopt-backend                      # the web observatory (API + UI on :3690)
+
+# Lint a whole tree for CI (offline, no connection)
+dbopt lint ./db --format human                  # pretty, grouped by file
+dbopt lint ./db --format sarif > dbopt.sarif     # SARIF 2.1.0 → GitHub code scanning / VS Code SARIF Viewer
+dbopt lint ./db --fail-on warning                # exit 1 on any finding ≥ warning (gates a PR)
 ```
+
+`dbopt lint` recursively discovers `.sql` files, applies all 100 rules, and exits **0** clean /
+**1** findings at-or-above `--fail-on` (default `error`) / **2** usage error. See the **Lint in CI**
+section of the [README](../README.md) for a copy-paste GitHub Actions snippet.
 
 ## 6. On-demand pulse poller (sentinel)
 
