@@ -76,6 +76,25 @@ pub struct PlanNode {
     pub no_stats_columns: Vec<ColumnRef>,
     /// Detail of a plan-affecting implicit conversion, when present.
     pub convert: Option<ConvertInfo>,
+
+    // --- Lookup-operator detail (Key/RID Lookup). All default-empty so existing
+    // consumers are unaffected. Captured so plan.lookup can emit CONCRETE
+    // covering-index DDL instead of placeholder INCLUDE columns. ---
+    /// `<Object>` the lookup reads from: the base-table identifier and the index
+    /// the seek used (for a Key Lookup this is the clustered index / PK that the
+    /// lookup probes). Used to name the table the covering index belongs on.
+    pub object_schema: String,
+    pub object_table: String,
+    pub object_index: String,
+    /// Output columns the lookup fetches — the `<DefinedValues>/<DefinedValue>/
+    /// <ColumnReference>` (or `<OutputList>`) children of THIS operator. These are
+    /// exactly the columns missing from the nonclustered index, i.e. the real
+    /// INCLUDE list for a covering index.
+    pub output_columns: Vec<ColumnRef>,
+    /// Seek key columns from the lookup's `<SeekPredicates>` (the columns the
+    /// lookup joins back on — typically the clustering key). Captured so the
+    /// emitted DDL and width heuristic have the full key picture.
+    pub seek_columns: Vec<ColumnRef>,
 }
 
 /// Known SQL Server plan warning elements (children of `<Warnings>`), plus the
@@ -159,6 +178,30 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     // descendant operator's predicate.
     let mut depth_since_relop: Vec<i32> = Vec::new();
 
+    // --- Lookup-operator capture context ---
+    // We capture <Object>/<DefinedValues>/<SeekPredicates> column references and
+    // scope them to the innermost RelOp ONLY while that RelOp is a Key/RID Lookup
+    // (and the cursor is inside the relevant child element). This keeps unrelated
+    // ColumnReference elements (scalar trees, joins, other operators) out.
+    let mut in_defined_values = false;
+    let mut in_seek_predicates = false;
+    // True iff the innermost open RelOp on the stack is a Key/RID Lookup.
+    let top_is_lookup = |stack: &Vec<PlanNode>| -> bool {
+        stack.last().map(|n| {
+            n.physical_op.eq_ignore_ascii_case("Key Lookup")
+                || n.physical_op.eq_ignore_ascii_case("RID Lookup")
+        }).unwrap_or(false)
+    };
+    // Operators whose <Object>/seek columns we capture so a sibling lookup can
+    // identify the nonclustered seek that feeds it: lookups themselves AND the
+    // Index Seek / Scan operators that may be its partner.
+    let top_capture_object = |stack: &Vec<PlanNode>| -> bool {
+        stack.last().map(|n| {
+            let op = n.physical_op.to_ascii_lowercase();
+            op.contains("lookup") || op.contains("index seek") || op.contains("index scan")
+        }).unwrap_or(false)
+    };
+
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| PlanError::Xml(e.to_string()))? {
             Event::Eof => break,
@@ -209,6 +252,25 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             if let (Some(&d), Some(top)) = (depth_since_relop.last(), stack.last_mut()) {
                                 if d == 1 || d == 2 { top.has_seek_predicate = true; }
                             }
+                            if top_capture_object(&stack) { in_seek_predicates = true; }
+                        }
+                        "DefinedValues" => {
+                            if top_is_lookup(&stack) { in_defined_values = true; }
+                        }
+                        "Object" => {
+                            // The <Object> a seek/lookup reads from: base table + the
+                            // index used. Captured for lookups AND seeks/scans so a
+                            // lookup can find the sibling nonclustered seek that feeds
+                            // it. First <Object> per operator wins (the access target).
+                            if top_capture_object(&stack) {
+                                if let Some(top) = stack.last_mut() {
+                                    if top.object_table.is_empty() {
+                                        top.object_schema = unbracket(&attr_val(&e, "Schema").unwrap_or_default());
+                                        top.object_table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
+                                        top.object_index = unbracket(&attr_val(&e, "Index").unwrap_or_default());
+                                    }
+                                }
+                            }
                         }
                         "PlanAffectingConvert" => {
                             if let Some(top) = stack.last_mut() {
@@ -249,6 +311,17 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                                 if let Some(top) = stack.last_mut() { top.has_seek_predicate = true; }
                             }
                         }
+                        "Object" => {
+                            if top_capture_object(&stack) {
+                                if let Some(top) = stack.last_mut() {
+                                    if top.object_table.is_empty() {
+                                        top.object_schema = unbracket(&attr_val(&e, "Schema").unwrap_or_default());
+                                        top.object_table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
+                                        top.object_index = unbracket(&attr_val(&e, "Index").unwrap_or_default());
+                                    }
+                                }
+                            }
+                        }
                         "Predicate" => {
                             if cur_depth == 1 || cur_depth == 2 {
                                 if let Some(top) = stack.last_mut() { top.has_residual_predicate = true; }
@@ -258,6 +331,35 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             let col = unbracket(&attr_val(&e, "Column")
                                 .or_else(|| attr_val(&e, "Name"))
                                 .unwrap_or_default());
+                            // Lookup output columns (DefinedValues, lookup only) and
+                            // seek key columns (SeekPredicates, lookups + seeks) feed
+                            // the covering DDL. Scoped to the relevant child element.
+                            if !col.is_empty() {
+                                let table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
+                                if in_defined_values && top_is_lookup(&stack) {
+                                    if let Some(top) = stack.last_mut() {
+                                        let cr = ColumnRef { table, column: col.clone() };
+                                        if !top.output_columns.iter().any(|c| c.column == cr.column) {
+                                            top.output_columns.push(cr);
+                                        }
+                                    }
+                                } else if in_seek_predicates && top_capture_object(&stack) {
+                                    if let Some(top) = stack.last_mut() {
+                                        // Only the indexed object's own columns are
+                                        // seek KEYS; a ColumnReference naming a
+                                        // different table (or none) is the comparand
+                                        // (value side) and must not be treated as a
+                                        // key column of this index.
+                                        let same_table = top.object_table.is_empty()
+                                            || table.is_empty()
+                                            || table.eq_ignore_ascii_case(&top.object_table);
+                                        let cr = ColumnRef { table, column: col.clone() };
+                                        if same_table && !top.seek_columns.iter().any(|c| c.column == cr.column) {
+                                            top.seek_columns.push(cr);
+                                        }
+                                    }
+                                }
+                            }
                             if in_no_stats {
                                 let table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
                                 if !col.is_empty() {
@@ -334,6 +436,8 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                         "MissingIndexGroup" => { cur_group_impact = 0.0; }
                         "ColumnGroup" => { cur_usage = None; }
                         "ColumnsWithNoStatistics" => { in_no_stats = false; }
+                        "DefinedValues" => { in_defined_values = false; }
+                        "SeekPredicates" => { in_seek_predicates = false; }
                         _ => {}
                     }
                 }
@@ -352,8 +456,98 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
 
 pub fn derive_findings(plan: &PlanNode) -> Vec<Finding> {
     let mut out = Vec::new();
-    walk(plan, &mut out);
+    walk(plan, None, &mut out);
     out
+}
+
+/// Find, within `node`'s direct + descendant subtree, an Index Seek operator that
+/// reads the SAME base table as the lookup but via a NONCLUSTERED index — i.e. the
+/// seek that feeds the Key Lookup. Returns (index_name, key_columns). Best-effort:
+/// returns None when the plan shape doesn't expose a sibling seek.
+fn sibling_seek_for_lookup<'a>(parent: &'a PlanNode, lookup: &PlanNode) -> Option<(&'a str, Vec<String>)> {
+    fn search<'a>(n: &'a PlanNode, table: &str, lookup_index: &str) -> Option<(&'a str, Vec<String>)> {
+        let op = n.physical_op.to_ascii_lowercase();
+        if op.contains("index seek")
+            && n.has_seek_predicate
+            && n.object_table.eq_ignore_ascii_case(table)
+            && !n.object_index.is_empty()
+            && !n.object_index.eq_ignore_ascii_case(lookup_index)
+        {
+            let keys: Vec<String> = n.seek_columns.iter().map(|c| c.column.clone()).collect();
+            return Some((n.object_index.as_str(), keys));
+        }
+        for c in &n.children {
+            if let Some(r) = search(c, table, lookup_index) { return Some(r); }
+        }
+        None
+    }
+    if lookup.object_table.is_empty() { return None; }
+    for c in &parent.children {
+        if std::ptr::eq(c, lookup) { continue; }
+        if let Some(r) = search(c, &lookup.object_table, &lookup.object_index) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+/// Build the concrete covering-index recommendation for a Key/RID Lookup using the
+/// REAL output columns the lookup fetches. When we can identify the sibling seek's
+/// nonclustered index + its key columns, we emit a `DROP_EXISTING=ON` rebuild of
+/// that exact index with the missing columns added to INCLUDE. Otherwise we emit a
+/// best-effort CREATE with the lookup's join keys as the key and the real output
+/// columns as INCLUDE. Returns (recommendation, include_columns) — the latter so
+/// the width heuristic can re-use the same real list.
+fn lookup_covering_ddl(node: &PlanNode, parent: Option<&PlanNode>) -> (String, Vec<ColumnRef>) {
+    let include_cols: Vec<ColumnRef> = node.output_columns.clone();
+    let schema = if node.object_schema.is_empty() { "dbo".to_string() } else { node.object_schema.clone() };
+    let table = node.object_table.clone();
+
+    let include_sql = if include_cols.is_empty() {
+        "<columns currently fetched by the lookup>".to_string()
+    } else {
+        include_cols.iter().map(|c| bracket(&c.column)).collect::<Vec<_>>().join(", ")
+    };
+
+    // Did we find the nonclustered seek that the lookup pairs with?
+    let sibling = parent.and_then(|p| sibling_seek_for_lookup(p, node));
+
+    let ddl = if let Some((idx, keys)) = sibling.as_ref().filter(|_| !table.is_empty()) {
+        let key_sql = if keys.is_empty() {
+            "/* existing index key columns */".to_string()
+        } else {
+            keys.iter().map(|k| bracket(k)).collect::<Vec<_>>().join(", ")
+        };
+        // Rebuild the EXISTING nonclustered index in place with the missing
+        // output columns folded into INCLUDE — the surgical, lowest-risk fix.
+        format!(
+            "CREATE NONCLUSTERED INDEX [{}]\n  ON [{}].[{}] ({})\n  INCLUDE ({})\n  WITH (DROP_EXISTING = ON);",
+            idx, schema, table, key_sql, include_sql
+        )
+    } else if !table.is_empty() {
+        // No sibling seek captured — emit a deployable CREATE keyed on the
+        // lookup's join columns (the clustering key it probes), with the REAL
+        // output columns as INCLUDE.
+        let keys: Vec<String> = node.seek_columns.iter().map(|c| bracket(&c.column)).collect();
+        let key_sql = if keys.is_empty() { "<seek key cols>".to_string() } else { keys.join(", ") };
+        let name_part = node.seek_columns.iter().map(|c| sanitize_ident(&c.column)).collect::<Vec<_>>().join("_");
+        let idx_name = if name_part.is_empty() {
+            format!("IX_{}_covering", sanitize_ident(&table))
+        } else {
+            format!("IX_{}_{}", sanitize_ident(&table), name_part)
+        };
+        format!(
+            "CREATE NONCLUSTERED INDEX [{}]\n  ON [{}].[{}] ({})\n  INCLUDE ({});",
+            idx_name, schema, table, key_sql, include_sql
+        )
+    } else {
+        // No object captured at all — fall back to the generic template.
+        format!(
+            "CREATE NONCLUSTERED INDEX IX_<table>_<keycols> ON <schema>.<table> (<seek key cols>) INCLUDE ({}) WITH (DROP_EXISTING = ON);",
+            include_sql
+        )
+    };
+    (ddl, include_cols)
 }
 
 // Thresholds tuned to fire only on plans where the shape is genuinely a problem,
@@ -366,7 +560,7 @@ const LOOKUP_HIGH_EXEC: f64 = 1_000.0;
 const SKEW_MIN_ROWS: f64 = 1_000.0;
 const SKEW_RATIO: f64 = 100.0;
 
-fn walk(node: &PlanNode, out: &mut Vec<Finding>) {
+fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
     let loc: Option<Location> = None;
 
     // (a) MissingIndex -> concrete CREATE INDEX. This is the single highest-value
@@ -422,19 +616,50 @@ fn walk(node: &PlanNode, out: &mut Vec<Finding>) {
             format!("~{:.0} estimated executions", node.estimated_executions)
         };
         let sev = if high { Severity::Error } else { Severity::Warning };
+        let (ddl, include_cols) = lookup_covering_ddl(node, parent);
+        // Name the real output columns inline so the message is self-explanatory.
+        let cols_txt = if include_cols.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = include_cols.iter().map(|c| c.column.clone()).collect();
+            format!(" It outputs {} column(s) not in that index: {}.", names.len(), names.join(", "))
+        };
         out.push(Finding {
             rule: RuleId("plan.lookup".into()),
             severity: sev,
             message: format!(
-                "{} in plan (NodeId={}, cost={:.4}, {}). The nonclustered index used by the seek does not cover the query, so the engine performs a per-row lookup into the base table.{}",
+                "{} in plan (NodeId={}, cost={:.4}, {}). The nonclustered index used by the seek does not cover the query, so the engine performs a per-row lookup into the base table.{}{}",
                 node.physical_op, node.node_id, node.estimated_total_subtree_cost, exec_txt,
-                if high { " Run per outer row at high volume, this is often the dominant cost in the plan." } else { "" }
+                if high { " Run per outer row at high volume, this is often the dominant cost in the plan." } else { "" },
+                cols_txt
             ),
             location: loc,
-            recommendation: Some(
-                "Make the seeking index covering: add the query's output (SELECT-list) columns to that nonclustered index as INCLUDE columns. Example: CREATE NONCLUSTERED INDEX IX_<table>_<keycols> ON <schema>.<table> (<seek key cols>) INCLUDE (<columns currently fetched by the lookup>) WITH (DROP_EXISTING = ON);".into()
-            ),
+            recommendation: Some(format!(
+                "Make the seeking index covering by adding the columns the lookup fetches as INCLUDE columns, then verify the plan picks it and the extra write cost is acceptable before shipping:\n{}",
+                ddl
+            )),
         });
+
+        // Wide-covering-request caveat: a very wide INCLUDE list (many columns)
+        // bloats the nonclustered leaf and slows every write to the table. From a
+        // plan alone we know column COUNT but not types, so the plan-side caveat is
+        // count-only; the source-DDL rule (index.wide_covering_request, registered
+        // via ss(...)) additionally catches large/LOB types in pasted CREATE INDEX.
+        const WIDE_INCLUDE_COUNT: usize = 5;
+        if include_cols.len() > WIDE_INCLUDE_COUNT {
+            out.push(Finding {
+                rule: RuleId("index.wide_covering_request".into()),
+                severity: Severity::Info,
+                message: format!(
+                    "Write-amplification caveat at NodeId={}: the covering index that removes this lookup would INCLUDE {} columns. Every INCLUDE column is duplicated into the nonclustered index leaf, so the index grows and every INSERT/UPDATE/DELETE that touches those columns pays to maintain the copy.",
+                    node.node_id, include_cols.len()
+                ),
+                location: loc,
+                recommendation: Some(
+                    "Add INCLUDE columns deliberately, not reflexively. Prefer covering only the columns this query actually returns, drop wide/LOB columns from INCLUDE if the lookup is rare, or accept the lookup when the table is write-heavy. Measure read benefit against the added write + storage cost before shipping.".into()
+                ),
+            });
+        }
     }
 
     // (b) Promote well-known plan warnings, now with the captured detail.
@@ -539,7 +764,7 @@ fn walk(node: &PlanNode, out: &mut Vec<Finding>) {
     }
 
     for c in &node.children {
-        walk(c, out);
+        walk(c, Some(node), out);
     }
 }
 
@@ -813,6 +1038,105 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert!(matches!(f[0].severity, Severity::Error), "high-exec lookup is Error");
         assert!(f[0].recommendation.as_ref().unwrap().contains("INCLUDE"));
+    }
+
+    // A realistic Nested Loops over a nonclustered Index Seek + Key Lookup. The
+    // lookup carries DefinedValues (its real output columns) and an Object naming
+    // the clustered index it probes; the sibling seek names the nonclustered
+    // index + its key columns. The recommendation must be CONCRETE, not a
+    // placeholder, and must rebuild the sibling index with the real INCLUDE list.
+    const KEY_LOOKUP_REAL_COLS: &str = r#"
+    <ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple><QueryPlan>
+      <RelOp NodeId="0" PhysicalOp="Nested Loops" LogicalOp="Inner Join"
+             EstimateRows="50000" EstimatedTotalSubtreeCost="40.0">
+        <RelOp NodeId="1" PhysicalOp="Index Seek" LogicalOp="Index Seek"
+               EstimateRows="50000" EstimatedTotalSubtreeCost="2.0">
+          <IndexScan>
+            <Object Database="[app]" Schema="[dbo]" Table="[Orders]" Index="[IX_Orders_CustomerId]" />
+            <SeekPredicates>
+              <SeekPredicateNew>
+                <SeekKeys><Prefix><RangeColumns>
+                  <ColumnReference Database="[app]" Schema="[dbo]" Table="[Orders]" Column="[CustomerId]" />
+                </RangeColumns></Prefix></SeekKeys>
+              </SeekPredicateNew>
+            </SeekPredicates>
+          </IndexScan>
+        </RelOp>
+        <RelOp NodeId="2" PhysicalOp="Key Lookup" LogicalOp="Clustered Index Seek"
+               EstimateRows="1" EstimateRebinds="49999" EstimateRewinds="0"
+               EstimatedTotalSubtreeCost="35.0">
+          <IndexScan Lookup="1">
+            <DefinedValues>
+              <DefinedValue><ColumnReference Database="[app]" Schema="[dbo]" Table="[Orders]" Column="[Total]" /></DefinedValue>
+              <DefinedValue><ColumnReference Database="[app]" Schema="[dbo]" Table="[Orders]" Column="[Status]" /></DefinedValue>
+            </DefinedValues>
+            <Object Database="[app]" Schema="[dbo]" Table="[Orders]" Index="[PK_Orders]" />
+            <SeekPredicates>
+              <SeekPredicateNew>
+                <SeekKeys><Prefix><RangeColumns>
+                  <ColumnReference Database="[app]" Schema="[dbo]" Table="[Orders]" Column="[OrderId]" />
+                </RangeColumns></Prefix></SeekKeys>
+              </SeekPredicateNew>
+            </SeekPredicates>
+          </IndexScan>
+        </RelOp>
+      </RelOp>
+    </QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
+
+    #[test]
+    fn key_lookup_emits_concrete_covering_ddl_with_real_columns() {
+        let plan = parse(KEY_LOOKUP_REAL_COLS).expect("parse");
+        let f = fired(&plan, "plan.lookup");
+        assert_eq!(f.len(), 1, "exactly one lookup finding");
+        let rec = f[0].recommendation.as_ref().expect("rec");
+        // Concrete, deployable DDL — no <placeholder> tokens.
+        assert!(rec.contains("CREATE NONCLUSTERED INDEX"), "has CREATE: {rec}");
+        assert!(rec.contains("[dbo].[Orders]"), "real schema.table: {rec}");
+        // Rebuilds the sibling nonclustered index in place...
+        assert!(rec.contains("[IX_Orders_CustomerId]"), "sibling index name: {rec}");
+        assert!(rec.contains("DROP_EXISTING = ON"), "in-place rebuild: {rec}");
+        // ...keyed on the seek key column...
+        assert!(rec.contains("([CustomerId])"), "key column: {rec}");
+        // ...with the REAL lookup output columns as INCLUDE.
+        assert!(rec.contains("INCLUDE ([Total], [Status])"), "real INCLUDE cols: {rec}");
+        // No placeholder leaked through.
+        assert!(!rec.contains("<columns"), "no placeholder include: {rec}");
+        // Message names the missing columns.
+        assert!(f[0].message.contains("Total") && f[0].message.contains("Status"), "msg names cols: {}", f[0].message);
+    }
+
+    #[test]
+    fn key_lookup_wide_include_emits_write_amplification_caveat() {
+        // Seven output columns on the lookup -> index.wide_covering_request fires.
+        let mut dvs = String::new();
+        for c in ["A","B","C","D","E","F","G"] {
+            dvs.push_str(&format!(
+                "<DefinedValue><ColumnReference Schema=\"[dbo]\" Table=\"[Wide]\" Column=\"[{c}]\" /></DefinedValue>"
+            ));
+        }
+        let xml = format!(r#"<ShowPlanXML><RelOp NodeId="2" PhysicalOp="Key Lookup" LogicalOp="Clustered Index Seek"
+            EstimateRows="1" EstimateRebinds="49999" EstimateRewinds="0" EstimatedTotalSubtreeCost="35.0">
+            <IndexScan Lookup="1">
+              <DefinedValues>{dvs}</DefinedValues>
+              <Object Schema="[dbo]" Table="[Wide]" Index="[PK_Wide]" />
+              <SeekPredicates><SeekPredicateNew><SeekKeys><Prefix><RangeColumns>
+                <ColumnReference Schema="[dbo]" Table="[Wide]" Column="[Id]" />
+              </RangeColumns></Prefix></SeekKeys></SeekPredicateNew></SeekPredicates>
+            </IndexScan>
+          </RelOp></ShowPlanXML>"#);
+        let plan = parse(&xml).expect("parse");
+        let caveat = fired(&plan, "index.wide_covering_request");
+        assert_eq!(caveat.len(), 1, "wide-covering caveat fires");
+        assert!(matches!(caveat[0].severity, Severity::Info), "caveat is Info");
+        assert!(caveat[0].message.contains("7 columns"), "names the width: {}", caveat[0].message);
+    }
+
+    #[test]
+    fn key_lookup_narrow_include_no_wide_caveat() {
+        // The realistic 2-column plan must NOT raise the wide-covering caveat.
+        let plan = parse(KEY_LOOKUP_REAL_COLS).expect("parse");
+        assert!(fired(&plan, "index.wide_covering_request").is_empty(),
+            "narrow INCLUDE list must not trip the write-amplification caveat");
     }
 
     #[test]

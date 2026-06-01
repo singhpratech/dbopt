@@ -128,6 +128,7 @@ pub const REGISTRY: &[Rule] = &[
     ss(index_design::nullable_columns_should_be_explicit),
     ss(index_design::heap_table),
     ss(index_design::varchar_max_overuse),
+    ss(index_design::wide_covering_request),
     // === optimizer-supremacy rule packs (2026-05) ===
     // JOIN correctness & performance
     ss(joins::right_outer_join_readability),

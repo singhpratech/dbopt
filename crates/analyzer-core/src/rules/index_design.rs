@@ -779,6 +779,122 @@ pub fn heap_table(ctx: &RuleCtx) -> Vec<Finding> {
 /// VARCHAR(MAX) / NVARCHAR(MAX) column declarations. MAX types are stored
 /// off-row, can't be index keys, and amplify reads when the data is actually
 /// small. Advisory — sometimes genuinely needed for large text/blobs.
+/// SQL-Server scalar types that store large / off-row payloads. Including one of
+/// these in a nonclustered index leaf is a heavy write-amplification commitment.
+fn is_large_type_kw(kw: &str) -> bool {
+    matches!(
+        kw.to_ascii_lowercase().as_str(),
+        "text" | "ntext" | "image" | "xml" | "sql_variant"
+            | "geometry" | "geography" | "hierarchyid"
+    )
+}
+
+/// `index.wide_covering_request` — flags a `CREATE ... INDEX ... INCLUDE (...)`
+/// whose INCLUDE list is very wide, with an honest write-amplification caveat.
+/// This is the source-side counterpart to the plan-derived caveat: it fires on a
+/// covering index a developer (or our own plan-derived DDL) is about to deploy.
+///
+/// Heuristic: an INCLUDE list with more than `WIDE_INCLUDE` columns. Every INCLUDE
+/// column is duplicated into the leaf, so a wide list slows every write and bloats
+/// storage. We surface a trade-off, not a hard error — hence Info severity.
+pub fn wide_covering_request(ctx: &RuleCtx) -> Vec<Finding> {
+    const WIDE_INCLUDE: usize = 5;
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+
+    // Locate each `CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX` and then find
+    // its `INCLUDE ( ... )` clause (the parser already splits punctuation into
+    // single-char tokens, so we count comma-separated items inside the parens).
+    for (i, t) in tokens.iter().enumerate() {
+        if !is_word(t, "CREATE") { continue; }
+        // Confirm an INDEX keyword follows within a short window (allowing
+        // UNIQUE / CLUSTERED / NONCLUSTERED qualifiers + comments in between).
+        let mut k = skip_comments(tokens, i + 1);
+        let mut saw_index = false;
+        let mut steps = 0;
+        while k < tokens.len() && steps < 5 {
+            let w = &tokens[k];
+            if w.kind == TokKind::Word {
+                if name_eq_ci(bare_name(w), "INDEX") { saw_index = true; break; }
+                // keep scanning across UNIQUE/CLUSTERED/NONCLUSTERED qualifiers
+                if !(name_eq_ci(bare_name(w), "UNIQUE")
+                    || name_eq_ci(bare_name(w), "CLUSTERED")
+                    || name_eq_ci(bare_name(w), "NONCLUSTERED")) {
+                    break;
+                }
+            } else if w.kind != TokKind::Comment {
+                break;
+            }
+            k = skip_comments(tokens, k + 1);
+            steps += 1;
+        }
+        if !saw_index { continue; }
+
+        // From here, find the INCLUDE keyword before the next CREATE (statement
+        // boundary heuristic). Then count the columns inside its parentheses.
+        let mut j = skip_comments(tokens, k + 1);
+        let mut include_at: Option<usize> = None;
+        while j < tokens.len() {
+            let w = &tokens[j];
+            if w.kind == TokKind::Word {
+                if name_eq_ci(bare_name(w), "CREATE") { break; } // next statement
+                if name_eq_ci(bare_name(w), "INCLUDE") { include_at = Some(j); break; }
+            }
+            if w.kind == TokKind::Punct && w.text == ";" { break; }
+            j += 1;
+        }
+        let Some(inc) = include_at else { continue; };
+
+        // Expect `INCLUDE (` — find the open paren.
+        let p = skip_comments(tokens, inc + 1);
+        if !(p < tokens.len() && tokens[p].kind == TokKind::Punct && tokens[p].text == "(") {
+            continue;
+        }
+        // Walk the parenthesised list, counting top-level columns + flagging any
+        // large/LOB *type* keyword that appears (defensive: normal INCLUDE lists
+        // are bare column names, but a malformed/typed list still gets caught).
+        let mut depth = 0i32;
+        let mut col_count = 0usize;
+        let mut have_item = false;
+        let mut large_types: Vec<String> = Vec::new();
+        let mut q = p;
+        while q < tokens.len() {
+            let w = &tokens[q];
+            if w.kind == TokKind::Punct {
+                match w.text {
+                    "(" => depth += 1,
+                    ")" => { depth -= 1; if depth == 0 { if have_item { col_count += 1; } break; } }
+                    "," if depth == 1 => { if have_item { col_count += 1; } have_item = false; }
+                    _ => {}
+                }
+            } else if w.kind == TokKind::Word && depth >= 1 {
+                have_item = true;
+                if is_large_type_kw(bare_name(w)) {
+                    let n = bare_name(w).to_string();
+                    if !large_types.iter().any(|x| name_eq_ci(x, &n)) { large_types.push(n); }
+                }
+            }
+            q += 1;
+        }
+
+        if col_count > WIDE_INCLUDE || !large_types.is_empty() {
+            let reason = if !large_types.is_empty() {
+                format!("its INCLUDE list carries large/LOB type(s) ({})", large_types.join(", "))
+            } else {
+                format!("its INCLUDE list has {} columns", col_count)
+            };
+            out.push(finding(
+                "index.wide_covering_request",
+                Severity::Info,
+                format!("Wide covering index: {} — every INCLUDE column is copied into the nonclustered index leaf, so the index grows and each INSERT/UPDATE/DELETE that touches those columns pays to maintain the copy.", reason),
+                Some(make_loc(&tokens[inc])),
+                Some("Keep INCLUDE to the columns the covering query actually returns. Drop wide or LOB columns from INCLUDE if the lookup they remove is rare, and weigh the read win against the added write + storage cost before deploying — this is a trade-off, not a free win.".into()),
+            ));
+        }
+    }
+    out
+}
+
 pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
