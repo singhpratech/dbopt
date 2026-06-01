@@ -44,6 +44,12 @@ jobs:
     name: ${{ matrix.label }}
     needs: web
     runs-on: ${{ matrix.os }}
+    # Job-level env so the signing gates are visible to step `if:` conditions.
+    # (A step's own `env:` block is NOT in scope for that step's `if:` — GitHub
+    # evaluates `if` before applying step env — so these MUST live at job level.)
+    env:
+      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
     strategy:
       fail-fast: false
       matrix:
@@ -115,11 +121,76 @@ jobs:
           # (instead of running it from the read-only mounted volume).
           ln -s /Applications "dbopt-${{ matrix.label }}-app/Applications"
           hdiutil create -volname dbopt -srcfolder dbopt-${{ matrix.label }}-app -ov -format UDZO dbopt-${{ matrix.label }}.dmg
+      # Apple codesign + notarize + staple for the .dmg. Runs ONLY when the Apple
+      # Developer secrets are present, and is SKIPPED (job still succeeds) when
+      # absent — so an unconfigured repo still ships a working (unsigned) .dmg.
+      # Notarizing + stapling removes the Gatekeeper "unidentified developer"
+      # first-run wall on end-user Macs.
+      #
+      # Required repo secrets to activate (all must be set):
+      #   APPLE_CERT_BASE64        - base64 of the "Developer ID Application" .p12
+      #   APPLE_CERT_PASSWORD      - password for that .p12
+      #   APPLE_SIGN_IDENTITY      - e.g. "Developer ID Application: Acme (TEAMID)"
+      #   APPLE_NOTARY_APPLE_ID    - the Apple ID email for notarytool
+      #   APPLE_NOTARY_PASSWORD    - an app-specific password for that Apple ID
+      #   APPLE_TEAM_ID            - the 10-char Apple Developer Team ID
+      - name: macos codesign + notarize + staple
+        if: ${{ startsWith(matrix.label, 'macos-') && env.APPLE_CERT_BASE64 != '' }}
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Import the signing identity into a throwaway keychain (never logged).
+          KEYCHAIN="$RUNNER_TEMP/codesign.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          CERT="$RUNNER_TEMP/cert.p12"
+          echo "$APPLE_CERT_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          APP="dbopt-${{ matrix.label }}-app/dbopt.app"
+          # Sign the binary then the .app bundle (hardened runtime is required for notarization).
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGN_IDENTITY" "$APP/Contents/MacOS/dbopt"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGN_IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+          # Rebuild the .dmg now that the .app inside it is signed.
+          rm -f "dbopt-${{ matrix.label }}.dmg"
+          hdiutil create -volname dbopt -srcfolder "dbopt-${{ matrix.label }}-app" -ov -format UDZO "dbopt-${{ matrix.label }}.dmg"
+          codesign --force --timestamp --sign "$APPLE_SIGN_IDENTITY" "dbopt-${{ matrix.label }}.dmg"
+          # Submit to Apple's notary service and wait, then staple the ticket so
+          # the .dmg validates offline on the end user's machine.
+          xcrun notarytool submit "dbopt-${{ matrix.label }}.dmg" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "dbopt-${{ matrix.label }}.dmg"
+          xcrun stapler validate "dbopt-${{ matrix.label }}.dmg"
+          # Also refresh the .tar.gz so the bare binary inside it is signed too.
+          rm -f "dbopt-${{ matrix.label }}.tar.gz"
+          cp "$APP/Contents/MacOS/dbopt" staging/dbopt
+          (cd staging && tar czf "../dbopt-${{ matrix.label }}.tar.gz" ./*)
+          security delete-keychain "$KEYCHAIN" || true
+          echo "Notarized + stapled: dbopt-${{ matrix.label }}.dmg"
       - name: windows MSI
         if: matrix.label == 'windows-x86_64'
-        continue-on-error: true
+        # NO continue-on-error: a broken installer must NOT ship "green". cargo-wix
+        # failing, or finishing without producing a .msi, fails the whole job here
+        # (the downstream `release` guard only catches a *missing* file — it cannot
+        # see a cargo-wix non-zero exit that still uploaded nothing).
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           # WiX v3 (candle/light) ships on windows-latest; ensure it's on PATH
           # (install only if a future image drops it).
           $wix = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset v*" -Directory |
@@ -130,7 +201,7 @@ jobs:
                    Sort-Object Name -Descending | Select-Object -First 1
           }
           if ($wix) { $env:PATH = "$($wix.FullName)\bin;$env:PATH"; Write-Host "WiX bin: $($wix.FullName)\bin" }
-          else { Write-Warning "WiX Toolset not found" }
+          else { throw "WiX Toolset not found and could not be installed" }
           cargo install cargo-wix --locked
           # Build from the committed wix/ manifest (stable UpgradeCode). cargo-wix
           # needs -p in a workspace, and `light` resolves the relative
@@ -138,12 +209,63 @@ jobs:
           # crate AND pass -p backend.
           Push-Location crates/backend
           cargo wix -p backend --no-build --target ${{ matrix.target }} --nocapture --output "$env:GITHUB_WORKSPACE\dbopt-windows-x86_64.msi"
+          $exit = $LASTEXITCODE
           Pop-Location
+          if ($exit -ne 0) { throw "cargo wix exited with code $exit" }
           if (Test-Path dbopt-windows-x86_64.msi) {
-            Write-Host "MSI built: $((Get-Item dbopt-windows-x86_64.msi).Length) bytes"
+            $size = (Get-Item dbopt-windows-x86_64.msi).Length
+            Write-Host "MSI built: $size bytes"
+            # A zero/near-zero MSI is a broken installer; treat it as a hard failure.
+            if ($size -lt 1024) { throw "MSI is implausibly small ($size bytes) — treating as broken" }
           } else {
-            Write-Warning "MSI step finished but no .msi was produced"
+            throw "MSI step finished but no .msi was produced"
           }
+      # Authenticode code-signing for the .exe and .msi. Runs ONLY when the
+      # signing secret is present, and is SKIPPED (job still succeeds) when it is
+      # absent — so forks / unconfigured repos still produce working unsigned
+      # artifacts. This removes the unsigned first-run warning wall for end users.
+      #
+      # Required repo secrets to activate (all must be set):
+      #   WINDOWS_CERT_BASE64     - base64 of the code-signing .pfx file
+      #   WINDOWS_CERT_PASSWORD   - password for that .pfx
+      # (Optional) WINDOWS_CERT_TS_URL - RFC-3161 timestamp server; defaults below.
+      - name: windows code-sign (.exe + .msi)
+        if: ${{ matrix.label == 'windows-x86_64' && env.WINDOWS_CERT_BASE64 != '' }}
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          WINDOWS_CERT_TS_URL: ${{ secrets.WINDOWS_CERT_TS_URL }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Materialize the .pfx from the secret into a temp file (never logged).
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          $ts = if ($env:WINDOWS_CERT_TS_URL) { $env:WINDOWS_CERT_TS_URL } else { "http://timestamp.digicert.com" }
+          # Locate signtool from the installed Windows SDK.
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                      Where-Object { $_.FullName -like "*x64*" } |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found in the Windows SDK" }
+          $targets = @()
+          if (Test-Path "staging\dbopt.exe") { $targets += "staging\dbopt.exe" }
+          if (Test-Path "dbopt-windows-x86_64.msi") { $targets += "dbopt-windows-x86_64.msi" }
+          foreach ($t in $targets) {
+            & $signtool.FullName sign /fd SHA256 /tr $ts /td SHA256 `
+              /f $pfx /p $env:WINDOWS_CERT_PASSWORD "$t"
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $t (exit $LASTEXITCODE)" }
+            & $signtool.FullName verify /pa "$t"
+            if ($LASTEXITCODE -ne 0) { throw "signature verify failed for $t (exit $LASTEXITCODE)" }
+          }
+          Remove-Item $pfx -Force
+          # Re-archive the signed .exe into the .zip so the zip download is signed too.
+          if (Test-Path "staging\dbopt.exe") {
+            Remove-Item "dbopt-windows-x86_64.zip" -ErrorAction SilentlyContinue
+            Push-Location staging
+            7z a "..\dbopt-windows-x86_64.zip" .\*
+            Pop-Location
+          }
+          Write-Host "Signed Windows artifacts: $($targets -join ', ')"
       - name: linux AppImage (best-effort)
         if: matrix.label == 'linux-x86_64'
         run: |
@@ -238,11 +360,12 @@ jobs:
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} out/ \;
           (cd out && sha256sum * > SHA256SUMS)
           ls -la out
-          # Guard against a SILENTLY incomplete release. The per-OS binary jobs
-          # use `continue-on-error` for the MSI (and best-effort AppImage), so a
-          # broken installer would otherwise just vanish — the release would
-          # publish without it and the website's download link would 404. Fail
-          # the publish here instead. (AppImage is intentionally NOT required.)
+          # Guard against a SILENTLY incomplete release. The MSI step itself now
+          # fails the binary job hard (no continue-on-error) so a broken installer
+          # can't ship green — but this belt-and-suspenders check also fails the
+          # publish if any required asset is missing (e.g. the best-effort
+          # AppImage masks failures, and an upload glitch could still drop a file),
+          # so the website's download link can never 404. (AppImage is NOT required.)
           missing=""
           for f in dbopt-linux-x86_64.tar.gz dbopt-macos-arm64.dmg dbopt-macos-arm64.tar.gz dbopt-windows-x86_64.msi dbopt-windows-x86_64.zip; do
             [ -f "out/$f" ] || missing="$missing $f"
