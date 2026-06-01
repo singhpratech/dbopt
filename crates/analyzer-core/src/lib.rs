@@ -3,6 +3,7 @@ pub mod tokens;
 pub mod rules;
 pub mod plan_xml;
 pub mod dmv;
+pub mod advisor_workload;
 pub mod report;
 
 #[cfg(test)]

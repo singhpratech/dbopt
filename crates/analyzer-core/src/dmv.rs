@@ -13,6 +13,12 @@ pub struct DmvBundle {
     pub missing_indexes: Vec<MissingIndex>,
     #[serde(default)]
     pub partition_stats: Vec<PartitionStats>,
+    /// Per-(schema, table) workload frequency from Query Store / exec stats,
+    /// used to ground missing-index recs in how often the benefiting query runs.
+    /// ADDITIVE + OPTIONAL: defaults to `[]`, and the advisor degrades to the
+    /// DMV's own seek counts when this is absent.
+    #[serde(default)]
+    pub workload: Vec<crate::advisor_workload::QueryWorkloadStat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,8 +332,17 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     for m in &consolidated {
         let keys: Vec<String> = m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect();
         if keys.is_empty() { continue; }
-        // SQL Server's standard "improvement measure".
-        let score = m.avg_total_user_cost * (m.avg_user_impact / 100.0) * (m.user_seeks.max(1) as f64);
+        // SQL Server's standard "improvement measure" — the raw benefit signal.
+        let base_score = m.avg_total_user_cost * (m.avg_user_impact / 100.0) * (m.user_seeks.max(1) as f64);
+        // Write-cost + workload grounding: down-rank sprawling indexes by their
+        // maintenance cost and boost candidates whose table sees a hot query.
+        // This is the lever that makes the advisor smarter than a raw DMV dump:
+        // benefit ÷ write-cost, then floated by observed query frequency. When no
+        // workload data is present it degrades to write-cost-only ranking.
+        let ranking = crate::advisor_workload::rank_candidate(m, base_score, &bundle.workload);
+        let score = ranking.adjusted_score;
+        let write_cost = ranking.write_cost;
+        let workload_phrase = crate::advisor_workload::workload_phrase(ranking.executions_per_day);
         let key_list = keys.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
         let inc_list = m.included_columns.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
         let inc_clause = if m.included_columns.is_empty() { String::new() } else { format!("\n  INCLUDE ({})", inc_list) };
@@ -338,22 +353,40 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             name, br(&m.schema_name), br(&m.table_name), key_list, inc_clause
         );
         let priority = if score >= 10.0 { "high" } else if score >= 1.0 { "medium" } else { "low" };
+        // Compose rationale: DMV evidence + write-cost note + (optional) workload.
+        let write_cost_note = match write_cost {
+            crate::advisor_workload::WriteCost::High => " This index is WIDE — write cost: high, so every INSERT/UPDATE/DELETE pays to maintain it; we down-ranked it accordingly and you should trim key/INCLUDE columns to what queries actually need before applying.",
+            crate::advisor_workload::WriteCost::Medium => " Write cost: medium — keep an eye on its INCLUDE list so it doesn't sprawl.",
+            crate::advisor_workload::WriteCost::Low => " Write cost: low — narrow enough that maintenance overhead is modest.",
+        };
+        let workload_note = match &workload_phrase {
+            Some(p) => format!(" It {p}, so it ranks ahead of indexes for colder queries."),
+            None => String::new(),
+        };
+        let rationale = format!(
+            "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%.{}{} Order key columns by selectivity and consolidate with existing indexes before applying.",
+            m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, write_cost_note, workload_note
+        );
+        let mut metrics = vec![
+            ("Seeks that benefit".into(), commas(m.user_seeks)),
+            ("Est. cost reduction".into(), format!("~{:.0}%", m.avg_user_impact)),
+            ("Avg query cost".into(), format!("{:.2}", m.avg_total_user_cost)),
+            ("Write cost".into(), write_cost.label().to_string()),
+        ];
+        if let Some(per_day) = ranking.executions_per_day {
+            if per_day > 0.0 {
+                metrics.push(("Query runs".into(), format!("~{}×/day", if per_day >= 1.0 { format!("{:.0}", per_day.round()) } else { format!("{per_day:.1}") })));
+            }
+        }
         recs.push(Recommendation {
             kind: RecKind::CreateIndex,
             priority: priority.into(),
             title: format!("Create covering index on {}.{}", m.schema_name, m.table_name),
             object: format!("{}.{}", m.schema_name, m.table_name),
-            rationale: format!(
-                "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%. Improvement measure {:.1}. Order key columns by selectivity and consolidate with existing indexes before applying.",
-                m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, score
-            ),
+            rationale,
             ddl,
             impact_score: score,
-            metrics: vec![
-                ("Seeks that benefit".into(), commas(m.user_seeks)),
-                ("Est. cost reduction".into(), format!("~{:.0}%", m.avg_user_impact)),
-                ("Avg query cost".into(), format!("{:.2}", m.avg_total_user_cost)),
-            ],
+            metrics,
             // These are SQL Server's own projections, not measured outcomes.
             confidence: "estimated".into(),
         });
@@ -993,5 +1026,82 @@ mod dedup_tests {
         ];
         let out = unused_existing_indexes(&usage, &idx, 100);
         assert!(out.is_empty(), "none should be flagged: {out:#?}");
+    }
+
+    // ---- write-cost + workload grounding through advise() ------------------
+
+    #[test]
+    fn advise_surfaces_write_cost_label_on_create_index() {
+        // A narrow candidate must carry a "Write cost: low" metric chip and the
+        // rationale must mention write cost, so a DBA can trust the ranking.
+        let bundle = DmvBundle {
+            missing_indexes: vec![mi("Orders", &["CustomerId"], &[], &[], 90.0, 1000, 10.0)],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let ci = recs.iter().find(|r| r.kind == RecKind::CreateIndex).expect("create rec");
+        assert!(
+            ci.metrics.iter().any(|(k, v)| k == "Write cost" && v == "low"),
+            "expected a low write-cost chip: {:#?}",
+            ci.metrics
+        );
+        assert!(ci.rationale.to_lowercase().contains("write cost"), "rationale: {}", ci.rationale);
+    }
+
+    #[test]
+    fn advise_downranks_wide_index_below_narrow_at_equal_dmv_benefit() {
+        // Two candidates on DIFFERENT tables with the SAME raw DMV numbers; the
+        // sprawling one must rank BELOW the narrow one purely on write cost.
+        // (Different tables so consolidation leaves them separate.)
+        let bundle = DmvBundle {
+            missing_indexes: vec![
+                mi("Narrow", &["A"], &[], &[], 90.0, 1000, 10.0),
+                mi("Wide", &["A", "B", "C", "D", "E", "F"], &[], &["X", "Y", "Z", "W"], 90.0, 1000, 10.0),
+            ],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let narrow = recs.iter().find(|r| r.object.ends_with("Narrow")).unwrap();
+        let wide = recs.iter().find(|r| r.object.ends_with("Wide")).unwrap();
+        assert!(narrow.impact_score > wide.impact_score, "narrow {} should beat wide {}", narrow.impact_score, wide.impact_score);
+        assert!(wide.metrics.iter().any(|(k, v)| k == "Write cost" && v == "high"), "wide should be high write cost: {:#?}", wide.metrics);
+    }
+
+    #[test]
+    fn advise_floats_hot_query_and_reads_runs_per_day() {
+        // Identical candidate shape + DMV numbers on two tables, but one table
+        // sees a hot query in the workload. The hot one must rank higher and its
+        // rationale must read "helps a query that runs ~N×/day".
+        let bundle = DmvBundle {
+            missing_indexes: vec![
+                mi("Hot", &["A"], &[], &[], 90.0, 1000, 10.0),
+                mi("Cold", &["A"], &[], &[], 90.0, 1000, 10.0),
+            ],
+            workload: vec![
+                crate::advisor_workload::QueryWorkloadStat { schema_name: "dbo".into(), table_name: "Hot".into(), execution_count: 50_000, window_hours: 24.0 },
+                crate::advisor_workload::QueryWorkloadStat { schema_name: "dbo".into(), table_name: "Cold".into(), execution_count: 3, window_hours: 24.0 },
+            ],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let hot = recs.iter().find(|r| r.object.ends_with("Hot")).unwrap();
+        let cold = recs.iter().find(|r| r.object.ends_with("Cold")).unwrap();
+        assert!(hot.impact_score > cold.impact_score, "hot {} should beat cold {}", hot.impact_score, cold.impact_score);
+        assert!(hot.rationale.contains("runs ~"), "hot rationale should cite a per-day rate: {}", hot.rationale);
+        assert!(hot.metrics.iter().any(|(k, _)| k == "Query runs"), "hot should carry a Query runs chip: {:#?}", hot.metrics);
+    }
+
+    #[test]
+    fn advise_without_workload_still_emits_create_and_omits_runs_chip() {
+        // Graceful degrade: no workload → still a valid CreateIndex, no "Query
+        // runs" chip, no misleading "0×/day".
+        let bundle = DmvBundle {
+            missing_indexes: vec![mi("Orders", &["CustomerId"], &[], &[], 90.0, 1000, 10.0)],
+            ..Default::default()
+        };
+        let recs = advise(&bundle);
+        let ci = recs.iter().find(|r| r.kind == RecKind::CreateIndex).unwrap();
+        assert!(!ci.metrics.iter().any(|(k, _)| k == "Query runs"), "no runs chip without workload: {:#?}", ci.metrics);
+        assert!(!ci.rationale.contains("runs ~"), "no per-day phrase without workload: {}", ci.rationale);
     }
 }

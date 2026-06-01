@@ -171,6 +171,7 @@ fn advisor_emits_ranked_recommendations_with_ddl() {
         partition_stats: vec![
             PartitionStats { schema_name: "dbo".into(), table_name: "Facts".into(), index_name: None, row_count: 50_000_000, reserved_kb: 2_200_000, used_kb: 2_000_000, data_kb: 1_900_000 },
         ],
+        ..Default::default()
     };
 
     let recs = advise(&bundle);
