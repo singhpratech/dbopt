@@ -46,7 +46,17 @@ pub struct Cadences {
     pub waits_mins: u64,
     /// `sys.dm_db_index_usage_stats` delta — minutes.
     pub index_usage_mins: u64,
+    /// Deep live vitals (CPU/scheduler pressure, memory headroom, file-IO
+    /// latency deltas, tempdb contention, plan-cache health) — seconds. These
+    /// are cheap DMV reads, so they default to a tight cadence like the live
+    /// poller. `#[serde(default)]` so configs written before this field still
+    /// deserialize and pick up the default.
+    #[serde(default = "default_vitals_secs")]
+    pub vitals_secs: u64,
 }
+
+/// Default cadence for the deep-vitals pollers (seconds).
+pub fn default_vitals_secs() -> u64 { 60 }
 
 impl Default for Cadences {
     fn default() -> Self {
@@ -55,6 +65,7 @@ impl Default for Cadences {
             query_store_mins: 5,
             waits_mins: 5,
             index_usage_mins: 15,
+            vitals_secs: default_vitals_secs(),
         }
     }
 }

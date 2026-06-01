@@ -123,6 +123,61 @@ pub async fn run(
                 poll::sizes::poll_sizes(&c, &s).await
             }),
         ));
+
+        // ---- deep live vitals (the community real-time script-style real-time pressure) ----
+        // Cheap DMV reads on a tight cadence, each in its own task so one
+        // missing-permission surface can't starve the others.
+        let vitals_period = Duration::from_secs(cadences.vitals_secs.max(1));
+        handles.push(spawn_poller(
+            format!("{name}/cpu_pressure"),
+            vitals_period,
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::cpu_pressure::poll_cpu_pressure(&c, &s).await
+            }),
+        ));
+        handles.push(spawn_poller(
+            format!("{name}/memory_headroom"),
+            vitals_period,
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::memory_headroom::poll_memory_headroom(&c, &s).await
+            }),
+        ));
+        handles.push(spawn_poller(
+            format!("{name}/io_latency"),
+            vitals_period,
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::io_latency::poll_io_latency(&c, &s).await
+            }),
+        ));
+        handles.push(spawn_poller(
+            format!("{name}/tempdb_contention"),
+            vitals_period,
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::tempdb_contention::poll_tempdb_contention(&c, &s).await
+            }),
+        ));
+        handles.push(spawn_poller(
+            format!("{name}/plan_cache"),
+            vitals_period,
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::plan_cache::poll_plan_cache(&c, &s).await
+            }),
+        ));
     }
 
     for h in handles {

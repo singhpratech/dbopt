@@ -826,6 +826,30 @@ pub struct LiveMetrics {
     pub io_stall_write_ms: i64,
     pub top_waits: Vec<LiveWait>,
     pub sessions: Vec<LiveSession>,
+
+    // ---- deep vitals (the community real-time script-style real-time pressure) -------------
+    // CPU PRESSURE: workers ready-to-run but waiting on a CPU, summed over the
+    // schedulers that run user work, plus the scheduler count for context.
+    pub online_schedulers: Option<i64>,
+    pub runnable_tasks: Option<i64>,
+    pub scheduler_work_queue: Option<i64>,
+    // MEMORY HEADROOM: pending workspace-memory grants + buffer-pool sizing.
+    // (page_life_expectancy already exists above and is the PLE side of this.)
+    pub pending_memory_grants: Option<i64>,
+    pub target_server_memory_kb: Option<i64>,
+    pub total_server_memory_kb: Option<i64>,
+    // IO LATENCY: instance-wide avg ms-per-read / ms-per-write right now. These
+    // are lifetime cumulative ratios (stall/op); the sentinel time-series holds
+    // the per-window deltas. Useful as a single "is storage slow" gauge.
+    pub avg_read_latency_ms: Option<f64>,
+    pub avg_write_latency_ms: Option<f64>,
+    // TEMPDB CONTENTION: live PAGELATCH waiters on tempdb PFS/GAM/SGAM pages.
+    pub tempdb_pagelatch_waiters: Option<i64>,
+    pub tempdb_data_files: Option<i64>,
+    // PLAN CACHE: single-use ad-hoc plan count/size vs the whole cache.
+    pub single_use_plan_count: Option<i64>,
+    pub single_use_plan_kb: Option<i64>,
+    pub total_plan_count: Option<i64>,
 }
 
 /// One real-time snapshot of server vitals. Polled on an interval by the UI.
@@ -1004,6 +1028,115 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
                     program: r.get::<&str, _>(11).unwrap_or("").to_string(),
                     sql_preview: r.get::<&str, _>(12).unwrap_or("").to_string(),
                 });
+            }
+        }
+    }
+
+    // --- CPU PRESSURE: runnable tasks + work queue over VISIBLE ONLINE
+    //     schedulers. Sustained runnable_tasks > 0 means workers are queued for
+    //     CPU. All CAST to BIGINT (one i64 row). Best-effort.
+    let cpu_pressure = r#"
+        SELECT
+            CAST(COUNT(*)                   AS BIGINT),
+            CAST(SUM(runnable_tasks_count)  AS BIGINT),
+            CAST(SUM(work_queue_count)      AS BIGINT)
+        FROM sys.dm_os_schedulers
+        WHERE status = 'VISIBLE ONLINE';
+    "#;
+    if let Ok(s) = client.simple_query(cpu_pressure).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.online_schedulers = Some(r.get::<i64, _>(0).unwrap_or(0));
+                m.runnable_tasks = Some(r.get::<i64, _>(1).unwrap_or(0));
+                m.scheduler_work_queue = Some(r.get::<i64, _>(2).unwrap_or(0));
+            }
+        }
+    }
+
+    // --- MEMORY HEADROOM: pending workspace-memory grants + target/total
+    //     server memory (KB). PLE is already captured in the perf block above.
+    let mem_grants = r#"
+        SELECT
+            CAST(ISNULL(SUM(waiter_count), 0) AS BIGINT)
+        FROM sys.dm_exec_query_resource_semaphores;
+    "#;
+    if let Ok(s) = client.simple_query(mem_grants).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.pending_memory_grants = Some(r.get::<i64, _>(0).unwrap_or(0));
+            }
+        }
+    }
+    let mem_totals = r#"
+        SELECT
+            CAST(MAX(CASE WHEN RTRIM(counter_name) = 'Target Server Memory (KB)'
+                          THEN cntr_value END) AS BIGINT),
+            CAST(MAX(CASE WHEN RTRIM(counter_name) = 'Total Server Memory (KB)'
+                          THEN cntr_value END) AS BIGINT)
+        FROM sys.dm_os_performance_counters
+        WHERE RTRIM(counter_name) IN ('Target Server Memory (KB)','Total Server Memory (KB)');
+    "#;
+    if let Ok(s) = client.simple_query(mem_totals).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.target_server_memory_kb = r.get::<i64, _>(0);
+                m.total_server_memory_kb = r.get::<i64, _>(1);
+            }
+        }
+    }
+
+    // --- IO LATENCY: instance-wide avg ms per read / write (lifetime ratio).
+    //     CAST to FLOAT so the division returns a real, not integer-truncated.
+    let io_latency = r#"
+        SELECT
+            CAST(CASE WHEN SUM(num_of_reads)  > 0
+                 THEN SUM(io_stall_read_ms)  * 1.0 / SUM(num_of_reads)  ELSE 0 END AS FLOAT),
+            CAST(CASE WHEN SUM(num_of_writes) > 0
+                 THEN SUM(io_stall_write_ms) * 1.0 / SUM(num_of_writes) ELSE 0 END AS FLOAT)
+        FROM sys.dm_io_virtual_file_stats(NULL, NULL);
+    "#;
+    if let Ok(s) = client.simple_query(io_latency).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.avg_read_latency_ms = r.get::<f64, _>(0);
+                m.avg_write_latency_ms = r.get::<f64, _>(1);
+            }
+        }
+    }
+
+    // --- TEMPDB CONTENTION: live PAGELATCH waiters on tempdb (db_id 2)
+    //     allocation pages, plus the tempdb data-file count for context.
+    let tempdb = r#"
+        SELECT
+            CAST((SELECT COUNT(*) FROM sys.dm_os_waiting_tasks
+                  WHERE wait_type LIKE 'PAGELATCH%'
+                    AND resource_description LIKE '2:%') AS BIGINT),
+            CAST((SELECT COUNT(*) FROM sys.master_files
+                  WHERE database_id = 2 AND type_desc = 'ROWS') AS BIGINT);
+    "#;
+    if let Ok(s) = client.simple_query(tempdb).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.tempdb_pagelatch_waiters = Some(r.get::<i64, _>(0).unwrap_or(0));
+                m.tempdb_data_files = Some(r.get::<i64, _>(1).unwrap_or(0));
+            }
+        }
+    }
+
+    // --- PLAN CACHE: single-use ad-hoc plans (count + KB) vs total plan count.
+    let plan_cache = r#"
+        SELECT
+            CAST(SUM(CASE WHEN objtype = 'Adhoc' AND usecounts = 1 THEN 1 ELSE 0 END) AS BIGINT),
+            CAST(SUM(CASE WHEN objtype = 'Adhoc' AND usecounts = 1 THEN size_in_bytes ELSE 0 END) / 1024 AS BIGINT),
+            CAST(COUNT(*) AS BIGINT)
+        FROM sys.dm_exec_cached_plans;
+    "#;
+    if let Ok(s) = client.simple_query(plan_cache).await {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(r) = rows.into_iter().next() {
+                m.single_use_plan_count = Some(r.get::<i64, _>(0).unwrap_or(0));
+                m.single_use_plan_kb = Some(r.get::<i64, _>(1).unwrap_or(0));
+                m.total_plan_count = Some(r.get::<i64, _>(2).unwrap_or(0));
             }
         }
     }

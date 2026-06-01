@@ -25,6 +25,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0004_query_text",    include_str!("../migrations/0004_query_text.sql")),
     ("0005_deadlock_graph_hash", include_str!("../migrations/0005_deadlock_graph_hash.sql")),
     ("0006_query_baseline", include_str!("../migrations/0006_query_baseline.sql")),
+    ("0007_vitals",         include_str!("../migrations/0007_vitals.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -381,6 +382,11 @@ impl Storage {
             "deadlock_capture",
             "index_usage_delta",
             "size_snapshot",
+            "cpu_pressure_snapshot",
+            "memory_headroom_snapshot",
+            "io_latency_delta",
+            "tempdb_contention_snapshot",
+            "plan_cache_snapshot",
         ];
         let cutoff_ms = cutoff.timestamp_millis();
         let conn = self.conn.lock().expect("sentinel storage mutex poisoned");
@@ -421,6 +427,11 @@ impl Storage {
                     UNION ALL SELECT MIN(captured_at) FROM deadlock_capture
                     UNION ALL SELECT MIN(captured_at) FROM index_usage_delta
                     UNION ALL SELECT MIN(captured_at) FROM size_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM cpu_pressure_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM memory_headroom_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM io_latency_delta
+                    UNION ALL SELECT MIN(captured_at) FROM tempdb_contention_snapshot
+                    UNION ALL SELECT MIN(captured_at) FROM plan_cache_snapshot
                  )",
                 [],
                 |r| r.get::<_, Option<i64>>(0),
@@ -597,6 +608,133 @@ impl Storage {
             ],
         )?;
         Ok(())
+    }
+
+    // ---------- Deep vitals (CPU/memory/IO/tempdb/plan-cache) -------------
+
+    pub fn insert_cpu_pressure(&self, instance_id: i64, row: &CpuPressureRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO cpu_pressure_snapshot(instance_id, captured_at, online_schedulers,
+                 runnable_tasks, work_queue, current_workers, active_workers, pending_disk_io)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.online_schedulers,
+                row.runnable_tasks,
+                row.work_queue,
+                row.current_workers,
+                row.active_workers,
+                row.pending_disk_io,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_memory_headroom(&self, instance_id: i64, row: &MemoryHeadroomRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO memory_headroom_snapshot(instance_id, captured_at, page_life_expectancy,
+                 pending_memory_grants, granted_memory_kb, target_server_memory_kb, total_server_memory_kb)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.page_life_expectancy,
+                row.pending_memory_grants,
+                row.granted_memory_kb,
+                row.target_server_memory_kb,
+                row.total_server_memory_kb,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_io_latency(&self, instance_id: i64, row: &IoLatencyRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO io_latency_delta(instance_id, captured_at, database_name, file_logical_name,
+                 file_type, reads_delta, writes_delta, read_stall_ms_delta, write_stall_ms_delta,
+                 avg_read_latency_ms, avg_write_latency_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.database_name,
+                row.file_logical_name,
+                row.file_type,
+                row.reads_delta,
+                row.writes_delta,
+                row.read_stall_ms_delta,
+                row.write_stall_ms_delta,
+                row.avg_read_latency_ms,
+                row.avg_write_latency_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_tempdb_contention(&self, instance_id: i64, row: &TempdbContentionRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO tempdb_contention_snapshot(instance_id, captured_at, pagelatch_waiters,
+                 pfs_waiters, gam_waiters, sgam_waiters, total_wait_ms, tempdb_data_files)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.pagelatch_waiters,
+                row.pfs_waiters,
+                row.gam_waiters,
+                row.sgam_waiters,
+                row.total_wait_ms,
+                row.tempdb_data_files,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_plan_cache(&self, instance_id: i64, row: &PlanCacheRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO plan_cache_snapshot(instance_id, captured_at, single_use_plan_count,
+                 single_use_size_kb, total_plan_count, total_size_kb)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.single_use_plan_count,
+                row.single_use_size_kb,
+                row.total_plan_count,
+                row.total_size_kb,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Most recent per-file cumulative IO snapshot for this instance, keyed by
+    /// (database_name, file_logical_name) → (num_of_reads, num_of_writes,
+    /// io_stall_read_ms, io_stall_write_ms). The IO-latency poller diffs the
+    /// current cumulative reading against this to derive per-window deltas.
+    /// `None` on the very first observation (nothing to diff against yet).
+    pub fn previous_io_file_snapshot(
+        &self,
+        instance_id: i64,
+    ) -> Option<HashMap<(String, String), (i64, i64, i64, i64)>> {
+        let raw = self.get_state(instance_id, "io_file_snapshot").ok().flatten()?;
+        let v: Vec<((String, String), (i64, i64, i64, i64))> = serde_json::from_str(&raw).ok()?;
+        Some(v.into_iter().collect())
+    }
+
+    pub fn update_io_file_snapshot(
+        &self,
+        instance_id: i64,
+        snapshot: &HashMap<(String, String), (i64, i64, i64, i64)>,
+    ) -> anyhow::Result<()> {
+        let v: Vec<(&(String, String), &(i64, i64, i64, i64))> = snapshot.iter().collect();
+        let raw = serde_json::to_string(&v)?;
+        self.set_state(instance_id, "io_file_snapshot", &raw)
     }
 
     // ---------- Poller state (generic key/value JSON store) ---------------
@@ -1290,6 +1428,67 @@ pub struct SizeSnapshotRow {
     pub row_count: i64,
 }
 
+/// One CPU/scheduler-pressure observation summed over VISIBLE ONLINE schedulers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuPressureRow {
+    pub captured_at: DateTime<Utc>,
+    pub online_schedulers: i64,
+    pub runnable_tasks: i64,
+    pub work_queue: i64,
+    pub current_workers: i64,
+    pub active_workers: i64,
+    pub pending_disk_io: i64,
+}
+
+/// One memory-headroom observation (PLE + pending grants + buffer-pool sizing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryHeadroomRow {
+    pub captured_at: DateTime<Utc>,
+    pub page_life_expectancy: i64,
+    pub pending_memory_grants: i64,
+    pub granted_memory_kb: i64,
+    pub target_server_memory_kb: i64,
+    pub total_server_memory_kb: i64,
+}
+
+/// Per-file IO latency for the window, derived by diffing cumulative
+/// `sys.dm_io_virtual_file_stats` against the prior tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoLatencyRow {
+    pub captured_at: DateTime<Utc>,
+    pub database_name: String,
+    pub file_logical_name: String,
+    pub file_type: String,
+    pub reads_delta: i64,
+    pub writes_delta: i64,
+    pub read_stall_ms_delta: i64,
+    pub write_stall_ms_delta: i64,
+    pub avg_read_latency_ms: f64,
+    pub avg_write_latency_ms: f64,
+}
+
+/// One tempdb allocation-page contention observation (PAGELATCH on PFS/GAM/SGAM).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempdbContentionRow {
+    pub captured_at: DateTime<Utc>,
+    pub pagelatch_waiters: i64,
+    pub pfs_waiters: i64,
+    pub gam_waiters: i64,
+    pub sgam_waiters: i64,
+    pub total_wait_ms: i64,
+    pub tempdb_data_files: i64,
+}
+
+/// One plan-cache-health observation (single-use ad-hoc plans vs total).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheRow {
+    pub captured_at: DateTime<Utc>,
+    pub single_use_plan_count: i64,
+    pub single_use_size_kb: i64,
+    pub total_plan_count: i64,
+    pub total_size_kb: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1624,5 +1823,131 @@ mod tests {
         let removed2 = s.prune_before(Utc::now() - chrono::Duration::days(90)).expect("prune_before");
         assert!(removed2 >= 1, "prune_before also ages out stale baselines, got {removed2}");
         assert!(s.get_query_baseline(id, 3).expect("read").is_none());
+    }
+
+    /// The 0007 deep-vitals tables exist after migration and every insert path
+    /// round-trips. We read the rows back by hand (these tables are write-only
+    /// from Rust today; the assertions just prove the schema + binds line up).
+    #[test]
+    fn vitals_inserts_round_trip() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+        let now = Utc::now();
+
+        s.insert_cpu_pressure(id, &CpuPressureRow {
+            captured_at: now,
+            online_schedulers: 8,
+            runnable_tasks: 3,
+            work_queue: 1,
+            current_workers: 40,
+            active_workers: 12,
+            pending_disk_io: 2,
+        }).expect("cpu");
+
+        s.insert_memory_headroom(id, &MemoryHeadroomRow {
+            captured_at: now,
+            page_life_expectancy: 1200,
+            pending_memory_grants: 0,
+            granted_memory_kb: 4096,
+            target_server_memory_kb: 8_000_000,
+            total_server_memory_kb: 7_500_000,
+        }).expect("mem");
+
+        s.insert_io_latency(id, &IoLatencyRow {
+            captured_at: now,
+            database_name: "pharma".into(),
+            file_logical_name: "appdb_data".into(),
+            file_type: "ROWS".into(),
+            reads_delta: 100,
+            writes_delta: 50,
+            read_stall_ms_delta: 900,
+            write_stall_ms_delta: 250,
+            avg_read_latency_ms: 9.0,
+            avg_write_latency_ms: 5.0,
+        }).expect("io");
+
+        s.insert_tempdb_contention(id, &TempdbContentionRow {
+            captured_at: now,
+            pagelatch_waiters: 5,
+            pfs_waiters: 3,
+            gam_waiters: 1,
+            sgam_waiters: 1,
+            total_wait_ms: 320,
+            tempdb_data_files: 1,
+        }).expect("tempdb");
+
+        s.insert_plan_cache(id, &PlanCacheRow {
+            captured_at: now,
+            single_use_plan_count: 5000,
+            single_use_size_kb: 250_000,
+            total_plan_count: 7000,
+            total_size_kb: 400_000,
+        }).expect("plan");
+
+        let lock = s.conn.lock().expect("lock");
+        let count = |t: &str| -> i64 {
+            lock.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).expect("count")
+        };
+        assert_eq!(count("cpu_pressure_snapshot"), 1);
+        assert_eq!(count("memory_headroom_snapshot"), 1);
+        assert_eq!(count("io_latency_delta"), 1);
+        assert_eq!(count("tempdb_contention_snapshot"), 1);
+        assert_eq!(count("plan_cache_snapshot"), 1);
+
+        // The avg-read latency we persisted must come back as the same float.
+        let avg: f64 = lock
+            .query_row("SELECT avg_read_latency_ms FROM io_latency_delta", [], |r| r.get(0))
+            .expect("avg");
+        assert!((avg - 9.0).abs() < 1e-9, "io latency round-trips, got {avg}");
+    }
+
+    /// The cumulative per-file IO snapshot used by the IO-latency delta poller
+    /// persists across calls (JSON in poller_state) and restores exactly.
+    #[test]
+    fn io_file_snapshot_round_trip() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+
+        // First observation: nothing stored yet → None (poller seeds + skips).
+        assert!(s.previous_io_file_snapshot(id).is_none());
+
+        let mut snap: HashMap<(String, String), (i64, i64, i64, i64)> = HashMap::new();
+        snap.insert(("db1".into(), "f1".into()), (10, 20, 300, 400));
+        snap.insert(("db1".into(), "f2".into()), (1, 2, 3, 4));
+        s.update_io_file_snapshot(id, &snap).expect("save");
+
+        let restored = s.previous_io_file_snapshot(id).expect("restore");
+        assert_eq!(restored.get(&("db1".into(), "f1".into())), Some(&(10, 20, 300, 400)));
+        assert_eq!(restored.get(&("db1".into(), "f2".into())), Some(&(1, 2, 3, 4)));
+    }
+
+    /// Deep-vitals rows must age out with the other telemetry so the SQLite
+    /// store stays bounded — prune drops old vitals, keeps fresh ones.
+    #[test]
+    fn prune_drops_old_vitals() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+
+        let old = Utc::now() - chrono::Duration::days(100);
+        let fresh = Utc::now() - chrono::Duration::minutes(1);
+        for &when in &[old, fresh] {
+            s.insert_cpu_pressure(id, &CpuPressureRow {
+                captured_at: when,
+                online_schedulers: 4,
+                runnable_tasks: 0,
+                work_queue: 0,
+                current_workers: 10,
+                active_workers: 2,
+                pending_disk_io: 0,
+            }).expect("cpu");
+        }
+
+        let removed = s.prune_before(Utc::now() - chrono::Duration::days(90)).expect("prune");
+        assert!(removed >= 1, "old vitals row should be pruned, removed={removed}");
+        let remaining: i64 = {
+            let lock = s.conn.lock().expect("lock");
+            lock.query_row("SELECT COUNT(*) FROM cpu_pressure_snapshot", [], |r| r.get(0)).expect("count")
+        };
+        assert_eq!(remaining, 1, "only the fresh vitals row survives");
     }
 }
