@@ -1,0 +1,15 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "EventLog",
+        "index_name": "PK_EventLog", "is_unique": true, "is_primary_key": true,
+        "key_columns": ["EventId"], "included_columns": [] }
+    ],
+    "missing_indexes": [],
+    "partition_stats": [
+      { "schema_name": "dbo", "table_name": "EventLog", "index_name": "PK_EventLog",
+        "row_count": 5400000, "reserved_kb": 1048576, "used_kb": 1040000, "data_kb": 1020000 }
+    ]
+  }
+}

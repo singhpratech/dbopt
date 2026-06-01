@@ -1,0 +1,6 @@
+{
+  "must_fire": ["structure.no_primary_key"],
+  "must_not_fire": ["structure.heap_table", "structure.wide_clustered_key"],
+  "server_version": 2025,
+  "category": "structure"
+}

@@ -1,0 +1,15 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Shipment",
+        "index_name": "PK_Shipment", "is_unique": true, "is_primary_key": true,
+        "key_columns": ["ShipmentId"], "included_columns": [] }
+    ],
+    "missing_indexes": [],
+    "partition_stats": [
+      { "schema_name": "dbo", "table_name": "Shipment", "index_name": "PK_Shipment",
+        "row_count": 240000, "reserved_kb": 51200, "used_kb": 50000, "data_kb": 48000 }
+    ]
+  }
+}

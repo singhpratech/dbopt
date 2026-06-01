@@ -1,0 +1,16 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "OrderLine",
+        "index_name": "PK_OrderLine", "is_unique": true, "is_primary_key": true,
+        "key_columns": ["TenantId", "WarehouseId", "OrderId", "LineNo", "SkuId"],
+        "included_columns": [] }
+    ],
+    "missing_indexes": [],
+    "partition_stats": [
+      { "schema_name": "dbo", "table_name": "OrderLine", "index_name": "PK_OrderLine",
+        "row_count": 880000, "reserved_kb": 204800, "used_kb": 200000, "data_kb": 190000 }
+    ]
+  }
+}

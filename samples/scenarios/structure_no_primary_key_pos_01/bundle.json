@@ -1,0 +1,15 @@
+{
+  "dmv_bundle": {
+    "index_usage": [],
+    "indexes": [
+      { "schema_name": "dbo", "table_name": "Shipment",
+        "index_name": "CIX_Shipment_ShippedAt", "is_unique": false, "is_primary_key": false,
+        "key_columns": ["ShippedAt"], "included_columns": [] }
+    ],
+    "missing_indexes": [],
+    "partition_stats": [
+      { "schema_name": "dbo", "table_name": "Shipment", "index_name": "CIX_Shipment_ShippedAt",
+        "row_count": 240000, "reserved_kb": 51200, "used_kb": 50000, "data_kb": 48000 }
+    ]
+  }
+}
