@@ -162,6 +162,11 @@ async fn advise(Json(req): Json<ConnectReq>) -> impl IntoResponse {
         Ok(bundle) => {
             let recommendations = analyzer_core::dmv::advise(&bundle);
             let advice = analyzer_core::dmv::analyze(&bundle);
+            // Honest transparency: how many tables the live Query-Store workload
+            // grounding actually covered, and the capture window it observed.
+            // `null` window when no table matched (Query Store off/empty) so the
+            // UI can say "workload grounding unavailable" instead of implying 0h.
+            let workload_window_hours = bundle.workload.first().map(|w| w.window_hours);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -169,6 +174,8 @@ async fn advise(Json(req): Json<ConnectReq>) -> impl IntoResponse {
                     "findings": advice.findings,
                     "index_heatmap": advice.index_heatmap,
                     "size_treemap": advice.size_treemap,
+                    "workload_tables": bundle.workload.len(),
+                    "workload_window_hours": workload_window_hours,
                 })),
             )
                 .into_response()

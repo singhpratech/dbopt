@@ -1,4 +1,5 @@
 use crate::routes::ConnectReq;
+use analyzer_core::advisor_workload::QueryWorkloadStat;
 use analyzer_core::dmv::{DmvBundle, IndexUsage, IndexMeta, MissingIndex, PartitionStats};
 use std::time::Duration;
 use tiberius::{AuthMethod, Client, Config};
@@ -454,6 +455,153 @@ pub async fn query_store_top_queries(
     Ok(out)
 }
 
+/// True when `text` references the bare identifier `ident` as a whole word
+/// (case-insensitively). We implement the word boundary BY HAND — no regex
+/// crate — so "Order" does NOT match the longer token "Orders": the character
+/// immediately before and after each candidate position must be a non-word
+/// character (not ASCII-alphanumeric and not `_`). This lets us match `Orders`,
+/// `[Orders]`, and `dbo.Orders` (the `[`, `]`, `.` and whitespace around the
+/// token are all word boundaries) without false-matching substrings.
+fn references_table_token(text: &str, ident: &str) -> bool {
+    if ident.is_empty() {
+        return false;
+    }
+    let hay = text.as_bytes();
+    let needle = ident.as_bytes();
+    let nlen = needle.len();
+    if hay.len() < nlen {
+        return false;
+    }
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0usize;
+    while i + nlen <= hay.len() {
+        // Case-insensitive compare of the candidate window against the needle.
+        let matches = hay[i..i + nlen]
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b));
+        if matches {
+            let before_ok = i == 0 || !is_word(hay[i - 1]);
+            let after_idx = i + nlen;
+            let after_ok = after_idx >= hay.len() || !is_word(hay[after_idx]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Derive per-(schema, table) workload frequency from Query Store so the
+/// CONNECTED index advisor can ground its recommendations in HOW OFTEN the
+/// benefiting query actually runs (see `advisor_workload`).
+///
+/// READ-ONLY: queries only the `sys.query_store_*` catalog views — it never
+/// executes captured queries and never reads user-table rows. Returns `[]` when
+/// Query Store is disabled or unreadable; callers MUST degrade gracefully.
+///
+/// Heuristic (documented): the missing-index DMV groups by target object, not
+/// by query, so we credit each real user table — taken from the authoritative
+/// index metadata we already pulled — with the MAX single-query execution count
+/// among Query Store queries whose text references that table by a
+/// case-insensitive, word-boundary match on the bare table identifier. We emit
+/// the index metadata's own schema+table so `busiest_for` (which requires BOTH
+/// to match) lines up. Unmatched tables are skipped — no fake zero rows.
+pub async fn query_store_workload(
+    req: &ConnectReq,
+    indexes: &[IndexMeta],
+) -> anyhow::Result<Vec<QueryWorkloadStat>> {
+    let mut client = open(req).await?;
+
+    // Capture-window length in hours from the runtime-stats intervals. Falls
+    // back to 24h when the view is empty / null / unreadable so a single day's
+    // capture reads naturally and we never divide by zero downstream.
+    let mut window_hours = 24.0_f64;
+    if let Ok(s) = client
+        .simple_query(
+            "SELECT CAST(DATEDIFF(MINUTE, MIN(start_time), MAX(end_time)) / 60.0 AS FLOAT) \
+             FROM sys.query_store_runtime_stats_interval",
+        )
+        .await
+    {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(w) = rows.into_iter().next().and_then(|r| r.get::<f64, _>(0)) {
+                if w > 0.0 {
+                    window_hours = w;
+                }
+            }
+        }
+    }
+
+    // Per-query total executions + text, ranked by FREQUENCY (not duration),
+    // grouped by query_id exactly like the top-queries query. TOP 200 keeps the
+    // word-boundary scan bounded. 2014+ portable: CAST to BIGINT, NULLIF guards.
+    let sql = "SELECT TOP (200) m.execs, \
+                CAST(LEFT(qt.query_sql_text, 2000) AS NVARCHAR(2000)) AS sql_text \
+         FROM ( \
+           SELECT q.query_id, \
+                  CAST(SUM(rs.count_executions) AS BIGINT) AS execs, \
+                  MIN(q.query_text_id) AS query_text_id \
+           FROM sys.query_store_runtime_stats rs \
+           JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id \
+           JOIN sys.query_store_query q ON q.query_id = p.query_id \
+           GROUP BY q.query_id \
+         ) m \
+         JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id \
+         ORDER BY m.execs DESC";
+    let stream = client.simple_query(sql).await?;
+    let rows = stream.into_first_result().await?;
+
+    // (execs, sql_text) for each captured query, freshly owned so we can scan
+    // each query's text against every distinct table identifier below.
+    let queries: Vec<(u64, String)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<i64, _>("execs").unwrap_or(0).max(0) as u64,
+                r.get::<&str, _>("sql_text").unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+
+    // Distinct (schema, table) set from the real user tables we have metadata
+    // for. Preserve the metadata's authoritative casing for the emitted stat.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for idx in indexes {
+        let key = (
+            idx.schema_name.to_ascii_lowercase(),
+            idx.table_name.to_ascii_lowercase(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        // Max single-query execution count among QS queries that reference this
+        // table by a word-boundary match on the bare table identifier.
+        let mut max_execs = 0u64;
+        let mut matched = false;
+        for (execs, text) in &queries {
+            if references_table_token(text, &idx.table_name) {
+                matched = true;
+                if *execs > max_execs {
+                    max_execs = *execs;
+                }
+            }
+        }
+        if matched {
+            out.push(QueryWorkloadStat {
+                schema_name: idx.schema_name.clone(),
+                table_name: idx.table_name.clone(),
+                execution_count: max_execs,
+                window_hours,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 /// One T-SQL syntax diagnostic from the real engine parser. `number` is the
 /// SQL Server error number (e.g. 102 "Incorrect syntax near …"), `line` is the
 /// 1-based line within the submitted batch.
@@ -743,6 +891,20 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 data_kb:     r.get::<i64, _>(6).unwrap_or(0) as u64,
             });
         }
+    }
+
+    // Query-Store workload grounding: credit each user table we have index
+    // metadata for with the busiest query observed against it, so the advisor
+    // can rank "helps a query that runs N×/day". Best-effort — if Query Store
+    // is OFF or the catalog views are unreadable we log and leave workload=[]
+    // (the advisor degrades to the DMV's own seek counts). Never fails the
+    // whole bundle.
+    match query_store_workload(req, &bundle.indexes).await {
+        Ok(workload) => bundle.workload = workload,
+        Err(e) => tracing::warn!(
+            target: "advisor",
+            "Query Store workload grounding unavailable ({e}); ranking falls back to DMV seek counts"
+        ),
     }
 
     Ok(bundle)
@@ -1142,4 +1304,46 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
     }
 
     Ok(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::references_table_token;
+
+    #[test]
+    fn word_boundary_does_not_match_longer_token() {
+        // The core requirement: "Order" must NOT match the longer table "Orders".
+        assert!(!references_table_token("SELECT * FROM dbo.Orders", "Order"));
+        assert!(!references_table_token("SELECT * FROM Ordered", "Order"));
+        assert!(!references_table_token("SELECT * FROM PreOrder", "Order"));
+        assert!(!references_table_token("SELECT * FROM Order_Items", "Order"));
+    }
+
+    #[test]
+    fn matches_bare_bracketed_and_schema_qualified() {
+        assert!(references_table_token("SELECT * FROM Orders WHERE x=1", "Orders"));
+        assert!(references_table_token("SELECT * FROM [Orders]", "Orders"));
+        assert!(references_table_token("SELECT * FROM dbo.Orders o", "Orders"));
+        // Case-insensitive.
+        assert!(references_table_token("select * from ORDERS", "Orders"));
+        assert!(references_table_token("select * from orders", "Orders"));
+    }
+
+    #[test]
+    fn matches_at_string_boundaries_and_with_punctuation() {
+        // Token at the very start / end of the text.
+        assert!(references_table_token("Orders", "Orders"));
+        assert!(references_table_token("JOIN Orders", "Orders"));
+        // Trailing punctuation (comma, semicolon, paren) is a word boundary.
+        assert!(references_table_token("FROM Orders, Customers", "Orders"));
+        assert!(references_table_token("FROM Orders;", "Orders"));
+        assert!(references_table_token("COUNT(Orders)", "Orders"));
+    }
+
+    #[test]
+    fn empty_ident_or_no_match_is_false() {
+        assert!(!references_table_token("SELECT 1", ""));
+        assert!(!references_table_token("SELECT * FROM Customers", "Orders"));
+        assert!(!references_table_token("", "Orders"));
+    }
 }
