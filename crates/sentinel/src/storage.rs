@@ -24,6 +24,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0003_logs",          include_str!("../migrations/0003_logs.sql")),
     ("0004_query_text",    include_str!("../migrations/0004_query_text.sql")),
     ("0005_deadlock_graph_hash", include_str!("../migrations/0005_deadlock_graph_hash.sql")),
+    ("0006_query_baseline", include_str!("../migrations/0006_query_baseline.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -142,6 +143,105 @@ pub fn detect_regression(query_id: i64, points: &[(f64, i64)]) -> Option<Regress
         query_id,
         baseline_duration_ms: mean.round() as i64,
         current_duration_ms: current.round() as i64,
+        delta_pct,
+    })
+}
+
+// ---------- Durable rolling baseline ---------------------------------------
+
+/// One query's persisted rolling baseline, accumulated with Welford's online
+/// algorithm so updating it never requires re-reading the whole history.
+///
+/// `count` samples have been folded in; `mean` is the running mean of the
+/// duration-per-execution (ms) series; `m2` is the running sum of squared
+/// deviations from the mean (Welford's M2). Sample variance is `m2 / (count -
+/// 1)` and stddev its square root. This is what survives across polling
+/// windows and process restarts — the durable answer to "what is normal for
+/// this query".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct QueryBaseline {
+    pub query_id: i64,
+    pub count: i64,
+    pub mean: f64,
+    pub m2: f64,
+    /// Most recently observed duration-per-execution sample (ms).
+    pub last_value_ms: f64,
+}
+
+impl QueryBaseline {
+    /// Sample standard deviation (Bessel's correction). `None` until at least
+    /// two samples have been folded in (otherwise variance is undefined).
+    pub fn stddev(&self) -> Option<f64> {
+        if self.count < 2 {
+            return None;
+        }
+        let var = self.m2 / (self.count as f64 - 1.0);
+        if var.is_finite() && var >= 0.0 {
+            Some(var.sqrt())
+        } else {
+            None
+        }
+    }
+
+    /// Fold one new duration-per-execution sample into the running stats using
+    /// Welford's incremental update. Returns the updated baseline; the caller
+    /// persists it. Pure + side-effect-free so it is trivially unit-testable.
+    pub fn fold(mut self, sample: f64) -> Self {
+        if !sample.is_finite() {
+            return self;
+        }
+        self.count += 1;
+        let delta = sample - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = sample - self.mean;
+        self.m2 += delta * delta2;
+        self.last_value_ms = sample;
+        self
+    }
+}
+
+/// Minimum number of persisted samples a durable baseline must hold before we
+/// trust it to judge a new sample. Below this we don't have a stable stddev, so
+/// the durable path returns `None` and the caller falls back to the in-window
+/// z-score (graceful degradation, mirrors [`REGRESSION_MIN_SAMPLES`]).
+pub const DURABLE_BASELINE_MIN_COUNT: i64 = 6;
+
+/// Judge a single new `sample` (duration-per-execution, ms) against a query's
+/// PERSISTED rolling baseline. This is the durable analogue of
+/// [`detect_regression`]: instead of a per-window series it uses the running
+/// mean/stddev accumulated across every prior poll.
+///
+/// Returns a [`RegressionRow`] only when the baseline holds enough history
+/// ([`DURABLE_BASELINE_MIN_COUNT`]), has non-zero spread, and the new sample
+/// clears `mean + REGRESSION_Z_SCORE_K * stddev` and the absolute-delta floor —
+/// the same outlier gates as the in-window detector, just sourced from durable
+/// state. `None` when the baseline is too thin (the caller then falls back to
+/// the in-window z-score).
+pub fn detect_regression_durable(baseline: &QueryBaseline, sample: f64) -> Option<RegressionRow> {
+    if baseline.count < DURABLE_BASELINE_MIN_COUNT {
+        return None;
+    }
+    let mean = baseline.mean;
+    let stddev = baseline.stddev()?;
+    if !(stddev > 0.0) || !mean.is_finite() {
+        return None;
+    }
+    let z = (sample - mean) / stddev;
+    if z < REGRESSION_Z_SCORE_K {
+        return None;
+    }
+    if (sample - mean) < REGRESSION_MIN_ABS_DELTA_MS {
+        return None;
+    }
+    let delta_pct = if mean > 0.0 {
+        (sample / mean - 1.0) * 100.0
+    } else {
+        0.0
+    };
+    Some(RegressionRow {
+        query_id: baseline.query_id,
+        baseline_duration_ms: mean.round() as i64,
+        current_duration_ms: sample.round() as i64,
         delta_pct,
     })
 }
@@ -292,6 +392,13 @@ impl Storage {
                 [cutoff_ms],
             )?;
         }
+        // The durable baseline keys on last_updated_ms (it has no captured_at).
+        // Age out baselines for queries that stopped running before the cutoff
+        // so the table can't grow without bound either.
+        removed += conn.execute(
+            "DELETE FROM query_baseline WHERE last_updated_ms < ?1",
+            [cutoff_ms],
+        )?;
         if removed > 0 {
             // Best-effort: reclaim WAL space after a large delete.
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -663,6 +770,137 @@ impl Storage {
         });
         out.truncate(50);
         Ok(out)
+    }
+
+    // ---------- Durable rolling baseline ----------------------------------
+
+    /// Read the persisted rolling baseline for one query, if any has been
+    /// accumulated yet.
+    pub fn get_query_baseline(
+        &self,
+        instance_id: i64,
+        query_id: i64,
+    ) -> anyhow::Result<Option<QueryBaseline>> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        Ok(lock
+            .query_row(
+                "SELECT query_id, count, mean, m2, last_value_ms
+                 FROM query_baseline WHERE instance_id = ?1 AND query_id = ?2",
+                params![instance_id, query_id],
+                |r| {
+                    Ok(QueryBaseline {
+                        query_id: r.get(0)?,
+                        count: r.get(1)?,
+                        mean: r.get(2)?,
+                        m2: r.get(3)?,
+                        last_value_ms: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Fold one new duration-per-execution `sample` (ms) into the durable
+    /// baseline for `query_id`, creating the row on first sight. Welford's
+    /// online update means we never re-read the whole history. Returns the
+    /// updated baseline (post-fold) so callers can judge the same sample
+    /// against it without a second read. Persisted, so it survives restarts.
+    pub fn update_query_baseline(
+        &self,
+        instance_id: i64,
+        query_id: i64,
+        sample: f64,
+    ) -> anyhow::Result<QueryBaseline> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let existing: Option<QueryBaseline> = lock
+            .query_row(
+                "SELECT query_id, count, mean, m2, last_value_ms
+                 FROM query_baseline WHERE instance_id = ?1 AND query_id = ?2",
+                params![instance_id, query_id],
+                |r| {
+                    Ok(QueryBaseline {
+                        query_id: r.get(0)?,
+                        count: r.get(1)?,
+                        mean: r.get(2)?,
+                        m2: r.get(3)?,
+                        last_value_ms: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let base = existing.unwrap_or(QueryBaseline {
+            query_id,
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+            last_value_ms: 0.0,
+        });
+        let updated = base.fold(sample);
+        lock.execute(
+            "INSERT INTO query_baseline
+                 (instance_id, query_id, count, mean, m2, last_value_ms, last_updated_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(instance_id, query_id) DO UPDATE SET
+                 count = excluded.count,
+                 mean = excluded.mean,
+                 m2 = excluded.m2,
+                 last_value_ms = excluded.last_value_ms,
+                 last_updated_ms = excluded.last_updated_ms",
+            params![
+                instance_id,
+                query_id,
+                updated.count,
+                updated.mean,
+                updated.m2,
+                updated.last_value_ms,
+                Utc::now().timestamp_millis(),
+            ],
+        )?;
+        Ok(updated)
+    }
+
+    /// Durable regression check for one query: fold the new `sample` into the
+    /// persisted baseline, then judge it against the baseline *as it stood
+    /// before* this sample (so a spike never inflates its own baseline). When
+    /// the persisted baseline is too thin
+    /// ([`DURABLE_BASELINE_MIN_COUNT`]) this returns `None` and the caller
+    /// should fall back to the in-window z-score
+    /// ([`detect_regression`]) — the durable path strengthens, never replaces,
+    /// the existing detector.
+    ///
+    /// This is the entry point a poller calls per query each tick: it both
+    /// advances the durable baseline AND reports a regression in one shot.
+    pub fn observe_and_detect_regression(
+        &self,
+        instance_id: i64,
+        query_id: i64,
+        sample: f64,
+    ) -> anyhow::Result<Option<RegressionRow>> {
+        // Snapshot the baseline *before* folding so the current sample is
+        // judged against established history, not against itself.
+        let prior = self
+            .get_query_baseline(instance_id, query_id)?
+            .unwrap_or(QueryBaseline {
+                query_id,
+                count: 0,
+                mean: 0.0,
+                m2: 0.0,
+                last_value_ms: 0.0,
+            });
+        // Always advance the durable baseline, regardless of verdict.
+        self.update_query_baseline(instance_id, query_id, sample)?;
+        Ok(detect_regression_durable(&prior, sample))
+    }
+
+    /// Drop durable baselines that haven't been refreshed since `cutoff` (e.g.
+    /// queries that aged out of the workload). Keeps the baseline table bounded
+    /// alongside the time-series prune. Returns the number of rows removed.
+    pub fn prune_query_baselines_before(&self, cutoff: DateTime<Utc>) -> anyhow::Result<usize> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        Ok(lock.execute(
+            "DELETE FROM query_baseline WHERE last_updated_ms < ?1",
+            [cutoff.timestamp_millis()],
+        )?)
     }
 
     pub fn pain_summary(&self, window: TimeRange) -> anyhow::Result<PainSummary> {
@@ -1239,5 +1477,152 @@ mod tests {
             regs[0].current_duration_ms > regs[0].baseline_duration_ms,
             "current must exceed the rolling-mean baseline"
         );
+    }
+
+    // ---- durable rolling baseline -----------------------------------------
+
+    fn test_conn() -> ConnectionInfo {
+        ConnectionInfo {
+            server: "localhost,1433".into(),
+            database: Some("master".into()),
+            user: Some("sa".into()),
+            password: Some("x".into()),
+            trust_cert: Some(true),
+        }
+    }
+
+    /// Welford's online accumulator must converge on the same mean/stddev as a
+    /// batch computation, so the durable baseline is statistically sound.
+    #[test]
+    fn welford_fold_matches_batch_stats() {
+        let samples = [100.0, 102.0, 98.0, 101.0, 99.0, 100.0, 103.0, 97.0];
+        let mut b = QueryBaseline { query_id: 1, count: 0, mean: 0.0, m2: 0.0, last_value_ms: 0.0 };
+        for &x in &samples {
+            b = b.fold(x);
+        }
+        let n = samples.len() as f64;
+        let mean = samples.iter().sum::<f64>() / n;
+        let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        assert!((b.mean - mean).abs() < 1e-9, "mean {} vs {}", b.mean, mean);
+        assert!((b.stddev().unwrap() - var.sqrt()).abs() < 1e-9);
+        assert_eq!(b.count, 8);
+        assert_eq!(b.last_value_ms, 97.0);
+    }
+
+    /// (1) The durable baseline, built from PERSISTED history across many polls,
+    /// flags a later spike as a regression — and it survives a re-open of the
+    /// same DB file (proving the baseline is durable, not in-window-only).
+    #[test]
+    fn durable_baseline_flags_regression_vs_persisted_history() {
+        use std::env;
+        let path = env::temp_dir().join(format!(
+            "dbopt_durable_baseline_{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let id;
+        {
+            let s = Storage::open(&path).expect("open");
+            id = s.ensure_instance("t", &test_conn()).expect("ensure");
+            // Feed 8 steady ~100ms samples across "polls". None should flag:
+            // each is in-line with the baseline it's building.
+            for i in 0..8 {
+                let sample = 100.0 + (i % 2) as f64; // tiny jitter so stddev > 0
+                let reg = s
+                    .observe_and_detect_regression(id, 42, sample)
+                    .expect("observe");
+                assert!(reg.is_none(), "steady sample {i} must not flag");
+            }
+            let base = s.get_query_baseline(id, 42).expect("read").expect("exists");
+            assert_eq!(base.count, 8, "all eight samples folded + persisted");
+        }
+
+        // Re-open the SAME file: the baseline must be loaded from disk, NOT
+        // recomputed from a fresh window. A spike judged against it flags.
+        {
+            let s = Storage::open(&path).expect("reopen");
+            let reg = s
+                .observe_and_detect_regression(id, 42, 1000.0)
+                .expect("observe spike")
+                .expect("10x spike against persisted history must be flagged");
+            assert_eq!(reg.query_id, 42);
+            assert_eq!(reg.current_duration_ms, 1000);
+            assert!(
+                reg.baseline_duration_ms >= 99 && reg.baseline_duration_ms <= 101,
+                "baseline is the persisted rolling mean, got {}",
+                reg.baseline_duration_ms
+            );
+            assert!(reg.delta_pct > 800.0, "huge jump, got {}", reg.delta_pct);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A thin durable baseline (below the min-count) yields no verdict, so the
+    /// caller falls back to the in-window z-score — graceful degradation.
+    #[test]
+    fn durable_baseline_below_min_count_returns_none() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+        // Only 3 samples (< DURABLE_BASELINE_MIN_COUNT), then a spike.
+        for _ in 0..3 {
+            assert!(s.observe_and_detect_regression(id, 7, 100.0).expect("obs").is_none());
+        }
+        assert!(
+            s.observe_and_detect_regression(id, 7, 5000.0).expect("obs").is_none(),
+            "too little persisted history to judge — defer to in-window detector"
+        );
+    }
+
+    /// (2) Pruning deletes durable baselines that haven't been refreshed since
+    /// the cutoff, while fresh baselines survive — bounding table growth.
+    #[test]
+    fn prune_deletes_old_query_baselines() {
+        let s = Storage::open_in_memory().expect("open");
+        let id = s.ensure_instance("t", &test_conn()).expect("ensure");
+
+        // Build two baselines via the normal update path (now-stamped).
+        for _ in 0..3 {
+            s.update_query_baseline(id, 1, 100.0).expect("stale qid");
+            s.update_query_baseline(id, 2, 200.0).expect("fresh qid");
+        }
+        // Backdate query_id=1's last_updated_ms to 100 days ago.
+        {
+            let lock = s.conn.lock().expect("lock");
+            let old_ms = (Utc::now() - chrono::Duration::days(100)).timestamp_millis();
+            lock.execute(
+                "UPDATE query_baseline SET last_updated_ms = ?1 WHERE query_id = 1",
+                [old_ms],
+            )
+            .expect("backdate");
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::days(90);
+        let removed = s.prune_query_baselines_before(cutoff).expect("prune");
+        assert_eq!(removed, 1, "only the stale baseline should be pruned");
+        assert!(
+            s.get_query_baseline(id, 1).expect("read").is_none(),
+            "stale baseline gone"
+        );
+        assert!(
+            s.get_query_baseline(id, 2).expect("read").is_some(),
+            "fresh baseline survives"
+        );
+
+        // prune_before should also sweep stale baselines (integrated retention).
+        s.update_query_baseline(id, 3, 300.0).expect("another");
+        {
+            let lock = s.conn.lock().expect("lock");
+            let old_ms = (Utc::now() - chrono::Duration::days(200)).timestamp_millis();
+            lock.execute(
+                "UPDATE query_baseline SET last_updated_ms = ?1 WHERE query_id = 3",
+                [old_ms],
+            )
+            .expect("backdate3");
+        }
+        let removed2 = s.prune_before(Utc::now() - chrono::Duration::days(90)).expect("prune_before");
+        assert!(removed2 >= 1, "prune_before also ages out stale baselines, got {removed2}");
+        assert!(s.get_query_baseline(id, 3).expect("read").is_none());
     }
 }

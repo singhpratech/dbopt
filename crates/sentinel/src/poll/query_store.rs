@@ -116,6 +116,26 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
             );
             continue;
         }
+        // Fold this sample into the DURABLE rolling baseline (persisted across
+        // windows + restarts) and flag a regression if it's a clear outlier
+        // versus that query's established history. A thin baseline returns None
+        // here and the report's in-window z-score still covers the query.
+        if row.executions > 0 {
+            let sample = row.total_duration_ms as f64 / row.executions as f64;
+            match storage.observe_and_detect_regression(instance_id, row.query_id, sample) {
+                Ok(Some(reg)) => tracing::info!(
+                    target: "sentinel::poll::query_store",
+                    "durable baseline regression query_id={} baseline={}ms current={}ms (+{:.0}%)",
+                    reg.query_id, reg.baseline_duration_ms, reg.current_duration_ms, reg.delta_pct
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    target: "sentinel::poll::query_store",
+                    "durable baseline update failed for query_id={}: {e:#}",
+                    row.query_id
+                ),
+            }
+        }
         count += 1;
     }
 
