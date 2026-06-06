@@ -106,6 +106,13 @@ pub enum Threshold {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlertRule {
     pub id: String,
+    /// Metric key to evaluate, when it differs from `id`. Tiered rules (e.g.
+    /// warning + critical on the same latency) carry DISTINCT ids — so the
+    /// cooldown de-dup, which keys on (instance, rule id), can never let one
+    /// tier mask the other — while sharing one metric via this field.
+    /// `None` ⇒ `id` IS the metric key (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric_id: Option<String>,
     /// Human label for the metric being watched (our own vocabulary).
     pub metric: String,
     pub comparator: Comparator,
@@ -211,7 +218,8 @@ pub fn evaluate_alert(rule: &AlertRule, snap: &MetricSnapshot) -> Option<FiredAl
     if !rule.enabled {
         return None;
     }
-    let measured = snap.value_for(&rule.id)?;
+    let metric_key = rule.metric_id.as_deref().unwrap_or(&rule.id);
+    let measured = snap.value_for(metric_key)?;
     let threshold = resolve_threshold(rule, snap)?;
     if !rule.comparator.holds(measured, threshold) {
         return None;
@@ -305,6 +313,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // sqlmonitormetrics.red-gate.com/average-runnable-task-count/
         AlertRule {
             id: "cpu.runnable_tasks_high".into(),
+            metric_id: None,
             metric: "Runnable tasks waiting for a CPU".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 10.0 },
@@ -316,6 +325,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // sqlshack.com boost-sql-server-performance-with-wait-statistics
         AlertRule {
             id: "cpu.signal_wait_pct_high".into(),
+            metric_id: None,
             metric: "Signal-wait share of total waits".into(),
             comparator: Comparator::Gt,
             threshold: Threshold::Fixed { value: 35.0 },
@@ -327,6 +337,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // sqlperformance.com knee-jerk-page-life-expectancy
         AlertRule {
             id: "memory.ple_below_floor".into(),
+            metric_id: None,
             metric: "Cache retention (PLE) below floor".into(),
             comparator: Comparator::Lt,
             threshold: Threshold::PleFloorPer4Gb { min_floor: 300.0 },
@@ -339,6 +350,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // learn.microsoft.com troubleshoot-memory-grant-issues
         AlertRule {
             id: "memory.pending_memory_grants".into(),
+            metric_id: None,
             metric: "Queries waiting for a memory grant".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 1.0 },
@@ -350,6 +362,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // blog.sqlauthority.com optimize-ad-hoc-workloads
         AlertRule {
             id: "plancache.adhoc_singleuse_pct".into(),
+            metric_id: None,
             metric: "Single-use ad-hoc plan share of cache".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 20.0 },
@@ -361,6 +374,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // sqlmonitormetrics.red-gate.com/tempdb-allocation-contention/
         AlertRule {
             id: "tempdb.pagelatch_contention".into(),
+            metric_id: None,
             metric: "tempdb allocation-page waiters".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 10.0 },
@@ -370,8 +384,11 @@ pub fn default_rules() -> Vec<AlertRule> {
         },
         // Storage — data-file latency. High band >20ms (Warning), Critical >100ms.
         // sqlperformance.com monitoring-read-write-latency (SQLskills bands)
+        // The two tiers carry DISTINCT ids (sharing the metric via `metric_id`)
+        // so the cooldown de-dup can't let the warning tier mask the critical one.
         AlertRule {
-            id: "io.data_file_latency_ms".into(),
+            id: "io.data_file_latency_ms.warning".into(),
+            metric_id: Some("io.data_file_latency_ms".into()),
             metric: "Data-file I/O latency".into(),
             comparator: Comparator::Gt,
             threshold: Threshold::Fixed { value: 20.0 },
@@ -380,7 +397,8 @@ pub fn default_rules() -> Vec<AlertRule> {
             source: "SQLskills bands: 20-100ms bad".into(),
         },
         AlertRule {
-            id: "io.data_file_latency_ms".into(),
+            id: "io.data_file_latency_ms.critical".into(),
+            metric_id: Some("io.data_file_latency_ms".into()),
             metric: "Data-file I/O latency (critical)".into(),
             comparator: Comparator::Gt,
             threshold: Threshold::Fixed { value: 100.0 },
@@ -392,6 +410,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // >1ms Warning, >5ms High.
         AlertRule {
             id: "io.log_write_latency_ms".into(),
+            metric_id: None,
             metric: "Transaction-log write latency".into(),
             comparator: Comparator::Gt,
             threshold: Threshold::Fixed { value: 5.0 },
@@ -402,6 +421,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // Reliability — any new deadlock graph captured this window.
         AlertRule {
             id: "reliability.deadlocks".into(),
+            metric_id: None,
             metric: "Deadlocks captured".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 1.0 },
@@ -412,6 +432,7 @@ pub fn default_rules() -> Vec<AlertRule> {
         // Reliability — blocked sessions observed right now.
         AlertRule {
             id: "reliability.blocking".into(),
+            metric_id: None,
             metric: "Blocked sessions".into(),
             comparator: Comparator::Ge,
             threshold: Threshold::Fixed { value: 1.0 },
@@ -429,6 +450,7 @@ mod tests {
     fn rule(id: &str, cmp: Comparator, t: f64, sev: Severity) -> AlertRule {
         AlertRule {
             id: id.into(),
+            metric_id: None,
             metric: id.into(),
             comparator: cmp,
             threshold: Threshold::Fixed { value: t },
@@ -496,6 +518,7 @@ mod tests {
         // 64GB buffer pool → floor = (64/4)*300 = 4800s. PLE 4000 < 4800 fires.
         let r = AlertRule {
             id: "memory.ple_below_floor".into(),
+            metric_id: None,
             metric: "PLE".into(),
             comparator: Comparator::Lt,
             threshold: Threshold::PleFloorPer4Gb { min_floor: 300.0 },
@@ -525,6 +548,7 @@ mod tests {
         // 2GB box → raw floor = (2/4)*300 = 150s, clamped UP to 300.
         let r = AlertRule {
             id: "memory.ple_below_floor".into(),
+            metric_id: None,
             metric: "PLE".into(),
             comparator: Comparator::Lt,
             threshold: Threshold::PleFloorPer4Gb { min_floor: 300.0 },
@@ -547,6 +571,7 @@ mod tests {
         // Can't resolve the dynamic floor → no alert (don't guess a floor).
         let r = AlertRule {
             id: "memory.ple_below_floor".into(),
+            metric_id: None,
             metric: "PLE".into(),
             comparator: Comparator::Lt,
             threshold: Threshold::PleFloorPer4Gb { min_floor: 300.0 },
@@ -576,9 +601,28 @@ mod tests {
         let ids: Vec<&str> = fired.iter().map(|f| f.rule_id.as_str()).collect();
         assert!(ids.contains(&"cpu.runnable_tasks_high"));
         assert!(ids.contains(&"tempdb.pagelatch_contention"));
-        // io.data_file_latency_ms appears twice (warning + critical tiers).
-        let io_count = fired.iter().filter(|f| f.rule_id == "io.data_file_latency_ms").count();
-        assert_eq!(io_count, 2);
+        // Both IO tiers fire — under DISTINCT rule ids, so the (instance, rule_id)
+        // cooldown de-dup can never let the warning tier mask the critical one.
+        assert!(ids.contains(&"io.data_file_latency_ms.warning"));
+        assert!(ids.contains(&"io.data_file_latency_ms.critical"));
+    }
+
+    #[test]
+    fn tiered_rules_share_metric_but_not_id() {
+        // 50ms trips ONLY the warning tier (>20), not critical (>100): both
+        // tiers resolve the same metric through `metric_id`, ids stay distinct.
+        let rules = default_rules();
+        let snap = MetricSnapshot {
+            io_data_latency_ms: Some(50.0),
+            ..Default::default()
+        };
+        let fired = evaluate_all(&rules, &snap);
+        let ids: Vec<&str> = fired.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(ids.contains(&"io.data_file_latency_ms.warning"));
+        assert!(!ids.contains(&"io.data_file_latency_ms.critical"));
+        // A persisted legacy rule with no metric_id still resolves via its id.
+        let legacy = rule("io.data_file_latency_ms", Comparator::Gt, 20.0, Severity::Warning);
+        assert!(evaluate_alert(&legacy, &snap).is_some());
     }
 
     #[test]

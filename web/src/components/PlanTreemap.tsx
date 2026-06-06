@@ -21,7 +21,7 @@ export function PlanTreemap({
       <EmptyChart
         glyph="◫"
         title="No execution plan"
-        hint="Drop a SQL Server .sqlplan XML file (from SSMS → 'Save Execution Plan As') to visualize per-operator estimated cost."
+        hint="Drop a .sqlplan execution-plan XML file (exported from your SQL tooling) to visualize per-operator estimated cost."
         action={action}
         loading={loading}
         error={error}

@@ -2,8 +2,8 @@
  * Fix-log — the execution-FREE interactive remediation tracker (Pass 5 B1).
  *
  * dbopt never runs DDL against the user's database. The remediation flow is
- * therefore a MANUAL tracker: as the user works a fix in their own SQL client
- * (SSMS / sqlcmd), they tick off the solution steps here and — once they've run
+ * therefore a MANUAL tracker: as the user works a fix in their own SQL
+ * client, they tick off the solution steps here and — once they've run
  * the script + verified it themselves — flip a "Mark validated" toggle. None of
  * this executes anything; it's a durable checklist + a user-asserted "I did
  * this" flag that survives reload and surfaces a "Validated ✓ (date)" badge back

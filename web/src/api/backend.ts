@@ -546,7 +546,7 @@ export async function qstoreSetCapture(info: ConnectionInfo, mode: "AUTO" | "ALL
 export type ParseDiagnostic = { number: number; line: number; message: string };
 export type ValidateResult = { ok: boolean; diagnostics: ParseDiagnostic[] };
 
-/** SSMS-style "Parse" of a T-SQL batch against the real engine (SET PARSEONLY
+/** Engine-checked "Parse" of a T-SQL batch (SET PARSEONLY
  *  ON). Verifies syntax + keywords for the connected server's version without
  *  executing or binding object names. `ok:true` + empty diagnostics = clean. */
 export async function validateSql(info: ConnectionInfo, sql: string): Promise<ValidateResult> {

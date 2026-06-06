@@ -434,7 +434,7 @@ export function App() {
   const [actualBusy, setActualBusy] = useState(false);
   const [explainErr, setExplainErr] = useState<string | null>(null);
 
-  // SSMS-style T-SQL "Parse" (SET PARSEONLY ON via the real engine).
+  // Engine-checked T-SQL "Parse" (SET PARSEONLY ON via the real engine).
   const [validateBusy, setValidateBusy] = useState(false);
   const [validateResult, setValidateResult] = useState<backend.ValidateResult | null>(null);
   const [validateErr, setValidateErr] = useState<string | null>(null);

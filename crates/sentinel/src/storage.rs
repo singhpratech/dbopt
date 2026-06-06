@@ -730,9 +730,11 @@ impl Storage {
 
     // ---------- Fired alerts ---------------------------------------------
     // The threshold engine records each breach here. De-dup lives in
-    // `should_fire_alert`: a standing condition only (re)fires when its state
-    // changes (rule wasn't firing last time) OR the cooldown has lapsed, so we
-    // don't write a row every single poll for the same ongoing problem.
+    // `should_fire_alert`: a standing condition only (re)fires once its most
+    // recent fire is older than the cooldown, so we don't write a row every
+    // single poll for the same ongoing problem. (Time-based only — there is no
+    // breach-state-change tracking; a condition that clears and re-breaches
+    // inside one cooldown window will not re-fire until the window lapses.)
 
     /// Decide whether a freshly-evaluated breach of `rule_id` should be recorded
     /// as a NEW alert, given the configured cooldown. Returns `true` when there

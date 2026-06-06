@@ -670,7 +670,7 @@ function PreflightPreview({ rem, issue }: { rem: Remediation; issue: Issue }) {
         <span className="preflight-boundary-glyph" aria-hidden>
           ⌘
         </span>
-        Run this in your SQL client (SSMS / sqlcmd) — <strong>dbopt does not execute changes.</strong>
+        Run this in your own SQL client — <strong>dbopt does not execute changes.</strong>
       </p>
     </Section>
   );
