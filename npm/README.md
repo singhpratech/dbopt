@@ -1,14 +1,14 @@
-<h1 align="center">dbopt</h1>
+<h1 align="center">dbopt-core</h1>
 
 <p align="center">
   <b>Find and fix slow SQL before it reaches production — in Node or the browser, with nothing uploaded.</b>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
-  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/dm/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=npm" alt="downloads per month" /></a>
-  <a href="https://bundlephobia.com/package/dbopt"><img src="https://img.shields.io/bundlephobia/minzip/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=gzipped&color=3c72ff&logo=webassembly" alt="bundle size" /></a>
-  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/dm/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=npm" alt="downloads per month" /></a>
+  <a href="https://bundlephobia.com/package/dbopt-core"><img src="https://img.shields.io/bundlephobia/minzip/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=gzipped&color=3c72ff&logo=webassembly" alt="bundle size" /></a>
+  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
 </p>
 
 A database performance analyzer that reads your queries and execution plans and tells
@@ -19,11 +19,11 @@ you what will hurt — and how to fix it, with the reasoning cited. It is the
 means you can lint a query you would never paste into a web tool.
 
 ```console
-npm i dbopt
+npm i dbopt-core
 ```
 
 ```js
-import { analyze } from "dbopt";
+import { analyze } from "dbopt-core";
 
 const { findings } = analyze(
   "SELECT * FROM Orders o WHERE YEAR(o.OrderDate) = 2025",
@@ -53,7 +53,7 @@ The browser build fetches the WebAssembly module on first use, so `analyze()` is
 there. Everything else is identical.
 
 ```js
-import { analyze, ready } from "dbopt/web";
+import { analyze, ready } from "dbopt-core/web";
 
 await ready();                     // optional: preload so the first call is instant
 const report = await analyze(sql, { server_version: 2022 });

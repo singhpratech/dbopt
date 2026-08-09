@@ -13,11 +13,9 @@
   <a href="https://github.com/singhpratech/dbopt/actions/workflows/sql-lint.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/sql-lint.yml?branch=main&style=flat-square&labelColor=0a0d12&logoColor=white&label=sql-lint&color=3ad29f&logo=githubactions" alt="SQL lint" /></a>
   <a href="https://github.com/singhpratech/dbopt/releases/latest"><img src="https://img.shields.io/github/v/release/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=3c72ff&logo=github" alt="latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
-</p>
-<!-- Re-enable the moment the packages are live on the registries:
   <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust" alt="crates.io" /></a>
-  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
--->
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
+</p>
 
 <p align="center">
   <a href="https://dbopt.org"><b>Try it in your browser →</b></a>
@@ -67,6 +65,13 @@ irm https://dbopt.org/install.ps1 | iex
 
 Each is a **single self-contained binary** with the web UI embedded — run it, then open
 `http://127.0.0.1:3690`. Checksums are on the [releases page](https://github.com/singhpratech/dbopt/releases).
+
+**Developers** can skip the installer entirely:
+
+```bash
+cargo install dbopt     # the CLI + linter
+npm i dbopt-core        # the analyzer in Node or the browser
+```
 
 **First run:** the builds are **not code-signed yet**, so the OS warns you once. Windows — *More info →
 Run anyway*. macOS — *right-click → Open*, or `xattr -dr com.apple.quarantine /Applications/dbopt.app`.
