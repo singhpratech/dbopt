@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -519,7 +519,7 @@ npm i dbopt-core        <span style="color:var(--ink-3)"># the analyzer in Node 
 const $ = (id) => document.getElementById(id);
 const sqlEl = $("sql"), gutEl = $("gutter"), outEl = $("out"), runEl = $("run");
 
-/* ---- theme: light by default, dark a click away; the choice is remembered -- */
+/* ---- theme: dark by default, light a click away; the choice is remembered -- */
 const savedTheme = localStorage.getItem("dbopt-theme");
 if (savedTheme) document.documentElement.dataset.theme = savedTheme;
 $("theme").addEventListener("click", () => {

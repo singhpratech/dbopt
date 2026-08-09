@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust" alt="crates.io" /></a>
-  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/d/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=rust" alt="downloads" /></a>
+  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust&cacheSeconds=300" alt="crates.io" /></a>
+  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/d/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=rust&cacheSeconds=300" alt="downloads" /></a>
   <a href="https://github.com/singhpratech/dbopt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/ci.yml?branch=main&style=flat-square&labelColor=0a0d12&logoColor=white&label=ci&color=3ad29f&logo=githubactions" alt="CI" /></a>
-  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
+  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache&cacheSeconds=300" alt="Apache-2.0" /></a>
 </p>
 
 `dbopt` reads your T-SQL and your execution plans and tells you what is going to hurt —

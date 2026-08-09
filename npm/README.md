@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
-  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/dm/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=npm" alt="downloads per month" /></a>
-  <a href="https://bundlephobia.com/package/dbopt-core"><img src="https://img.shields.io/bundlephobia/minzip/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=gzipped&color=3c72ff&logo=webassembly" alt="bundle size" /></a>
-  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm&cacheSeconds=300" alt="npm" /></a>
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/dm/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=npm&cacheSeconds=300" alt="downloads per month" /></a>
+  <a href="https://bundlephobia.com/package/dbopt-core"><img src="https://img.shields.io/bundlephobia/minzip/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=gzipped&color=3c72ff&logo=webassembly&cacheSeconds=300" alt="bundle size" /></a>
+  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache&cacheSeconds=300" alt="Apache-2.0" /></a>
 </p>
 
 A database performance analyzer that reads your queries and execution plans and tells

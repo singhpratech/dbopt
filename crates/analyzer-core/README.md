@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/dbopt-core"><img src="https://img.shields.io/crates/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust" alt="crates.io" /></a>
-  <a href="https://docs.rs/dbopt-core"><img src="https://img.shields.io/docsrs/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=3ad29f&logo=docsdotrs" alt="docs.rs" /></a>
+  <a href="https://crates.io/crates/dbopt-core"><img src="https://img.shields.io/crates/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust&cacheSeconds=300" alt="crates.io" /></a>
+  <a href="https://docs.rs/dbopt-core"><img src="https://img.shields.io/docsrs/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=3ad29f&logo=docsdotrs&cacheSeconds=300" alt="docs.rs" /></a>
   <a href="https://github.com/singhpratech/dbopt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/ci.yml?branch=main&style=flat-square&labelColor=0a0d12&logoColor=white&label=ci&color=3ad29f&logo=githubactions" alt="CI" /></a>
-  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
+  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache&cacheSeconds=300" alt="Apache-2.0" /></a>
 </p>
 
 Give it T-SQL, an execution plan, a DMV bundle, or all three. Get back findings with

@@ -13,8 +13,8 @@
   <a href="https://github.com/singhpratech/dbopt/actions/workflows/sql-lint.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/sql-lint.yml?branch=main&style=flat-square&labelColor=0a0d12&logoColor=white&label=sql-lint&color=3ad29f&logo=githubactions" alt="SQL lint" /></a>
   <a href="https://github.com/singhpratech/dbopt/releases/latest"><img src="https://img.shields.io/github/v/release/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=3c72ff&logo=github" alt="latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
-  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust" alt="crates.io" /></a>
-  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
+  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust&cacheSeconds=300" alt="crates.io" /></a>
+  <a href="https://www.npmjs.com/package/dbopt-core"><img src="https://img.shields.io/npm/v/dbopt-core?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm&cacheSeconds=300" alt="npm" /></a>
 </p>
 
 <p align="center">
