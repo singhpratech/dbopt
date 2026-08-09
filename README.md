@@ -22,6 +22,7 @@
   &nbsp;·&nbsp; <a href="docs/USAGE.md">Usage guide</a>
   &nbsp;·&nbsp; <a href="docs/WHO-IS-DBOPT-FOR.md">Who it's for</a>
   &nbsp;·&nbsp; <a href="docs/ACCESS.md">Access</a>
+  &nbsp;·&nbsp; <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
 
 ---

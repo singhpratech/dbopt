@@ -435,8 +435,8 @@ ORDER BY o.Total DESC;</textarea>
           <pre id="audit">measuring…</pre>
         </div>
         <p class="note">
-          Open your network panel and reload. This site loads no fonts, no analytics and no scripts
-          from anyone else — the same standard the product holds itself to.
+          That box is generated from what your browser actually fetched a moment ago — not from a
+          promise we wrote. Open your network panel and reload to check it yourself.
         </p>
       </div>
     </div>
@@ -526,6 +526,7 @@ dbopt lint ./db --format sarif   <span style="color:var(--ink-faint)"># offline,
     <a href="https://github.com/singhpratech/dbopt">GitHub</a>
     <a href="./USAGE.md">Usage</a>
     <a href="./DATA-HANDLING.md">Data handling</a>
+    <a href="./ROADMAP.md">Roadmap</a>
     <span class="sp">© 2026 <a href="https://theaivibe.org">Prateek Singh</a></span>
   </div>
 </footer>
@@ -702,11 +703,12 @@ function audit() {
   const third = res.filter((r) => {
     try { return new URL(r.name).origin !== here; } catch { return false; }
   });
+  const hosts = [...new Set(third.map((r) => { try { return new URL(r.name).host; } catch { return "?"; } }))];
   $("netproof").textContent = `third-party requests: ${third.length}`;
   $("audit").textContent =
-    `requests to dbopt.org   ${res.length - third.length}\n` +
-    `requests to anyone else ${third.length}\n` +
-    `trackers                0\n` +
+    `served by this page     ${res.length - third.length}\n` +
+    `fetched from elsewhere  ${third.length}\n` +
+    hosts.map((h) => `  \u21b3 ${h}\n`).join("") +
     `web fonts               0\n` +
     `cookies                 ${document.cookie ? "some" : 0}`;
 }
