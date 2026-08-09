@@ -35,7 +35,7 @@ You need the `dbopt` binary on your machine. Either:
 - point `dbopt.binaryPath` at the full path of the executable.
 
 Get the binary from the [releases page](https://github.com/singhpratech/dbopt/releases)
-or build it from source (`cargo build -p analyzer-cli --release` → `target/release/dbopt`).
+or build it from source (`cargo build -p dbopt --release` → `target/release/dbopt`).
 
 ## Settings
 

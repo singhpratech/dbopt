@@ -26,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: build dbopt
-        run: cargo build -p analyzer-cli --release
+        run: cargo build -p dbopt --release
 
       # Emit SARIF. `|| true` so a non-zero exit (findings crossed --fail-on)
       # never fails the job here — the SARIF upload is what surfaces findings,

@@ -21,7 +21,7 @@ cargo build --workspace --release
 
 # Tests
 cargo test --workspace                       # unit + HTTP integration
-cargo test -p analyzer-core rules::joins      # one module's tests
+cargo test -p dbopt-core rules::joins         # one module's tests
 cargo test -p backend --test http_smoke       # spawns the real binary on :39123
 cd web && npm run test:e2e                    # Playwright, system Chrome (channel:"chrome")
 cd web && npx playwright test -g "WASM analyzer"   # one e2e spec
@@ -56,7 +56,7 @@ a different part of the report (token rules / plan treemap+findings / DMV charts
 
 - **Browser** — `analyzer-wasm` → `web/src/wasm-loader.ts`. The Analyze workspace runs fully offline.
 - **Backend** — `POST /api/analyze`.
-- **CLI** — `analyzer-cli` (`dbopt`), including `dbopt lint` with human/json/SARIF output.
+- **CLI** — the `dbopt` crate (dir `crates/analyzer-cli`), including `dbopt lint` with human/json/SARIF output.
 
 Consequence: **any change to `analyzer-core` requires rebuilding the WASM bundle**, or the browser
 silently keeps analyzing with the old rules while the CLI/backend use the new ones.

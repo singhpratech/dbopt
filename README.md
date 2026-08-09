@@ -201,7 +201,7 @@ A Rust workspace plus a React / Vite / TypeScript front end:
 |---|---|
 | `analyzer-core` | the rule engine + tokenizer + plan/DMV models |
 | `analyzer-wasm` | WebAssembly bindings for in-browser analysis |
-| `analyzer-cli`  | `dbopt` — analyze a `.sql` / `.sqlplan` / bundle from the shell |
+| `dbopt` (cli)   | `dbopt` — lint a tree, or analyze a `.sql` / `.sqlplan` / bundle |
 | `backend`       | `dbopt-backend` — axum API + embedded web UI, LLM proxy, durable logs |
 | `sentinel`      | `dbopt-sentinel` — continuous DMV poller → SQLite → pain report |
 | `eval`          | the rule-quality harness (precision / recall / F1 + HTML report) |

@@ -118,7 +118,7 @@ permissions:
 steps:
   - uses: actions/checkout@v4
   - uses: dtolnay/rust-toolchain@stable
-  - run: cargo build -p analyzer-cli --release
+  - run: cargo build -p dbopt --release
   - run: ./target/release/dbopt lint samples --format sarif > dbopt.sarif || true
   - uses: github/codeql-action/upload-sarif@v3
     with:
