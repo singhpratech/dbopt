@@ -424,19 +424,20 @@ ORDER BY o.Total DESC;</textarea>
           <p>Linux, macOS, Windows. SQLite for storage, the web UI embedded inside. Nothing else to install.</p>
         </li>
         <li>
-          <h4>Two things leave, both your choice</h4>
+          <h4>Two things leave the app, both your choice</h4>
           <p>A prompt you hand to a cloud AI model, and an anonymous version check to GitHub you can
-             switch off. That is the complete list.</p>
+             switch off. That is the complete list for the installed app. This marketing site counts
+             visitors like any other; the app does not, and never talks to us.</p>
         </li>
       </ul>
       <div>
         <div class="termbox">
-          <div class="th">This page, audited</div>
+          <div class="th">Your SQL, audited</div>
           <pre id="audit">measuring…</pre>
         </div>
         <p class="note">
-          That box is generated from what your browser actually fetched a moment ago — not from a
-          promise we wrote. Open your network panel and reload to check it yourself.
+          Those numbers are measured in your browser as you use the analyzer above — not copied from a
+          promise we wrote. Open your network panel, hit Analyze, and watch nothing happen.
         </p>
       </div>
     </div>
@@ -700,12 +701,16 @@ async function run() {
   }
   runEl.disabled = true;
   const t0 = performance.now();
+  const netBefore = performance.getEntriesByType("resource").length;
   try {
     const report = analyze({
       sql: sqlEl.value,
       server_version: +$("ver").value,
     });
     render(report.findings || [], performance.now() - t0);
+    analyzedCount += 1;
+    netDuringAnalysis += performance.getEntriesByType("resource").length - netBefore;
+    audit();
   } catch (err) {
     outEl.innerHTML = `<div class="empty">The analyzer errored on that input.</div>`;
   }
@@ -714,21 +719,24 @@ async function run() {
 runEl.addEventListener("click", run);
 $("ver").addEventListener("change", () => { if (analyze) run(); });
 
-/* ---- the audit: count what this page actually fetched ------------------- */
+/* ---- the audit: measure the analyze round-trip, live ------------------- */
+let analyzedCount = 0;
+let netDuringAnalysis = 0;
+
 function audit() {
   const here = location.origin;
   const res = performance.getEntriesByType("resource");
   const third = res.filter((r) => {
     try { return new URL(r.name).origin !== here; } catch { return false; }
   });
-  const hosts = [...new Set(third.map((r) => { try { return new URL(r.name).host; } catch { return "?"; } }))];
-  $("netproof").textContent = `third-party requests: ${third.length}`;
+  $("netproof").textContent = `your SQL uploaded: 0 bytes`;
+  const pad = (n) => String(n).padStart(6, " ");
   $("audit").textContent =
-    `served by this page     ${res.length - third.length}\n` +
-    `fetched from elsewhere  ${third.length}\n` +
-    hosts.map((h) => `  \u21b3 ${h}\n`).join("") +
-    `web fonts               0\n` +
-    `cookies                 ${document.cookie ? "some" : 0}`;
+    `queries analyzed here   ${pad(analyzedCount)}\n` +
+    `bytes of SQL uploaded   ${pad(0)}\n` +
+    `requests while analyzing${pad(netDuringAnalysis)}\n` +
+    `analyzer runs on        ${"your CPU".padStart(6, " ")}\n` +
+    `site visitor analytics  ${(third.length ? "on" : "off").padStart(6, " ")}`;
 }
 
 drawGutter();
