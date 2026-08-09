@@ -12,6 +12,8 @@ web/src/wasm/
 *.dmg
 *.AppImage
 *.msi
+*.sha256
+SHA256SUMS
 
 # Local scratch / render previews
 web/_*.mjs
