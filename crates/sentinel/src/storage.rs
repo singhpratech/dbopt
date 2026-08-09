@@ -266,7 +266,7 @@ pub struct PainSummary {
 }
 
 /// Benign/idle/system wait types — noise, not user-facing pain (Paul Randal /
-/// the community real-time script ignorable list). Excluded by the wait poller AND the top-wait
+/// the well-known ignorable list). Excluded by the wait poller AND the top-wait
 /// pick so the Reliability grade isn't dinged by background scheduler waits.
 pub const IGNORABLE_WAITS: &[&str] = &[
     "CLR_AUTO_EVENT","CLR_MANUAL_EVENT","CLR_SEMAPHORE",
@@ -2461,7 +2461,7 @@ mod tests {
 
         s.insert_io_latency(id, &IoLatencyRow {
             captured_at: now,
-            database_name: "pharma".into(),
+            database_name: "appdb".into(),
             file_logical_name: "appdb_data".into(),
             file_type: "ROWS".into(),
             reads_delta: 100,

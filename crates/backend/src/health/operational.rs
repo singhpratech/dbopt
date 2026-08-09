@@ -1,4 +1,4 @@
-//! Operational-health checks — the "community best-practice scripts" axis: server/database
+//! Operational-health checks — the best-practice axis: server/database
 //! configuration, transaction-log VLFs, and backup recency.
 //!
 //! Honesty rules (these are deliberate, see the trust requirements):

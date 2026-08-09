@@ -282,7 +282,7 @@ impl HealthProvider for SqlServerHealthProvider {
         // Advisor wins.
 
         // --- operational best-practices -> Issue (lane "operational") -----
-        // Live server/DB config + log + backup facts → community best-practice scripts-style checks.
+        // Live server/DB config + log + backup facts → best-practice checks.
         // Best-effort: if the probe fails (no access / unsupported), we add
         // nothing — never a fabricated finding. Each check carries its MEASURED
         // value and a copy-paste fix the operator reviews before running.

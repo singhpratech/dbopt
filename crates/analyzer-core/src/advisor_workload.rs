@@ -1,7 +1,7 @@
 //! Write-cost estimation + workload grounding for the CONNECTED index advisor.
 //!
 //! This module is the layer that lets our advisor BEAT a naive missing-index
-//! reporter (the kind the community index-health script surfaces): instead of blindly echoing every
+//! reporter: instead of blindly echoing every
 //! suggestion SQL Server's DMV emits, we
 //!
 //!   (a) estimate the *relative write cost* of each candidate index from its
@@ -158,7 +158,7 @@ pub struct CandidateRanking {
 /// * `base_score` is SQL Server's own improvement measure (cost × impact ×
 ///   seeks) that `advise()` already computes — we take it as the raw benefit.
 /// * We divide by the write-cost divisor so wide indexes need more benefit to
-///   rank high (this is the "BEAT the community index-health script" lever: it won't recommend a
+///   rank high (this is the lever a naive missing-index reporter lacks: it won't recommend a
 ///   12-column index just because the DMV screamed for it).
 /// * When workload data exists, we multiply by a gentle log-scaled frequency
 ///   factor so a query that runs 50k×/day outranks one that runs 5×/day without

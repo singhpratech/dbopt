@@ -496,7 +496,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     // strict left prefix of index B's key list on the same table. Any query A
     // can satisfy, B can satisfy too (a composite index serves all of its leading
     // prefixes), so A is redundant — drop it and let B carry the load. This is
-    // exactly what the community index-health script flags as a "borderline duplicate". We never
+    // the classic "borderline duplicate" shape. We never
     // touch a PK/unique index (it enforces a constraint), and `redundant_existing_indexes`
     // dedupes so a key list that's a prefix of several survivors is only flagged once.
     for r in redundant_existing_indexes(&bundle.indexes) {
@@ -590,7 +590,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
 }
 
 // ===========================================================================
-// Index-advisor cross-group de-dup — closes the "thinner the community index-health script" gap.
+// Index-advisor cross-group de-dup: one index per target, not one per group.
 //
 // The base `advise()` only merged EXACT same-table duplicate EXISTING indexes
 // and emitted one CreateIndex per raw missing-index DMV row. That leaves two

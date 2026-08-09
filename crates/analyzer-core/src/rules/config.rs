@@ -1,5 +1,5 @@
 //! Database / server configuration script smells (offline, static review of
-//! admin T-SQL — community best-practice scripts territory without a live connection).
+//! admin T-SQL — server best-practice checks without a live connection).
 //!
 //! Every rule here works purely off the token stream, so it must be careful:
 //! the tokenizer already classifies comments (`TokKind::Comment`), string

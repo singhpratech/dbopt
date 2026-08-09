@@ -1209,7 +1209,7 @@ pub struct LiveMetrics {
     pub top_waits: Vec<LiveWait>,
     pub sessions: Vec<LiveSession>,
 
-    // ---- deep vitals (the community real-time script-style real-time pressure) -------------
+    // ---- deep vitals (real-time pressure counters) ------------------------
     // CPU PRESSURE: workers ready-to-run but waiting on a CPU, summed over the
     // schedulers that run user work, plus the scheduler count for context.
     pub online_schedulers: Option<i64>,

@@ -143,7 +143,7 @@ pub async fn run(cfg: RunConfig) {
             }),
         ));
 
-        // ---- deep live vitals (the community real-time script-style real-time pressure) ----
+        // ---- deep live vitals (real-time pressure counters) ----
         // Cheap DMV reads on a tight cadence, each in its own task so one
         // missing-permission surface can't starve the others.
         let vitals_period = Duration::from_secs(cadences.vitals_secs.max(1));
