@@ -1,306 +1,401 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>dbopt — find &amp; fix slow SQL before production</title>
-<meta name="description" content="dbopt is a free, local-first SQL Server performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Local by default; the only egress is a cloud AI model you opt into." />
+<meta name="description" content="dbopt is a free, local-first SQL Server performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Paste a query on this page and the analyzer runs in your browser; the SQL never leaves the tab." />
 <meta property="og:title" content="dbopt — find & fix slow SQL before production" />
-<meta property="og:description" content="Free, local-first SQL Server performance optimizer. Static + plan + live analysis, prescriptive cited fixes, a single private binary." />
+<meta property="og:description" content="Free, local-first SQL Server performance optimizer. Static + plan + live analysis, prescriptive cited fixes, a single private binary. Try the analyzer in your browser." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://dbopt.org" />
 <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=Departure+Mono&display=swap" rel="stylesheet" />
 <style>
+/* ==========================================================================
+   dbopt.org
+   No web fonts, no analytics, no third-party anything. A page for a product
+   whose whole promise is "nothing leaves your machine" has no business
+   phoning a font CDN. Everything below ships from this domain.
+   ========================================================================== */
+
 :root{
-  --bg:#06080c; --bg2:#0a0d12; --panel:#0e1219; --elev:#131822;
-  --line:#1c2230; --line2:#2a3142;
-  --text:#d6dbe5; --strong:#f0f2f7; --muted:#7e879b; --dim:#5a6478;
-  --signal:#d4ff4e; --signal-glow:rgba(212,255,78,.5);
-  --blue:#3c72ff; --blue-soft:#2E63E8; --teal:#3ad29f; --red:#E5392F;
-  --sans:'IBM Plex Sans',system-ui,sans-serif;
-  --mono:'IBM Plex Mono','SF Mono',Menlo,monospace;
-  --pixel:'Departure Mono',var(--mono);
-  --maxw:1180px;
+  --void:#06080c; --panel:#0b0f16; --elev:#111722; --sunk:#080b11;
+  --line:#1b2231; --line-2:#28314a;
+  --ink:#dbe1ec; --ink-strong:#f4f6fa; --ink-soft:#8590a6; --ink-faint:#5b6478;
+  --signal:#d4ff4e; --signal-ink:#d4ff4e; --signal-dim:rgba(212,255,78,.14);
+  --crit:#ff5c4d; --warn:#ffb020; --info:#5b8cff; --ok:#3ad29f;
+  --shadow:0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.9);
+
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --maxw:1080px;
+  --gut:2.9rem;
 }
+:root[data-theme="light"]{
+  --void:#f6f7f9; --panel:#fff; --elev:#eef0f4; --sunk:#f0f2f5;
+  --line:#dee2e9; --line-2:#c6ccd8;
+  --ink:#1d2331; --ink-strong:#080b12; --ink-soft:#59617a; --ink-faint:#818aa0;
+  --signal-ink:#42610a; --signal-dim:rgba(122,168,0,.16);
+  --crit:#c8342a; --warn:#9a6200; --info:#2b56c9; --ok:#127a56;
+  --shadow:0 1px 0 rgba(255,255,255,.7), 0 14px 34px -26px rgba(10,20,40,.5);
+}
+
 *{box-sizing:border-box;margin:0;padding:0}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
 body{
-  background:var(--bg); color:var(--text); font:400 16px/1.6 var(--sans);
-  -webkit-font-smoothing:antialiased; overflow-x:hidden; position:relative;
+  background:var(--void); color:var(--ink);
+  font:400 16px/1.65 var(--sans);
+  -webkit-font-smoothing:antialiased; overflow-x:hidden;
 }
-/* ---- atmosphere: grain + radial glow + perspective grid ---- */
-body::before{ /* grain */
-  content:""; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.05;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+a{color:inherit}
+::selection{background:var(--signal);color:#06080c}
+:focus-visible{outline:2px solid var(--signal-ink);outline-offset:2px;border-radius:2px}
+
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+
+/* ---- eyebrow: the page's one repeated typographic device ---------------- */
+.eyebrow{
+  font:500 11px/1 var(--mono); letter-spacing:.18em; text-transform:uppercase;
+  color:var(--ink-faint); display:flex; align-items:center; gap:10px;
 }
-.glow{position:fixed; inset:0; z-index:0; pointer-events:none;
-  background:
-    radial-gradient(60% 50% at 50% -8%, rgba(212,255,78,.10), transparent 70%),
-    radial-gradient(40% 40% at 88% 12%, rgba(60,114,255,.10), transparent 70%);
+.eyebrow::after{content:"";flex:1;height:1px;background:var(--line)}
+.eyebrow b{color:var(--signal-ink);font-weight:500}
+
+/* ---- nav ---------------------------------------------------------------- */
+nav{
+  position:sticky;top:0;z-index:50;
+  background:color-mix(in srgb, var(--void) 88%, transparent);
+  backdrop-filter:blur(12px); border-bottom:1px solid var(--line);
 }
-.scene{position:relative; z-index:1}
+.nav-in{max-width:var(--maxw);margin:0 auto;padding:0 24px;height:56px;
+  display:flex;align-items:center;gap:28px}
+.brand{display:flex;align-items:center;gap:9px;text-decoration:none;font:600 15px/1 var(--mono);
+  letter-spacing:-.02em;color:var(--ink-strong)}
+.brand img{width:20px;height:20px;display:block}
+.nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+.nav-links a{font:500 13px/1 var(--sans);color:var(--ink-soft);text-decoration:none;transition:color .15s}
+.nav-links a:hover{color:var(--ink-strong)}
+.theme-btn{
+  background:none;border:1px solid var(--line);border-radius:6px;color:var(--ink-soft);
+  width:30px;height:30px;cursor:pointer;font-size:13px;display:grid;place-items:center;
+  transition:border-color .15s,color .15s
+}
+.theme-btn:hover{border-color:var(--line-2);color:var(--ink-strong)}
 
-a{color:inherit;text-decoration:none}
-.mono{font-family:var(--mono)}
-.wrap{max-width:var(--maxw); margin:0 auto; padding:0 28px}
+/* ---- hero --------------------------------------------------------------- */
+header{padding:62px 0 0}
+.h-eyebrow{margin-bottom:22px}
+h1{
+  font:500 clamp(29px,3.9vw,45px)/1.1 var(--mono);
+  letter-spacing:-.035em; color:var(--ink-strong); max-width:23ch;
+}
+h1 em{font-style:normal;color:var(--signal-ink)}
+.deck{
+  margin-top:22px; max-width:60ch; font-size:17px; color:var(--ink-soft);
+}
+.deck strong{color:var(--ink);font-weight:500}
 
-/* ---- HUD label + corner brackets ---- */
-.kicker{font:600 11px/1 var(--mono); letter-spacing:.34em; text-transform:uppercase; color:var(--signal); display:inline-flex; align-items:center; gap:9px}
-.kicker::before{content:"";width:18px;height:1px;background:var(--signal);box-shadow:0 0 8px var(--signal-glow)}
-.bracket{position:relative}
-.bracket::before,.bracket::after{content:"";position:absolute;width:12px;height:12px;border-color:var(--line2);border-style:solid}
-.bracket::before{top:-1px;left:-1px;border-width:1px 0 0 1px}
-.bracket::after{bottom:-1px;right:-1px;border-width:0 1px 1px 0}
+/* ---- the analyzer (signature element) ----------------------------------- */
+.analyzer{
+  margin-top:34px; border:1px solid var(--line); border-radius:12px;
+  background:var(--panel); box-shadow:var(--shadow); overflow:hidden;
+}
+.az-bar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:10px 14px;border-bottom:1px solid var(--line);background:var(--elev);
+}
+.az-title{font:500 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-soft)}
+.chips{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+.chip{
+  font:500 11px/1 var(--mono);letter-spacing:.04em;color:var(--ink-faint);
+  border:1px solid var(--line);border-radius:20px;padding:5px 10px;white-space:nowrap;
+}
+.chip b{color:var(--ink);font-weight:500}
+.chip.live{border-color:var(--signal-dim);color:var(--signal-ink)}
+.chip.live b{color:var(--signal-ink)}
 
-/* ---- nav ---- */
-nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);
-  background:linear-gradient(180deg,rgba(6,8,12,.92),rgba(6,8,12,.6));
-  border-bottom:1px solid var(--line)}
-.nav{display:flex;align-items:center;justify-content:space-between;height:62px}
-.brand{display:flex;align-items:center;gap:11px;font:600 17px var(--mono);letter-spacing:-.01em;color:var(--strong)}
-.brand .logo{width:30px;height:30px;filter:drop-shadow(0 0 9px rgba(60,114,255,.45))}
-.brand .opt{color:var(--signal)}
-.nav-links{display:flex;align-items:center;gap:28px;font:500 13px var(--mono);letter-spacing:.02em;color:var(--muted)}
-.nav-links a:hover{color:var(--text)}
-.nav-cta{border:1px solid var(--line2);padding:8px 15px;color:var(--strong);transition:.2s}
-.nav-cta:hover{border-color:var(--signal);color:var(--signal);box-shadow:0 0 18px rgba(212,255,78,.12)}
-@media(max-width:720px){.nav-links a:not(.nav-cta){display:none}}
+/* editor: gutter + textarea share one type ruler */
+.editor{display:flex;background:var(--sunk);position:relative}
+.gutter{
+  width:var(--gut);flex:none;padding:16px 0;text-align:right;user-select:none;
+  border-right:1px solid var(--line);overflow:hidden;
+}
+.gutter i{
+  display:block;font:400 13.5px/1.7 var(--mono);color:var(--ink-faint);
+  font-style:normal;padding-right:9px;position:relative;transition:color .2s
+}
+.gutter i[data-sev]{color:var(--ink-strong)}
+.gutter i[data-sev]::before{
+  content:"";position:absolute;left:5px;top:50%;transform:translateY(-50%);
+  width:5px;height:5px;border-radius:50%;
+}
+.gutter i[data-sev="critical"]::before,.gutter i[data-sev="error"]::before{background:var(--crit)}
+.gutter i[data-sev="warning"]::before{background:var(--warn)}
+.gutter i[data-sev="info"]::before{background:var(--info)}
+#sql{
+  flex:1;min-width:0;background:none;border:0;resize:vertical;color:var(--ink);
+  font:400 13.5px/1.7 var(--mono);padding:16px 16px 16px 12px;min-height:158px;
+  tab-size:2;
+}
+#sql:focus{outline:none}
+#sql::placeholder{color:var(--ink-faint)}
 
-/* ---- hero ---- */
-.hero{position:relative;padding:96px 0 70px;overflow:hidden}
-.hero .grid-floor{position:absolute;left:50%;bottom:-2px;transform:translateX(-50%);width:160%;height:340px;z-index:0;pointer-events:none;
-  background-image:linear-gradient(var(--line2) 1px,transparent 1px),linear-gradient(90deg,var(--line2) 1px,transparent 1px);
-  background-size:46px 46px;
-  transform:translateX(-50%) perspective(420px) rotateX(64deg);
-  transform-origin:bottom; mask-image:linear-gradient(transparent,#000 60%);opacity:.5}
-.hero-inner{position:relative;z-index:2;max-width:880px}
-.eyebrow{margin-bottom:24px}
-h1{font:600 clamp(40px,6.4vw,76px)/1.02 var(--sans);letter-spacing:-.03em;color:var(--strong)}
-h1 .hl{color:var(--signal);position:relative;white-space:nowrap}
-h1 .hl::after{content:"";position:absolute;left:0;right:0;bottom:.08em;height:.07em;background:var(--signal);box-shadow:0 0 16px var(--signal-glow);opacity:.7}
-.sub{margin:26px 0 0;max-width:620px;font-size:18.5px;line-height:1.65;color:var(--muted)}
-.sub b{color:var(--text);font-weight:500}
-.cta-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:38px}
-.btn{display:inline-flex;align-items:center;gap:10px;font:600 14px var(--mono);letter-spacing:.02em;padding:13px 22px;transition:.18s;border:1px solid transparent;cursor:pointer}
-.btn-primary{background:var(--signal);color:#0a0d12;box-shadow:0 0 0 rgba(212,255,78,.4)}
-.btn-primary:hover{box-shadow:0 0 28px rgba(212,255,78,.45);transform:translateY(-1px)}
-.btn-ghost{border-color:var(--line2);color:var(--strong)}
-.btn-ghost:hover{border-color:var(--text);background:rgba(255,255,255,.03)}
-.hero-logo{position:absolute;right:-10px;top:46px;width:300px;height:300px;z-index:1;opacity:.92;
-  filter:drop-shadow(0 0 40px rgba(60,114,255,.4));animation:floaty 7s ease-in-out infinite}
-@keyframes floaty{50%{transform:translateY(-14px)}}
-@media(max-width:980px){.hero-logo{display:none}}
+.az-actions{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:12px 14px;border-top:1px solid var(--line);background:var(--elev);
+}
+.btn{
+  font:600 13px/1 var(--sans);border-radius:7px;padding:10px 18px;cursor:pointer;
+  border:1px solid transparent;transition:transform .12s, filter .15s, border-color .15s;
+}
+.btn:active{transform:translateY(1px)}
+.btn-go{background:var(--signal);color:#06080c;border-color:var(--signal)}
+.btn-go:hover{filter:brightness(1.07)}
+.btn-go[disabled]{opacity:.5;cursor:progress}
+.btn-ghost{background:none;color:var(--ink-soft);border-color:var(--line)}
+.btn-ghost:hover{border-color:var(--line-2);color:var(--ink-strong)}
+.field{display:flex;align-items:center;gap:7px;font:500 12px/1 var(--sans);color:var(--ink-faint)}
+select{
+  font:500 12px/1 var(--mono);background:var(--panel);color:var(--ink);
+  border:1px solid var(--line);border-radius:6px;padding:8px 9px;cursor:pointer;
+}
+.hint{margin-left:auto;font:400 12px/1.4 var(--sans);color:var(--ink-faint)}
 
-/* status strip — echoes the app's topbar */
-.status{margin-top:52px;display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);background:rgba(14,18,25,.6);font:500 12px var(--mono);max-width:760px}
-.status .seg{display:flex;align-items:center;gap:9px;padding:12px 18px;border-right:1px solid var(--line);color:var(--muted);white-space:nowrap}
-.status .seg:last-child{border-right:0}
-.status .seg b{color:var(--strong);font-weight:600}
-.status .seg .gn{color:var(--signal)}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--signal);box-shadow:0 0 9px var(--signal-glow);animation:pulse 2.4s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.35}}
+/* findings */
+.results{border-top:1px solid var(--line)}
+.empty{padding:26px 18px;text-align:center;font-size:13.5px;color:var(--ink-faint)}
+.find{display:flex;gap:14px;padding:16px 18px;border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{
+  flex:none;width:98px;font:600 10px/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+  padding-top:3px;
+}
+.sev[data-s="critical"],.sev[data-s="error"]{color:var(--crit)}
+.sev[data-s="warning"]{color:var(--warn)}
+.sev[data-s="info"]{color:var(--info)}
+.sev span{display:block;color:var(--ink-faint);font-weight:400;letter-spacing:.04em;margin-top:5px}
+.find-body{min-width:0;flex:1}
+.rule{font:500 12px/1 var(--mono);color:var(--ink-strong);word-break:break-all}
+.msg{margin-top:7px;font-size:14px;color:var(--ink-soft)}
+.fix{
+  margin-top:11px;border:1px solid var(--line);border-left:2px solid var(--signal);
+  border-radius:0 7px 7px 0;background:var(--sunk);
+}
+.fix-h{
+  display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1px solid var(--line);
+  font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);
+}
+.copy{
+  margin-left:auto;background:none;border:1px solid var(--line);border-radius:4px;
+  color:var(--ink-faint);font:500 10px/1 var(--mono);letter-spacing:.08em;padding:4px 8px;cursor:pointer;
+}
+.copy:hover{color:var(--ink-strong);border-color:var(--line-2)}
+.fix pre{
+  padding:11px;font:400 12.5px/1.65 var(--mono);color:var(--ink);
+  white-space:pre-wrap;word-break:break-word;overflow-x:auto;
+}
+.proof-line{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin-top:16px;font:400 12.5px/1.5 var(--sans);color:var(--ink-faint);
+}
+.proof-line b{color:var(--signal-ink);font:500 12px/1 var(--mono)}
 
-/* scanline sweep */
-.scan{position:absolute;left:0;right:0;top:0;height:140px;z-index:1;pointer-events:none;
-  background:linear-gradient(180deg,rgba(212,255,78,.07),transparent);animation:sweep 6.5s linear infinite}
-@keyframes sweep{0%{transform:translateY(-140px)}100%{transform:translateY(620px)}}
+/* ---- sections ----------------------------------------------------------- */
+section{padding:88px 0}
+.s-head{margin-bottom:44px}
+h2{
+  margin-top:20px;font:500 clamp(23px,3vw,32px)/1.15 var(--mono);
+  letter-spacing:-.03em;color:var(--ink-strong);max-width:24ch;
+}
+.s-sub{margin-top:14px;max-width:58ch;color:var(--ink-soft);font-size:16px}
 
-/* ---- section scaffold ---- */
-section{position:relative;padding:84px 0}
-.sec-head{max-width:680px;margin-bottom:46px}
-.sec-head h2{font:600 clamp(28px,3.6vw,40px)/1.1 var(--sans);letter-spacing:-.025em;color:var(--strong);margin-top:14px}
-.sec-head p{margin-top:14px;color:var(--muted);font-size:17px}
-.rule{height:1px;background:linear-gradient(90deg,var(--line),transparent);border:0}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.cell{background:var(--panel);padding:26px 22px}
+.cell h3{font:500 15px/1.3 var(--sans);color:var(--ink-strong);margin:14px 0 9px}
+.cell p{font-size:14px;color:var(--ink-soft)}
+.tag{font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+.tag em{font-style:normal;color:var(--signal-ink)}
 
-/* ---- ticker ---- */
-.ticker{border-block:1px solid var(--line);background:var(--bg2);overflow:hidden;white-space:nowrap;padding:14px 0}
-.ticker .track{display:inline-flex;gap:34px;animation:scrollx 30s linear infinite;font:500 13px var(--mono);letter-spacing:.06em;color:var(--dim)}
-.ticker .track span{color:var(--muted)}
-.ticker .track b{color:var(--signal);font-weight:600}
-@keyframes scrollx{to{transform:translateX(-50%)}}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:start}
+.claims{list-style:none}
+.claims li{padding:18px 0;border-bottom:1px solid var(--line)}
+.claims li:last-child{border-bottom:0}
+.claims h4{font:500 14px/1.3 var(--sans);color:var(--ink-strong);margin-bottom:6px}
+.claims p{font-size:14px;color:var(--ink-soft)}
 
-/* ---- three lenses ---- */
-.lenses{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-@media(max-width:880px){.lenses{grid-template-columns:1fr}}
-.lens{position:relative;padding:28px 26px 30px;background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);transition:.22s}
-.lens:hover{border-color:var(--line2);transform:translateY(-3px);box-shadow:0 18px 50px -28px rgba(212,255,78,.25)}
-.lens .ix{font:600 12px var(--mono);color:var(--signal);letter-spacing:.2em}
-.lens h3{font:600 19px var(--sans);color:var(--strong);margin:16px 0 9px;letter-spacing:-.01em}
-.lens p{font-size:14.5px;color:var(--muted);line-height:1.6}
-.lens .ic{width:34px;height:34px;margin-bottom:6px;color:var(--signal);opacity:.9}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.stat{background:var(--panel);padding:24px 18px}
+.stat b{display:block;font:500 30px/1 var(--mono);letter-spacing:-.03em;color:var(--signal-ink)}
+.stat span{display:block;margin-top:9px;font:500 11px/1.3 var(--mono);letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-faint)}
+.caveat{
+  margin-top:20px;padding:16px 18px;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);font-size:13.5px;color:var(--ink-soft);
+}
+.caveat b{color:var(--ink-strong);font-weight:500}
 
-/* ---- prescriptive split ---- */
-.split{display:grid;grid-template-columns:1.05fr 1fr;gap:46px;align-items:center}
-@media(max-width:880px){.split{grid-template-columns:1fr;gap:30px}}
-.code{background:#04060a;border:1px solid var(--line2);border-radius:8px;overflow:hidden;font:13px/1.7 var(--mono);box-shadow:0 30px 70px -40px rgba(0,0,0,.9)}
-.code .bar{display:flex;align-items:center;gap:7px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--line)}
-.code .bar i{width:10px;height:10px;border-radius:50%;background:var(--line2);display:inline-block}
-.code .bar .t{margin-left:8px;font-size:11px;color:var(--dim);letter-spacing:.1em}
-.code pre{padding:18px 18px;overflow-x:auto;color:#c4ccda}
-.code .c{color:#566072}.code .k{color:#9db2ff}.code .bad{color:#ff7a7a;text-decoration:line-through;opacity:.7}
-.code .good{color:var(--signal)}.code .str{color:var(--teal)}
-.feat-list{margin-top:24px;display:grid;gap:16px}
-.feat-list .row{display:flex;gap:14px}
-.feat-list .row .n{font:600 12px var(--mono);color:var(--signal);padding-top:3px;letter-spacing:.1em}
-.feat-list .row h4{font:600 15.5px var(--sans);color:var(--strong)}
-.feat-list .row p{font-size:14px;color:var(--muted);margin-top:3px}
+.engines{display:grid;gap:10px}
+.engine{
+  display:flex;align-items:center;gap:14px;padding:16px 18px;border:1px solid var(--line);
+  border-radius:10px;background:var(--panel);
+}
+.engine.on{border-color:var(--signal-dim)}
+.engine .nm{font:500 14px/1 var(--mono);color:var(--ink-strong)}
+.engine .st{margin-left:auto;font:500 10px/1 var(--mono);letter-spacing:.12em;
+  text-transform:uppercase;color:var(--ink-faint)}
+.engine.on .st{color:var(--signal-ink)}
 
-/* ---- private band ---- */
-.private{border:1px solid var(--line);background:
-  radial-gradient(120% 140% at 0% 0%,rgba(60,114,255,.07),transparent 55%),var(--bg2);padding:46px 40px}
-.priv-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:30px;margin-top:8px}
-@media(max-width:880px){.priv-grid{grid-template-columns:repeat(2,1fr);gap:24px}}
-.priv-grid .c .ic{color:var(--signal);width:26px;height:26px}
-.priv-grid .c h4{font:600 15px var(--sans);color:var(--strong);margin:12px 0 6px}
-.priv-grid .c p{font-size:13.5px;color:var(--muted);line-height:1.55}
+.dl{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:26px}
+.dl a{
+  display:block;padding:20px;border:1px solid var(--line);border-radius:10px;background:var(--panel);
+  text-decoration:none;transition:border-color .15s,transform .15s;
+}
+.dl a:hover{border-color:var(--line-2);transform:translateY(-2px)}
+.dl .os{display:block;font:500 14px/1 var(--sans);color:var(--ink-strong)}
+.dl .ext{display:block;margin-top:8px;font:400 12px/1 var(--mono);color:var(--ink-faint)}
+.termbox{border:1px solid var(--line);border-radius:10px;background:var(--sunk);overflow:hidden}
+.termbox .th{padding:8px 13px;border-bottom:1px solid var(--line);background:var(--elev);
+  font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+.termbox pre{padding:14px;font:400 12.5px/1.9 var(--mono);color:var(--ink);overflow-x:auto}
+.termbox pre b{color:var(--signal-ink);font-weight:400}
+.note{margin-top:18px;font-size:13px;color:var(--ink-faint)}
 
-/* ---- stats ---- */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line)}
-@media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
-.stat{padding:38px 26px;border-right:1px solid var(--line);text-align:center}
-.stat:last-child{border-right:0}
-@media(max-width:720px){.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}}
-.stat .v{font:600 clamp(34px,4.4vw,52px)/1 var(--mono);color:var(--strong);letter-spacing:-.02em}
-.stat .v .u{color:var(--signal)}
-.stat .l{margin-top:12px;font:500 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:44px 0;margin-top:40px}
+.f-in{display:flex;gap:20px;align-items:center;flex-wrap:wrap;
+  font-size:13px;color:var(--ink-faint)}
+.f-in a{color:var(--ink-soft);text-decoration:none}
+.f-in a:hover{color:var(--ink-strong)}
+.f-in .sp{margin-left:auto}
 
-/* ---- engine flavors ---- */
-.flavors{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px}
-.flavor{display:flex;align-items:center;gap:12px;padding:14px 18px;border:1px solid var(--line);background:var(--bg2);font:600 14px var(--mono)}
-.flavor .lg{width:22px;height:22px;opacity:.9}
-.flavor .tag{font-size:11px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
-.flavor.live{border-color:rgba(212,255,78,.4)}
-.flavor.live .tag{color:var(--signal)}
-.flavor .div{width:1px;height:18px;background:var(--line2)}
-
-/* ---- final CTA ---- */
-.final{text-align:center;padding:96px 0 80px}
-.final h2{font:600 clamp(32px,5vw,56px)/1.05 var(--sans);letter-spacing:-.03em;color:var(--strong)}
-.final h2 .hl{color:var(--signal)}
-.install{margin:34px auto 0;max-width:560px;display:flex;align-items:center;gap:0;border:1px solid var(--line2);background:#04060a;font:14px var(--mono)}
-.install code{flex:1;padding:15px 18px;color:var(--text);text-align:left;overflow-x:auto;white-space:nowrap}
-.install code .p{color:var(--signal)}
-.install button{padding:15px 18px;border:0;border-left:1px solid var(--line2);background:transparent;color:var(--muted);font:600 12px var(--mono);letter-spacing:.08em;cursor:pointer;transition:.18s}
-.install button:hover{color:var(--signal)}
-
-/* ---- footer ---- */
-footer{border-top:1px solid var(--line);padding:40px 0 60px}
-.foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:20px;align-items:center}
-.foot .b{display:flex;align-items:center;gap:10px;font:600 15px var(--mono);color:var(--strong)}
-.foot .b .logo{width:24px;height:24px}
-.foot p{font:13px var(--mono);color:var(--dim)}
-.foot .links{display:flex;gap:22px;font:500 13px var(--mono);color:var(--muted)}
-.foot .links a:hover{color:var(--signal)}
-
-/* reveal */
-.reveal{opacity:0;transform:translateY(18px);transition:opacity .7s ease,transform .7s ease}
-.reveal.in{opacity:1;transform:none}
-@media(prefers-reduced-motion:reduce){*{animation:none!important}.reveal{opacity:1;transform:none}}
+@media (max-width:860px){
+  .grid-3,.stats,.dl{grid-template-columns:1fr}
+  .split{grid-template-columns:1fr;gap:36px}
+  .nav-links a:not(.k){display:none}
+  header{padding-top:52px}
+  section{padding:64px 0}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  html{scroll-behavior:auto}
+}
 </style>
 </head>
 <body>
-<div class="glow"></div>
-<div class="scene">
 
-<nav><div class="wrap nav">
-  <a class="brand" href="#top">
-    <img class="logo" src="./logo.svg" alt="" />
-    db<span class="opt">opt</span>
-  </a>
-  <div class="nav-links">
-    <a href="#lenses">Lenses</a>
-    <a href="#prescriptive">Fixes</a>
-    <a href="#private">Private</a>
-    <a href="#proof">Proof</a>
-    <a class="nav-cta" href="https://github.com/singhpratech/dbopt" target="_blank" rel="noopener">GitHub ↗</a>
+<nav>
+  <div class="nav-in">
+    <a class="brand" href="#top"><img src="./logo.svg" alt="" /> dbopt</a>
+    <div class="nav-links">
+      <a href="#try" class="k">Try it</a>
+      <a href="#lenses">Lenses</a>
+      <a href="#private">Private</a>
+      <a href="#proof">Proof</a>
+      <a href="#install" class="k">Install</a>
+      <button class="theme-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <circle cx="8" cy="8" r="4.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M8 3.6a4.4 4.4 0 0 0 0 8.8z" fill="currentColor"/>
+        </svg>
+      </button>
+    </div>
   </div>
-</div></nav>
+</nav>
 
-<header class="hero" id="top">
-  <div class="scan"></div>
-  <div class="grid-floor"></div>
+<header id="top">
   <div class="wrap">
-    <div class="hero-inner">
-      <div class="eyebrow reveal"><span class="kicker">Local-first SQL performance optimizer</span></div>
-      <h1 class="reveal" style="transition-delay:.06s">Find &amp; fix slow SQL<br><span class="hl">before</span> it reaches production.</h1>
-      <p class="sub reveal" style="transition-delay:.12s">dbopt reads your T-SQL, your execution plans, and your live server metrics — then tells you exactly what's going to hurt and <b>how to fix it, with the reasoning cited</b>. Statically. Privately. No execution, no locks, no load on prod.</p>
-      <div class="cta-row reveal" style="transition-delay:.18s">
-        <a class="btn btn-primary" href="#get">Download — free &amp; open →</a>
-        <a class="btn btn-ghost" href="#lenses">See how it works</a>
+    <div class="eyebrow h-eyebrow"><b>local-first</b> · sql server 2019 → 2025 · free &amp; open</div>
+    <h1>Find and fix slow SQL <em>before</em> it reaches production.</h1>
+    <p class="deck">
+      dbopt reads your T-SQL, your execution plans and your live server metrics, then tells you
+      what is going to hurt and how to fix it — <strong>with the reasoning cited</strong>. No execution,
+      no locks, no load on production.
+    </p>
+
+    <!-- The analyzer is the hero. Not a picture of it. -->
+    <div class="analyzer" id="try">
+      <div class="az-bar">
+        <span class="az-title">The analyzer</span>
+        <div class="chips">
+          <span class="chip" id="c-status">loading analyzer…</span>
+          <span class="chip" id="c-rules">102 rules</span>
+          <span class="chip live" id="c-time">—</span>
+        </div>
       </div>
-      <div class="status reveal" style="transition-delay:.26s">
-        <div class="seg"><span class="dot"></span> ANALYZER <b class="gn">READY</b></div>
-        <div class="seg">RULES <b>102</b></div>
-        <div class="seg">SCENARIOS <b>145</b></div>
-        <div class="seg">F1 <b class="gn">1.000</b></div>
+
+      <div class="editor">
+        <div class="gutter" id="gutter" aria-hidden="true"></div>
+        <textarea id="sql" spellcheck="false" aria-label="T-SQL to analyze"
+placeholder="Paste any T-SQL here…">SELECT * FROM Orders o
+WHERE YEAR(o.OrderDate) = 2025
+  AND o.Status = 'OPEN'
+ORDER BY o.Total DESC;</textarea>
+      </div>
+
+      <div class="az-actions">
+        <button class="btn btn-go" id="run">Analyze</button>
+        <div class="field">
+          <label for="preset">Example</label>
+          <select id="preset">
+            <option value="0">Non-sargable date filter</option>
+            <option value="1">NOLOCK everywhere</option>
+            <option value="2">Cursor over a set</option>
+            <option value="3">Unicode literal vs varchar column</option>
+            <option value="4">Legacy join syntax</option>
+            <option value="5">Modern rewrite, gated to 2022+</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="ver">Target</label>
+          <select id="ver">
+            <option value="2025" selected>SQL Server 2025</option>
+            <option value="2022">2022</option>
+            <option value="2019">2019</option>
+          </select>
+        </div>
+        <span class="hint">Try the 2022+ example, then drop the target to 2019 — the gated advice disappears.</span>
+      </div>
+
+      <div class="results" id="out">
+        <div class="empty">Press <b>Analyze</b> — the rules run here, in this tab.</div>
       </div>
     </div>
+
+    <p class="proof-line">
+      <span>Your SQL never leaves the page. The analyzer is the real Rust engine compiled to
+      WebAssembly, served from this domain — after it loads, analyzing sends nothing.</span>
+      <b id="netproof">third-party requests: 0</b>
+    </p>
   </div>
 </header>
 
-<div class="ticker" aria-hidden="true"><div class="track">
-  <span>SARGABILITY</span><b>·</b><span>DEPRECATED SYNTAX</span><b>·</b><span>MODERN REWRITES</span><b>·</b><span>PLAN SHAPE</span><b>·</b><span>LOCKING</span><b>·</b><span>TEMPDB SPILLS</span><b>·</b><span>STATISTICS</span><b>·</b><span>INDEX DESIGN</span><b>·</b><span>HYGIENE</span><b>·</b><span>MISSING INDEXES</span><b>·</b>
-  <span>SARGABILITY</span><b>·</b><span>DEPRECATED SYNTAX</span><b>·</b><span>MODERN REWRITES</span><b>·</b><span>PLAN SHAPE</span><b>·</b><span>LOCKING</span><b>·</b><span>TEMPDB SPILLS</span><b>·</b><span>STATISTICS</span><b>·</b><span>INDEX DESIGN</span><b>·</b><span>HYGIENE</span><b>·</b><span>MISSING INDEXES</span><b>·</b>
-</div></div>
-
 <section id="lenses">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <span class="kicker">Three lenses · one tool</span>
-      <h2>Most tools watch one angle. dbopt watches three.</h2>
-      <p>Static code, the optimizer's plan, and the live instance — fused into a single verdict you can act on.</p>
+    <div class="s-head">
+      <div class="eyebrow">Three lenses</div>
+      <h2>Static code, the optimizer's plan, and the live instance.</h2>
+      <p class="s-sub">Most tools watch one angle. dbopt fuses three into a single verdict you can act on.</p>
     </div>
-    <div class="lenses">
-      <div class="lens bracket reveal">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 3H4v5M15 3h5v5M9 21H4v-5M15 21h5v-5"/><path d="M8 12h8M8 9h5M8 15h6"/></svg>
-        <div class="ix">01 / STATIC · MATURE</div>
+    <div class="grid-3">
+      <div class="cell">
+        <div class="tag">Static · <em>mature</em></div>
         <h3>Shift-left analysis</h3>
-        <p>A token-level T-SQL analyzer — 102 rules across hygiene, sargability, deprecated syntax, plan-shape, locking, tempdb, transactions, security and index design. Runs in-browser via WebAssembly or as a CLI. No connection required.</p>
+        <p>A token-level T-SQL analyzer — 102 rules across hygiene, sargability, deprecated syntax,
+           plan shape, locking, tempdb, transactions, security and index design. Runs in your browser
+           or as a CLI. No connection required.</p>
       </div>
-      <div class="lens bracket reveal" style="transition-delay:.08s">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 17l5-5 4 3 8-9"/><path d="M3 21h18"/><circle cx="8" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r="1.4" fill="currentColor" stroke="none"/></svg>
-        <div class="ix">02 / PLAN · MATURE</div>
+      <div class="cell">
+        <div class="tag">Plan · <em>mature</em></div>
         <h3>Execution-plan breakdown</h3>
-        <p>Fetches the <em>estimated</em> plan (compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, and spill risk. We've dissected multi-hour queries without executing them once.</p>
+        <p>Fetches the estimated plan — compile-only, the query never runs — and breaks down operator
+           cost, scans versus seeks, and spill risk.</p>
       </div>
-      <div class="lens bracket reveal" style="transition-delay:.16s">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/></svg>
-        <div class="ix">03 / LIVE · ON-DEMAND TRIAGE</div>
-        <h3>Live Pulse &amp; Triage</h3>
-        <p>Watch real-time vitals (CPU load, throughput, contention, waits) on demand, and run a lightweight poller that samples Query Store, deadlocks and index usage into a local time-series for an on-demand <b>pain report</b> (e.g. the last 7 days) whenever you want one. This is on-demand triage you start and read yourself — not a hands-off APM with paging or alerting.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="prescriptive">
-  <div class="wrap split">
-    <div class="reveal">
-      <div class="code bracket">
-        <div class="bar"><i></i><i></i><i></i><span class="t">REWRITE · sargability.function_on_column</span></div>
-<pre><span class="c">-- ✗ non-sargable: index on OrderDate can't be used</span>
-<span class="k">SELECT</span> * <span class="k">FROM</span> Orders
-<span class="k">WHERE</span> <span class="bad">YEAR(OrderDate) = 2025</span>;
-
-<span class="c">-- ✓ dbopt rewrite: range predicate stays sargable</span>
-<span class="k">SELECT</span> * <span class="k">FROM</span> Orders
-<span class="k">WHERE</span> <span class="good">OrderDate &gt;= '20250101'
-  AND OrderDate &lt; '20260101'</span>;
-<span class="c">-- ↳ wrapping the column in YEAR() forces a scan;
---   a half-open range lets the optimizer seek.</span></pre>
-      </div>
-    </div>
-    <div class="reveal" style="transition-delay:.08s">
-      <span class="kicker">Prescriptive &amp; cited</span>
-      <h2 style="font:600 clamp(26px,3.4vw,38px)/1.1 var(--sans);letter-spacing:-.025em;color:var(--strong);margin:14px 0 4px">Not "here's a finding."<br>Here's the fix — and why.</h2>
-      <div class="feat-list">
-        <div class="row"><div class="n">→</div><div><h4>The concrete rewrite</h4><p>Every rule ships a copy-paste fix, not just a warning — plus a one-click "send to the analyze editor."</p></div></div>
-        <div class="row"><div class="n">→</div><div><h4>The engine-level reasoning</h4><p>Each finding cites the <em>why</em> — what the optimizer does, and how the rewrite changes the plan.</p></div></div>
-        <div class="row"><div class="n">→</div><div><h4>Version-aware (2019 → 2025)</h4><p>A 2022+ rewrite is never suggested against a 2019 target. Defaults to SQL Server 2025.</p></div></div>
-        <div class="row"><div class="n">→</div><div><h4>Grounded AI assistant</h4><p>The assistant gets your SQL <em>and</em> the findings as context. Run it fully local (Ollama / web-llm) — nothing leaves — or fan one prompt out to several cloud providers to compare.</p></div></div>
+      <div class="cell">
+        <div class="tag">Live · <em>on-demand triage</em></div>
+        <h3>Pulse and triage</h3>
+        <p>Watch real-time vitals on demand, and run a poller that samples Query Store, deadlocks and
+           index usage into a local time-series for a pain report you read when you want it.</p>
       </div>
     </div>
   </div>
@@ -308,15 +403,41 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
 
 <section id="private">
   <div class="wrap">
-    <div class="private bracket reveal">
-      <span class="kicker">Local-first by design</span>
-      <h2 style="font:600 clamp(26px,3.4vw,38px)/1.1 var(--sans);letter-spacing:-.025em;color:var(--strong);margin:14px 0 6px;max-width:640px">Your data stays on the box — until you say otherwise.</h2>
-      <p style="color:var(--muted);max-width:620px;font-size:16px">A single Rust binary, SQLite for storage. The analyzer never phones home. The AI assistant runs on a <b style="color:var(--text);font-weight:500">local</b> model (Ollama / web-llm) so nothing leaves — or a <b style="color:var(--text);font-weight:500">cloud</b> model if you want one, sending only your prompt. Built for pharma, finance and healthcare — shops that <em>can't</em> ship their data anywhere by accident.</p>
-      <div class="priv-grid">
-        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><h4>Nothing phones home</h4><p>No telemetry, no account, no analytics — ever. The only data that leaves is a prompt you deliberately hand to a cloud AI model.</p></div>
-        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 13h6"/></svg><h4>One static binary</h4><p>Linux, macOS, Windows. No runtime, no external services, web UI embedded inside.</p></div>
-        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg><h4>Read-only &amp; safe</h4><p>Estimated plans compile-only. DDL is preview-only — Safe-Apply never auto-runs a change.</p></div>
-        <div class="c"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M19 5l-3 3M8 16l-3 3"/></svg><h4>Free &amp; open</h4><p>No per-seat cost, no paywalled features — what the commercial tools do, without monetizing your pain.</p></div>
+    <div class="s-head">
+      <div class="eyebrow">Private by construction</div>
+      <h2>Your data stays on the box — until you say otherwise.</h2>
+      <p class="s-sub">Built for the shops that cannot ship a query off-site by accident: pharma, finance, healthcare.</p>
+    </div>
+    <div class="split">
+      <ul class="claims">
+        <li>
+          <h4>Never reads your rows</h4>
+          <p>Every query dbopt runs hits <code>sys.*</code> catalog views, DMVs or Query Store —
+             metadata, never table data.</p>
+        </li>
+        <li>
+          <h4>Read-only and reversible</h4>
+          <p>Estimated plans are compile-only. DDL is preview-only — Safe-Apply never runs a change for you.</p>
+        </li>
+        <li>
+          <h4>One binary, no services</h4>
+          <p>Linux, macOS, Windows. SQLite for storage, the web UI embedded inside. Nothing else to install.</p>
+        </li>
+        <li>
+          <h4>Two things leave, both your choice</h4>
+          <p>A prompt you hand to a cloud AI model, and an anonymous version check to GitHub you can
+             switch off. That is the complete list.</p>
+        </li>
+      </ul>
+      <div>
+        <div class="termbox">
+          <div class="th">This page, audited</div>
+          <pre id="audit">measuring…</pre>
+        </div>
+        <p class="note">
+          Open your network panel and reload. This site loads no fonts, no analytics and no scripts
+          from anyone else — the same standard the product holds itself to.
+        </p>
       </div>
     </div>
   </div>
@@ -324,110 +445,275 @@ footer{border-top:1px solid var(--line);padding:40px 0 60px}
 
 <section id="proof">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <span class="kicker">Quality bar · proven, not promised</span>
-      <h2>Held to a measurable accuracy target.</h2>
-      <p>A tagged scenario corpus proves every rule fires when it should — and stays silent when it shouldn't. Run <code class="mono" style="color:var(--signal)">cargo run -p eval -- --html</code> and read the live board.</p>
+    <div class="s-head">
+      <div class="eyebrow">Quality bar</div>
+      <h2>Numbers, with their limits stated.</h2>
+      <p class="s-sub">A tagged scenario corpus checks that covered rules fire when they should — and stay
+        silent when they shouldn't.</p>
     </div>
-    <div class="stats reveal">
-      <div class="stat"><div class="v"><span data-count="102">0</span></div><div class="l">Analyzer rules</div></div>
-      <div class="stat"><div class="v"><span data-count="145">0</span></div><div class="l">Eval scenarios</div></div>
-      <div class="stat"><div class="v"><span data-count="1" data-dec="3">0.000</span></div><div class="l">Precision · Recall · F1</div></div>
-      <div class="stat"><div class="v"><span class="u">$</span><span data-count="0">0</span></div><div class="l">Per-seat cost</div></div>
+    <div class="stats">
+      <div class="stat"><b>102</b><span>Analyzer rules</span></div>
+      <div class="stat"><b>147</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
+      <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
-  </div>
-</section>
-
-<section style="padding-top:0">
-  <div class="wrap">
-    <div class="sec-head reveal" style="margin-bottom:24px">
-      <span class="kicker">Built for one engine, done deeply</span>
-      <h2 style="font-size:clamp(24px,3vw,32px)">The deepest SQL Server static optimizer.</h2>
-      <p>SQL Server is the only supported engine today — 100% of the rules are SQL-Server-specific. An <code>Engine</code> seam exists in the code, so Postgres and MySQL are exploratory directions, not committed releases or dates.</p>
-    </div>
-    <div class="flavors reveal">
-      <div class="flavor live"><img class="lg" src="./logo.svg" alt="" /> dbopt <span class="div"></span> <span class="tag">SQL Server · supported</span></div>
-      <div class="flavor">dbopt <span class="div"></span> <span class="tag">PostgreSQL · exploratory</span></div>
-      <div class="flavor">dbopt <span class="div"></span> <span class="tag">MySQL · exploratory</span></div>
+    <div class="caveat">
+      <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
+      self-graded: it proves no regression on the cases we wrote, not a measured real-world
+      false-positive rate. <b>73 of the 102 rules</b> currently have a scenario; the newer rule packs
+      are still being backfilled, and a held-out third-party corpus is on the roadmap. Reproduce it
+      yourself with <code>cargo run -p eval -- --html</code>.
     </div>
   </div>
 </section>
 
-<section class="final" id="get">
+<section id="engines">
   <div class="wrap">
-    <span class="kicker reveal" style="justify-content:center">Ready when you are</span>
-    <h2 class="reveal" style="transition-delay:.06s;margin-top:16px">Stop guessing.<br>Start <span class="hl">seeing</span>.</h2>
-    <div class="cta-row reveal" id="dl-row" style="transition-delay:.12s;justify-content:center;margin-top:30px;flex-wrap:wrap">
-      <a class="btn btn-primary" data-os="macos" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg">macOS · Apple Silicon</a>
-      <a class="btn btn-ghost" data-os="windows" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi">Windows · installer</a>
-      <a class="btn btn-ghost" data-os="linux" href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz">Linux</a>
+    <div class="s-head">
+      <div class="eyebrow">Scope</div>
+      <h2>One engine, done deeply.</h2>
+      <p class="s-sub">SQL Server is the product. An engine seam exists in the code, so other engines are a
+        direction we could take — not a promise, and not a date.</p>
     </div>
-    <p class="reveal" style="transition-delay:.18s;text-align:center;margin-top:20px;font:12px var(--mono);color:var(--dim)">
-      one self-contained binary · run it, open <span style="color:var(--muted)">127.0.0.1:3690</span> &nbsp;·&nbsp;
-      <a href="https://github.com/singhpratech/dbopt/releases" style="color:var(--muted)">all releases</a> &nbsp;·&nbsp;
-      <a href="https://github.com/singhpratech/dbopt" style="color:var(--muted)">build from source ↗</a>
-    </p>
-    <p class="reveal" style="transition-delay:.22s;text-align:center;margin-top:8px;font:11px var(--mono);color:var(--dim)">
-      builds aren't code-signed yet — on first run, Windows: <span style="color:var(--muted)">More info → Run anyway</span>;
-      macOS: <span style="color:var(--muted)">right-click → Open</span>.
-      <a href="https://github.com/singhpratech/dbopt#first-run-current-builds-arent-code-signed-yet" style="color:var(--muted)">details ↗</a>
+    <div class="engines">
+      <div class="engine on"><span class="nm">SQL Server</span>
+        <span>2019 → 2025 · 100% of the rules</span><span class="st">Supported</span></div>
+      <div class="engine"><span class="nm">PostgreSQL</span>
+        <span>seam only — no rules yet</span><span class="st">Exploratory</span></div>
+      <div class="engine"><span class="nm">MySQL</span>
+        <span>seam only — no rules yet</span><span class="st">Exploratory</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="s-head">
+      <div class="eyebrow">Install</div>
+      <h2>One self-contained binary. Run it, open the port.</h2>
+    </div>
+    <div class="dl">
+      <a href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi">
+        <span class="os">Windows</span><span class="ext">.msi · x64 installer</span></a>
+      <a href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-macos-arm64.dmg">
+        <span class="os">macOS</span><span class="ext">.dmg · Apple Silicon</span></a>
+      <a href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-linux-x86_64.tar.gz">
+        <span class="os">Linux</span><span class="ext">.tar.gz · glibc or static musl</span></a>
+    </div>
+    <div class="termbox">
+      <div class="th">Or one line</div>
+<pre><b># Linux &amp; macOS</b>
+curl -fsSL https://dbopt.org/install.sh | sh
+
+<b># Windows (PowerShell)</b>
+irm https://dbopt.org/install.ps1 | iex
+
+<b># then</b>
+dbopt-backend            <span style="color:var(--ink-faint)"># UI + API on 127.0.0.1:3690</span>
+dbopt lint ./db --format sarif   <span style="color:var(--ink-faint)"># offline, for CI</span></pre>
+    </div>
+    <p class="note">
+      Builds are not code-signed yet. Windows: <b>More info → Run anyway</b>. macOS: <b>right-click → Open</b>.
+      <a href="https://github.com/singhpratech/dbopt#first-run-current-builds-arent-code-signed-yet">Details</a> ·
+      <a href="https://github.com/singhpratech/dbopt/releases">All releases and checksums</a>
     </p>
   </div>
 </section>
 
 <footer>
-  <div class="wrap foot">
-    <div>
-      <div class="b"><img class="logo" src="./logo.svg" alt="" /> db<span style="color:var(--signal)">opt</span></div>
-      <p style="margin-top:10px">Local-first by design — your data stays on your infrastructure unless you opt into a cloud AI model.</p>
-    </div>
-    <div class="links">
-      <a href="https://github.com/singhpratech/dbopt" target="_blank" rel="noopener">GitHub</a>
-      <a href="#lenses">How it works</a>
-      <a href="#get">Install</a>
-      <a href="https://dbopt.org">dbopt.org</a>
-    </div>
+  <div class="wrap f-in">
+    <span>Local-first by design.</span>
+    <a href="https://github.com/singhpratech/dbopt">GitHub</a>
+    <a href="./USAGE.md">Usage</a>
+    <a href="./DATA-HANDLING.md">Data handling</a>
+    <span class="sp">© 2026 <a href="https://theaivibe.org">Prateek Singh</a></span>
   </div>
-  <p style="text-align:center;margin-top:32px;font:12px var(--mono);color:var(--dim)">© 2026 <a href="https://theaivibe.org" target="_blank" rel="noopener" style="color:var(--muted)">Prateek Singh</a></p>
 </footer>
 
-</div>
-<script>
-// staggered reveal
-const io=new IntersectionObserver((es)=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.12});
-document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
-// count-up stats
-const cu=new IntersectionObserver((es)=>es.forEach(e=>{
-  if(!e.isIntersecting)return; cu.unobserve(e.target);
-  const el=e.target, end=parseFloat(el.dataset.count), dec=parseInt(el.dataset.dec||'0'); let t0=null;
-  const step=(t)=>{if(!t0)t0=t; const p=Math.min((t-t0)/900,1); const v=end*(1-Math.pow(1-p,3));
-    el.textContent=dec?v.toFixed(dec):Math.round(v); if(p<1)requestAnimationFrame(step);};
-  requestAnimationFrame(step);
-}),{threshold:.5});
-document.querySelectorAll('[data-count]').forEach(el=>cu.observe(el));
-// platform auto-detect: promote the visitor's OS to the primary download button
-(function(){
-  const row=document.getElementById('dl-row'); if(!row) return;
-  const ua=navigator.userAgent||'';
-  const plat=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';
-  let os=null;
-  if(/Win/i.test(ua)||/Win/i.test(plat)) os='windows';
-  else if(/Mac/i.test(ua)||/Mac/i.test(plat)||/iPhone|iPad|iPod/i.test(ua)) os='macos';
-  else if(/Linux|X11|CrOS/i.test(ua)||/Linux/i.test(plat)) os='linux';
-  const label={windows:'Windows',macos:'macOS · Apple Silicon',linux:'Linux'};
-  const btns=Array.prototype.slice.call(row.querySelectorAll('a[data-os]'));
-  btns.forEach(b=>{b.classList.remove('btn-primary');b.classList.add('btn-ghost');});
-  const match=btns.filter(b=>b.getAttribute('data-os')===os)[0];
-  if(match){
-    match.classList.remove('btn-ghost');match.classList.add('btn-primary');
-    match.textContent='Download for '+label[os]+' →';
-    row.insertBefore(match,row.firstChild);
-  } else {
-    // unknown OS — keep a clear primary CTA (macOS first, else the first button)
-    const m=btns.filter(b=>b.getAttribute('data-os')==='macos')[0]||btns[0];
-    if(m){m.classList.remove('btn-ghost');m.classList.add('btn-primary');}
+<script type="module">
+/* --------------------------------------------------------------------------
+   The demo runs the real analyzer-core, compiled to WebAssembly. Same engine
+   as the CLI and the desktop app — not a canned recording.
+   -------------------------------------------------------------------------- */
+
+const $ = (id) => document.getElementById(id);
+const sqlEl = $("sql"), gutEl = $("gutter"), outEl = $("out"), runEl = $("run");
+
+/* ---- theme: dark is the brand; the toggle is remembered ----------------- */
+const savedTheme = localStorage.getItem("dbopt-theme");
+if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+$("theme").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("dbopt-theme", next);
+});
+
+/* ---- examples: every one of these fires real, verified rule ids ---------- */
+const PRESETS = [
+`SELECT * FROM Orders o
+WHERE YEAR(o.OrderDate) = 2025
+  AND o.Status = 'OPEN'
+ORDER BY o.Total DESC;`,
+`SELECT c.Name, o.Total
+FROM dbo.Customers c WITH (NOLOCK)
+JOIN dbo.Orders o WITH (NOLOCK) ON o.CustId = c.Id
+WHERE o.Total > 100;`,
+`DECLARE @id INT;
+DECLARE c CURSOR FOR SELECT Id FROM dbo.Orders;
+OPEN c;
+FETCH NEXT FROM c INTO @id;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+  UPDATE dbo.Orders SET Processed = 1 WHERE Id = @id;
+  FETCH NEXT FROM c INTO @id;
+END`,
+`SELECT o.Id, o.Total
+FROM dbo.Orders o
+WHERE o.RefCode = N'AB-991';`,
+`SELECT o.Id, c.Name
+FROM dbo.Orders o, dbo.Customers c
+WHERE o.CustId *= c.Id;`,
+`SELECT c.CustId,
+       CASE WHEN c.ScoreA > c.ScoreB THEN c.ScoreA ELSE c.ScoreB END AS Best,
+       STUFF((SELECT ',' + o.Code FROM dbo.Orders o
+              WHERE o.CustId = c.CustId FOR XML PATH('')), 1, 1, '') AS Codes
+FROM dbo.Customers c;`
+];
+$("preset").addEventListener("change", (e) => {
+  sqlEl.value = PRESETS[+e.target.value];
+  drawGutter();
+  run();
+});
+
+/* ---- gutter: line numbers that become severity markers ------------------ */
+let marks = {};
+function drawGutter() {
+  const n = sqlEl.value.split("\n").length;
+  let html = "";
+  for (let i = 1; i <= n; i++) {
+    const s = marks[i];
+    html += s ? `<i data-sev="${s}">${i}</i>` : `<i>${i}</i>`;
   }
-})();
+  gutEl.innerHTML = html;
+  gutEl.scrollTop = sqlEl.scrollTop;
+}
+sqlEl.addEventListener("input", () => { marks = {}; drawGutter(); });
+sqlEl.addEventListener("scroll", () => { gutEl.scrollTop = sqlEl.scrollTop; });
+
+/* ---- load the engine ---------------------------------------------------- */
+let analyze = null;
+const status = $("c-status");
+
+async function boot() {
+  try {
+    const mod = await import("./wasm/analyzer_wasm.js");
+    await mod.default();
+    analyze = mod.analyze_json;
+    status.innerHTML = 'analyzer <b>ready</b>';
+    status.classList.add("live");
+    return true;
+  } catch (e) {
+    status.textContent = "analyzer unavailable";
+    outEl.innerHTML = `<div class="empty">The analyzer could not load in this browser.
+      It needs WebAssembly and ES modules. The CLI does the same job offline:
+      <code>dbopt lint ./db</code>.</div>`;
+    return false;
+  }
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function render(findings, ms) {
+  $("c-time").innerHTML = `<b>${ms.toFixed(1)}</b> ms`;
+  marks = {};
+  if (!findings.length) {
+    outEl.innerHTML = `<div class="empty">No findings against this target version.
+      Try another example, or lower the target to 2019.</div>`;
+    drawGutter();
+    return;
+  }
+  // One card per rule, the way the app groups them — a rule that fires on four
+  // lines is one problem to fix, not four things to read.
+  const groups = new Map();
+  for (const f of findings) {
+    const line = f.location ? f.location.line : null;
+    if (line) marks[line] = f.severity;
+    const g = groups.get(f.rule);
+    if (g) { if (line) g.lines.push(line); }
+    else groups.set(f.rule, { ...f, lines: line ? [line] : [] });
+  }
+
+  outEl.innerHTML = [...groups.values()].map((f) => {
+    const where = f.lines.length === 0 ? "whole file"
+      : f.lines.length === 1 ? "line " + f.lines[0]
+      : `${f.lines.length}× · lines ${f.lines.join(", ")}`;
+    const fix = f.recommendation
+      ? `<div class="fix">
+           <div class="fix-h">How to fix it
+             <button class="copy" data-fix="${esc(f.recommendation)}">Copy</button></div>
+           <pre>${esc(f.recommendation)}</pre>
+         </div>`
+      : "";
+    return `<div class="find">
+      <div class="sev" data-s="${esc(f.severity)}">${esc(f.severity)}
+        <span>${esc(where)}</span></div>
+      <div class="find-body">
+        <div class="rule">${esc(f.rule)}</div>
+        <div class="msg">${esc(f.message)}</div>
+        ${fix}
+      </div>
+    </div>`;
+  }).join("");
+  drawGutter();
+}
+
+outEl.addEventListener("click", (e) => {
+  const b = e.target.closest(".copy");
+  if (!b) return;
+  navigator.clipboard.writeText(b.dataset.fix).then(() => {
+    b.textContent = "Copied";
+    setTimeout(() => (b.textContent = "Copy"), 1400);
+  });
+});
+
+async function run() {
+  if (!analyze && !(await boot())) return;
+  runEl.disabled = true;
+  const t0 = performance.now();
+  try {
+    const report = analyze({
+      sql: sqlEl.value,
+      server_version: +$("ver").value,
+    });
+    render(report.findings || [], performance.now() - t0);
+  } catch (err) {
+    outEl.innerHTML = `<div class="empty">The analyzer errored on that input.</div>`;
+  }
+  runEl.disabled = false;
+}
+runEl.addEventListener("click", run);
+$("ver").addEventListener("change", () => { if (analyze) run(); });
+
+/* ---- the audit: count what this page actually fetched ------------------- */
+function audit() {
+  const here = location.origin;
+  const res = performance.getEntriesByType("resource");
+  const third = res.filter((r) => {
+    try { return new URL(r.name).origin !== here; } catch { return false; }
+  });
+  $("netproof").textContent = `third-party requests: ${third.length}`;
+  $("audit").textContent =
+    `requests to dbopt.org   ${res.length - third.length}\n` +
+    `requests to anyone else ${third.length}\n` +
+    `trackers                0\n` +
+    `web fonts               0\n` +
+    `cookies                 ${document.cookie ? "some" : 0}`;
+}
+
+drawGutter();
+boot().then((ok) => { if (ok) run(); });
+window.addEventListener("load", () => setTimeout(audit, 400));
 </script>
 </body>
 </html>

@@ -22,7 +22,6 @@
   &nbsp;·&nbsp; <a href="docs/USAGE.md">Usage guide</a>
   &nbsp;·&nbsp; <a href="docs/WHO-IS-DBOPT-FOR.md">Who it's for</a>
   &nbsp;·&nbsp; <a href="docs/ACCESS.md">Access</a>
-  &nbsp;·&nbsp; <a href="docs/ROADMAP-TO-COMPLETE.md">Roadmap</a>
 </p>
 
 ---
@@ -120,7 +119,7 @@ is not included in the prebuilt downloads.)*
 
 ## Quality bar — proven, not promised
 
-- **145 eval scenarios** (74 positive / 71 negative) · precision = recall = **F1 = 1.000** on the scenario
+- **147 eval scenarios** · precision = recall = **F1 = 1.000** on the scenario
   set (target ≥ 0.95). The harness is **self-graded** — the scenarios are hand-authored, so this proves
   "no regression on the cases we wrote," not a measured real-world false-positive rate. A held-out,
   third-party corpus is on the roadmap.

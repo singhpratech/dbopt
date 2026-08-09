@@ -85,5 +85,6 @@ positive and a negative scenario.
 - Keep new code in the style of the surrounding file (the analyzer is
   deliberately dependency-light and token-level).
 - Commits in this repo use a PII-free signature (`dbopt <dbopt@localhost>`).
-- See `docs/ROADMAP.md` for the multi-engine direction before adding
-  engine-specific work.
+- Every rule is tagged `SqlServer` today. The `Engine` seam in `analyzer-core`
+  (`Rule { run, engines }`) is what keeps future engine work from destabilizing
+  the SQL Server core — use it rather than branching inside a rule.
