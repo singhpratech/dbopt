@@ -9,12 +9,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
-  <img src="https://img.shields.io/badge/engines-SQL%20Server%20%C2%B7%20Postgres%20next-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server today, Postgres and MySQL next" />
-  <img src="https://img.shields.io/badge/rules-102-d4ff4e?style=flat-square&labelColor=0a0d12" alt="102 rules" />
-  <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
-  <img src="https://img.shields.io/badge/local--first-by%20default-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
-  <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20React-7e879b?style=flat-square&labelColor=0a0d12" alt="Rust + React" />
+  <a href="https://github.com/singhpratech/dbopt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/ci.yml?branch=main&style=flat-square&label=ci&labelColor=0a0d12&color=3ad29f" alt="CI" /></a>
+  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&label=crates.io&labelColor=0a0d12&color=d4ff4e" alt="crates.io" /></a>
+  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&label=npm&labelColor=0a0d12&color=d4ff4e" alt="npm" /></a>
+  <a href="https://github.com/singhpratech/dbopt/releases/latest"><img src="https://img.shields.io/github/v/release/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&color=3c72ff" alt="latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&color=7e879b" alt="Apache-2.0" /></a>
 </p>
 
 <p align="center">
