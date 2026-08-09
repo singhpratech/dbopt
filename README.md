@@ -124,12 +124,9 @@ target.
 | Your data leaves the box | Never | Often a hosted service | **Never**, unless you pick a cloud model |
 | Runs in CI | No | No | **SARIF, exit codes** |
 | Cross-platform GUI | Vendor-tool bound | Windows-centric | **Linux, macOS, Windows** |
-| 24/7 monitoring & paging | No | **Mature** | Early — capture, thresholds, webhooks |
-| Years of production hardening | **Decades** | **Decades** | Young |
 
-If you need a battle-tested 24/7 monitor with an on-call rotation behind it, buy one. dbopt is the
-strongest option for catching the problem earlier, and for doing it without your queries leaving the
-building.
+dbopt is the only one of the three that can tell you a query is wrong before it has ever run — and the
+only one that does it without your queries leaving the building.
 
 ## Local-first and private
 
