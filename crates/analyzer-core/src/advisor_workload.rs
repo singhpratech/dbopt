@@ -1,6 +1,6 @@
 //! Write-cost estimation + workload grounding for the CONNECTED index advisor.
 //!
-//! This module is the layer that lets our advisor BEAT a naive missing-index
+//! This module is the layer that separates our advisor from a naive missing-index
 //! reporter: instead of blindly echoing every
 //! suggestion SQL Server's DMV emits, we
 //!
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn wide_index_is_down_ranked_vs_narrow_at_equal_benefit() {
         // Same raw DMV benefit; the narrow candidate must out-rank the wide one
-        // purely because it taxes writes less. This is the core "beat the naive
+        // purely because it taxes writes less. This is the core "better than naive
         // reporter" behaviour.
         let narrow = mi(&["CustomerId"], &[], &[]);
         let wide = mi(
