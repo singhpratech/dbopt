@@ -21,7 +21,7 @@
 :root{
   --void:#06080c; --panel:#0b0f16; --elev:#111722; --sunk:#080b11;
   --line:#1b2231; --line-2:#28314a;
-  --ink:#dbe1ec; --ink-strong:#f4f6fa; --ink-soft:#8590a6; --ink-faint:#5b6478;
+  --ink:#dbe1ec; --ink-strong:#f4f6fa; --ink-soft:#8590a6; --ink-faint:#757f96;
   --signal:#d4ff4e; --signal-ink:#d4ff4e; --signal-dim:rgba(212,255,78,.14);
   --crit:#ff5c4d; --warn:#ffb020; --info:#5b8cff; --ok:#3ad29f;
   --shadow:0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.9);
@@ -34,7 +34,7 @@
 :root[data-theme="light"]{
   --void:#f6f7f9; --panel:#fff; --elev:#eef0f4; --sunk:#f0f2f5;
   --line:#dee2e9; --line-2:#c6ccd8;
-  --ink:#1d2331; --ink-strong:#080b12; --ink-soft:#59617a; --ink-faint:#818aa0;
+  --ink:#1d2331; --ink-strong:#080b12; --ink-soft:#59617a; --ink-faint:#5f6880;
   --signal-ink:#42610a; --signal-dim:rgba(122,168,0,.16);
   --crit:#c8342a; --warn:#9a6200; --info:#2b56c9; --ok:#127a56;
   --shadow:0 1px 0 rgba(255,255,255,.7), 0 14px 34px -26px rgba(10,20,40,.5);
@@ -135,7 +135,7 @@ h1 em{font-style:normal;color:var(--signal-ink)}
 #sql{
   flex:1;min-width:0;background:none;border:0;resize:vertical;color:var(--ink);
   font:400 13.5px/1.7 var(--mono);padding:16px 16px 16px 12px;min-height:158px;
-  tab-size:2;
+  tab-size:2;white-space:pre;overflow-x:auto;overflow-wrap:normal;
 }
 #sql:focus{outline:none}
 #sql::placeholder{color:var(--ink-faint)}
@@ -675,11 +675,29 @@ outEl.addEventListener("click", (e) => {
   navigator.clipboard.writeText(b.dataset.fix).then(() => {
     b.textContent = "Copied";
     setTimeout(() => (b.textContent = "Copy"), 1400);
+  }).catch(() => {
+    // Denied permission or an insecure context — select the text instead of
+    // failing silently, so the keyboard shortcut still works.
+    const pre = b.closest(".fix").querySelector("pre");
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    b.textContent = "Selected — press copy";
+    setTimeout(() => (b.textContent = "Copy"), 2600);
   });
 });
 
 async function run() {
   if (!analyze && !(await boot())) return;
+  if (!sqlEl.value.trim()) {
+    outEl.innerHTML = `<div class="empty">Nothing to analyze yet — paste some T-SQL, or pick an example.</div>`;
+    $("c-time").textContent = "—";
+    marks = {};
+    drawGutter();
+    return;
+  }
   runEl.disabled = true;
   const t0 = performance.now();
   try {
