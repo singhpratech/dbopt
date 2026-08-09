@@ -1,9 +1,9 @@
 # dbopt roadmap
 
-dbopt is a local-first database performance optimizer focused on being the deepest
-SQL Server static optimizer. SQL Server is the only supported engine today — 100% of
-the rules are SQL-Server-specific. Other engines (Postgres, MySQL) are exploratory
-directions, not committed releases or dates.
+dbopt is a local-first database performance optimizer built as one product for many
+databases. SQL Server (2014 → 2025) is live today with all 102 rules; PostgreSQL and
+MySQL are next. The engine seam is already wired end to end, so each database plugs in
+behind the same API, UI and report without disturbing the ones already shipping.
 
 ## v0.1 — SQL Server (shipped)
 
@@ -18,23 +18,22 @@ directions, not committed releases or dates.
 - Quality: 152 eval scenarios, self-graded F1 = 1.000 (covering 75 of the 102 rules; newer
   packs still being backfilled); Rust unit + HTTP integration tests; Playwright UI e2e.
 
-## The engine seam (landed — an exploratory foundation, not a committed multi-engine release)
+## The engine seam (landed)
 
 `analyzer-core` now has an `Engine` enum (`SqlServer | Postgres | MySql`, default
 `SqlServer`) that flows through `AnalyzeInput` → `analyze()` → `rules::run_all`.
 Each rule in the `REGISTRY` declares the engine(s) it applies to (`Rule { run, engines }`),
 and `run_all` skips rules that don't apply to the requested target. Today every rule
 is tagged `SqlServer`; analyzing with `engine: "postgres"` correctly yields zero
-findings until Postgres rules exist. This seam keeps the door open; it is not a
-promise that other engines will ship.
+findings until Postgres rules exist. That is the contract every future engine plugs
+into.
 
-## Exploratory (not committed) — multi-engine
+## Next — PostgreSQL and MySQL
 
-> Deliberately *later* and explicitly **exploratory** — no committed release or
-> date. SQL Server is the product and stays the priority; the items below are
-> directions we *could* take, not promises, and do not begin until the SQL Server
-> analyzer is where we want it. The engine seam already isolates this work so it
-> never destabilizes the core.
+> SQL Server stays the priority while its analyzer deepens, but the other engines are
+> planned work rather than speculation. No dates are promised. The engine seam already
+> isolates this work so adding a database never destabilizes one that is shipping, and
+> an engine whose rules have not landed returns an empty report rather than a guess.
 
 ### 1. `Engine` connection trait (the big one)
 Abstract the live-server work that is currently SQL-Server-specific (tiberius +

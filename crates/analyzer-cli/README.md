@@ -1,13 +1,13 @@
 <h1 align="center">dbopt</h1>
 
 <p align="center">
-  <b>Find and fix slow SQL Server queries — offline, before they reach production.</b>
+  <b>Find and fix slow SQL — offline, before it reaches production.</b>
 </p>
 
 <p align="center">
   <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&color=d4ff4e&labelColor=0a0d12" alt="crates.io" /></a>
   <img src="https://img.shields.io/badge/rules-102-d4ff4e?style=flat-square&labelColor=0a0d12" alt="102 rules" />
-  <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
+  <img src="https://img.shields.io/badge/engines-SQL%20Server%20%C2%B7%20Postgres%20next-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server today, Postgres and MySQL next" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-3ad29f?style=flat-square&labelColor=0a0d12" alt="Apache-2.0" />
 </p>
 
@@ -84,6 +84,12 @@ engine-level reasoning behind it.
 hand-authored, so that number proves *no regression on the cases we wrote* — not a
 measured real-world false-positive rate. 75 of the 102 rules currently have a
 scenario; the newer packs are being backfilled.
+
+## Which databases
+
+**SQL Server (2014 → 2025) is live**, with all 102 rules. The analyzer is engine-agnostic by
+construction — every rule declares which database it applies to — and **PostgreSQL and MySQL
+are next.** Until their rules land, asking for them returns an empty report rather than a guess.
 
 ## More than the CLI
 

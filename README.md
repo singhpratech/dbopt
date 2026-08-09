@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-free%20%26%20open-d4ff4e?style=flat-square&labelColor=0a0d12" alt="free & open" />
-  <img src="https://img.shields.io/badge/SQL%20Server-2019%20%E2%86%92%202025-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server 2019 to 2025" />
+  <img src="https://img.shields.io/badge/engines-SQL%20Server%20%C2%B7%20Postgres%20next-3c72ff?style=flat-square&labelColor=0a0d12" alt="SQL Server today, Postgres and MySQL next" />
   <img src="https://img.shields.io/badge/rules-102-d4ff4e?style=flat-square&labelColor=0a0d12" alt="102 rules" />
   <img src="https://img.shields.io/badge/eval%20F1-1.000-3ad29f?style=flat-square&labelColor=0a0d12" alt="F1 1.000" />
   <img src="https://img.shields.io/badge/local--first-by%20default-3ad29f?style=flat-square&labelColor=0a0d12" alt="local-first" />
@@ -33,11 +33,10 @@ fix it, with the reasoning cited**. It works statically and from the *estimated*
 execution, no locks, no load on production**. Nothing leaves your machine unless you explicitly choose a
 cloud model.
 
-> **The deepest SQL Server static optimizer.** **SQL Server is the only supported engine today** (2019 → 2025) —
-> 100% of the rules are SQL-Server-specific. The static analyzer and index advisor are ship-grade; on-demand
-> capture (sentinel) and the health score are an early-warning telemetry layer you read yourself — not a
-> 24/7 production monitor with alerting. PostgreSQL and MySQL are **exploratory directions, not committed
-> releases** — the engine seam exists, but no other engine ships until the SQL Server core is where we want it.
+> **One tool, every database.** dbopt is built engine-agnostic from the core out: every rule declares which
+> database it applies to, so engines are added without destabilizing each other. **SQL Server (2014 → 2025)
+> is live today** with all 102 rules; **PostgreSQL and MySQL are next.** Ask for an engine whose rules
+> haven't landed and you get an empty report — the analyzer would rather say nothing than guess.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
 > monetizing your pain.

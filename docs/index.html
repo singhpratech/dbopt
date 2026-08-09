@@ -4,9 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>dbopt — find &amp; fix slow SQL before production</title>
-<meta name="description" content="dbopt is a free, local-first SQL Server performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Paste a query on this page and the analyzer runs in your browser; the SQL never leaves the tab." />
+<meta name="description" content="dbopt is a free, local-first database performance optimizer. It reads your T-SQL, your execution plans and your live DMVs, then tells you exactly what will hurt — and how to fix it. Paste a query on this page and the analyzer runs in your browser; the SQL never leaves the tab." />
 <meta property="og:title" content="dbopt — find & fix slow SQL before production" />
-<meta property="og:description" content="Free, local-first SQL Server performance optimizer. Static + plan + live analysis, prescriptive cited fixes, a single private binary. Try the analyzer in your browser." />
+<meta property="og:description" content="Free, local-first database performance optimizer. Static + plan + live analysis, prescriptive cited fixes, a single private binary. Try the analyzer in your browser." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://dbopt.org" />
 <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
@@ -305,7 +305,7 @@ footer{border-top:1px solid var(--line);padding:44px 0;margin-top:40px}
 
 <header id="top">
   <div class="wrap">
-    <div class="eyebrow h-eyebrow"><b>local-first</b> · sql server 2019 → 2025 · free &amp; open</div>
+    <div class="eyebrow h-eyebrow"><b>local-first</b> · sql server today · postgres &amp; mysql next · free &amp; open</div>
     <h1>Find and fix slow SQL <em>before</em> it reaches production.</h1>
     <p class="deck">
       dbopt reads your T-SQL, your execution plans and your live server metrics, then tells you
@@ -471,18 +471,19 @@ ORDER BY o.Total DESC;</textarea>
 <section id="engines">
   <div class="wrap">
     <div class="s-head">
-      <div class="eyebrow">Scope</div>
-      <h2>One engine, done deeply.</h2>
-      <p class="s-sub">SQL Server is the product. An engine seam exists in the code, so other engines are a
-        direction we could take — not a promise, and not a date.</p>
+      <div class="eyebrow">Engines</div>
+      <h2>One tool, every database.</h2>
+      <p class="s-sub">Engine-agnostic from the core out: every rule declares which database it applies to, so
+        a new engine plugs in behind the same API, UI and report without disturbing the ones already
+        shipping. Ask for an engine whose rules haven't landed and you get an empty report, never a guess.</p>
     </div>
     <div class="engines">
       <div class="engine on"><span class="nm">SQL Server</span>
-        <span>2019 → 2025 · 100% of the rules</span><span class="st">Supported</span></div>
+        <span>2014 → 2025 · all 102 rules</span><span class="st">Live</span></div>
       <div class="engine"><span class="nm">PostgreSQL</span>
-        <span>seam only — no rules yet</span><span class="st">Exploratory</span></div>
+        <span>engine seam wired · rules coming</span><span class="st">Next</span></div>
       <div class="engine"><span class="nm">MySQL</span>
-        <span>seam only — no rules yet</span><span class="st">Exploratory</span></div>
+        <span>engine seam wired · rules coming</span><span class="st">Next</span></div>
     </div>
   </div>
 </section>

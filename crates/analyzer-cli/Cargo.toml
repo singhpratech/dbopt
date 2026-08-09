@@ -3,10 +3,10 @@ name = "dbopt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Find and fix slow SQL Server queries offline. Lints T-SQL and execution plans with 102 rules, no database connection required."
+description = "Find and fix slow SQL offline. A local-first database performance analyzer that lints queries and execution plans with 102 rules — no database connection required. SQL Server today."
 repository.workspace = true
 readme = "README.md"
-keywords = ["sql", "sqlserver", "tsql", "linter", "sarif"]
+keywords = ["sql", "database", "performance", "linter", "sarif"]
 categories = ["command-line-utilities", "database", "development-tools"]
 
 [[bin]]

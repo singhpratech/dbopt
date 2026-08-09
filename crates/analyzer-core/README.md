@@ -1,7 +1,7 @@
 <h1 align="center">dbopt-core</h1>
 
 <p align="center">
-  <b>The SQL Server analyzer engine behind <a href="https://dbopt.org">dbopt</a> — as a library.</b>
+  <b>The database performance analyzer engine behind <a href="https://dbopt.org">dbopt</a> — as a library.</b>
 </p>
 
 <p align="center">
@@ -65,6 +65,9 @@ non-SARGable — the optimizer cannot seek the index and must scan.
   is anything they cannot read with confidence, rather than guessing.
 - **Every rule is version-gated and carries a fix.** A finding without a remedy is a
   complaint, not advice.
+- **Engine-agnostic from the core out.** Rules declare the databases they apply to and
+  `engine` picks the target. SQL Server is live with all 102 rules; PostgreSQL and MySQL
+  are next, and an engine without rules yields an empty report rather than a guess.
 
 ## Extending it
 

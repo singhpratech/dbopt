@@ -3,10 +3,10 @@ name = "dbopt-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The dbopt SQL Server analyzer engine: token-level T-SQL rules, execution-plan parsing and DMV-driven index advice."
+description = "The dbopt database performance analyzer engine: token-level query rules, execution-plan parsing and metrics-driven index advice. Engine-agnostic core, SQL Server rules today."
 repository.workspace = true
 readme = "README.md"
-keywords = ["sql", "sqlserver", "tsql", "performance", "linter"]
+keywords = ["sql", "database", "performance", "linter", "sqlserver"]
 categories = ["database", "development-tools"]
 
 [lib]
