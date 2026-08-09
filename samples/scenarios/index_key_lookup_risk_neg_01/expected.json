@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["index.key_lookup_risk", "index.missing_index_from_predicate"],
+  "server_version": 2025,
+  "category": "index"
+}

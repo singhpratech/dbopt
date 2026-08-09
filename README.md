@@ -120,11 +120,11 @@ is not included in the prebuilt downloads.)*
 
 ## Quality bar — proven, not promised
 
-- **147 eval scenarios** · precision = recall = **F1 = 1.000** on the scenario
+- **152 eval scenarios** · precision = recall = **F1 = 1.000** on the scenario
   set (target ≥ 0.95). The harness is **self-graded** — the scenarios are hand-authored, so this proves
   "no regression on the cases we wrote," not a measured real-world false-positive rate. A held-out,
   third-party corpus is on the roadmap.
-- **73 distinct rules** are currently covered by a scenario; the newer rule packs are still being backfilled.
+- **75 distinct rules** are currently covered by a scenario; the newer rule packs are still being backfilled.
   Each covered rule has both a positive case (proves it fires) and a negative case (proves it stays silent).
 - Rust unit + HTTP integration tests and a Playwright UI suite.
 

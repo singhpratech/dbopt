@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -453,14 +453,14 @@ ORDER BY o.Total DESC;</textarea>
     </div>
     <div class="stats">
       <div class="stat"><b>102</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>147</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>152</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
     <div class="caveat">
       <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
       self-graded: it proves no regression on the cases we wrote, not a measured real-world
-      false-positive rate. <b>73 of the 102 rules</b> currently have a scenario; the newer rule packs
+      false-positive rate. <b>75 of the 102 rules</b> currently have a scenario; the newer rule packs
       are still being backfilled, and a held-out third-party corpus is on the roadmap. Reproduce it
       yourself with <code>cargo run -p eval -- --html</code>.
     </div>
@@ -540,7 +540,7 @@ dbopt lint ./db --format sarif   <span style="color:var(--ink-faint)"># offline,
 const $ = (id) => document.getElementById(id);
 const sqlEl = $("sql"), gutEl = $("gutter"), outEl = $("out"), runEl = $("run");
 
-/* ---- theme: dark is the brand; the toggle is remembered ----------------- */
+/* ---- theme: light by default, dark a click away; the choice is remembered -- */
 const savedTheme = localStorage.getItem("dbopt-theme");
 if (savedTheme) document.documentElement.dataset.theme = savedTheme;
 $("theme").addEventListener("click", () => {

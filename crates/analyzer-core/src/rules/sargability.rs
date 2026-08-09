@@ -185,9 +185,22 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
     let tokens = ctx.tokens;
     // very rough: any "dbo.Name(" inside a WHERE/ON clause
     let mut in_pred = false;
+    // `ON` opens a join predicate in DML, but in DDL it introduces a target:
+    // `CREATE INDEX IX ON dbo.Orders ([Status])` puts `dbo.Orders (` right after
+    // `ON`, which is byte-for-byte the `Word DOT Word LPAREN` shape we treat as a
+    // function call — so every CREATE/ALTER INDEX used to report a scalar UDF that
+    // isn't there. Track the statement verb and never open a predicate on DDL `ON`.
+    let mut stmt_is_ddl = false;
+    let mut at_stmt_start = true;
     for (i, t) in tokens.iter().enumerate() {
-        if is_word(t, "WHERE") || is_word(t, "ON") { in_pred = true; }
-        else if is_word(t, "GROUP") || is_word(t, "ORDER") || t.text == ";" { in_pred = false; }
+        if t.kind == TokKind::Comment { continue; }
+        if at_stmt_start && t.kind == TokKind::Word {
+            stmt_is_ddl = is_word(t, "CREATE") || is_word(t, "ALTER") || is_word(t, "DROP");
+            at_stmt_start = false;
+        }
+        if is_word(t, "WHERE") || (is_word(t, "ON") && !stmt_is_ddl) { in_pred = true; }
+        else if is_word(t, "GROUP") || is_word(t, "ORDER") { in_pred = false; }
+        else if t.text == ";" { in_pred = false; at_stmt_start = true; stmt_is_ddl = false; }
         if !in_pred { continue; }
         if t.kind != TokKind::Word { continue; }
         // pattern: Word DOT Word LPAREN

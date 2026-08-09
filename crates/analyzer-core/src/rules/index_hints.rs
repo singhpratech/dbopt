@@ -633,6 +633,119 @@ fn ident_frag(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
 }
 
+/// An index the batch itself declares: `CREATE [UNIQUE] [NON]CLUSTERED INDEX
+/// <name> ON <table> (k1, k2 …) [INCLUDE (c1, c2 …)]`.
+///
+/// Two rules below need this. `missing_index_from_predicate` claimed "no
+/// matching index is declared in this batch" while never looking, and
+/// `key_lookup_risk` re-emitted the same DDL under the same generated name — so
+/// a batch could hand you two `CREATE NONCLUSTERED INDEX [IX_Orders_Status]`
+/// statements, the second of which fails. Reading the batch's own DDL makes the
+/// first claim true and gives the two rules a real seam: no index declared →
+/// recommend one (covering); index declared but not covering → warn about the
+/// lookup. They can no longer both speak about the same table.
+struct DeclaredIndex {
+    name: String,
+    table: String,
+    key_cols: Vec<String>,
+    include_cols: Vec<String>,
+}
+
+impl DeclaredIndex {
+    /// Does this index give a seek on `leading`? Only the leading key column can
+    /// be seeked without the caller supplying the earlier keys.
+    fn leads_with(&self, leading: &str) -> bool {
+        self.key_cols.first().is_some_and(|k| name_eq_ci(k, leading))
+    }
+
+    /// Are all of `cols` already retrievable from the index (key or INCLUDE)?
+    fn covers(&self, cols: &[String]) -> bool {
+        cols.iter().all(|c| {
+            self.key_cols.iter().any(|k| name_eq_ci(k, c))
+                || self.include_cols.iter().any(|i| name_eq_ci(i, c))
+        })
+    }
+}
+
+/// Collect a parenthesised, comma-separated column list starting at `open`
+/// (the index of the `(`). Returns the columns and the index just past `)`.
+/// Bails to `None` on anything that isn't a flat list of bare identifiers.
+fn column_list(tokens: &[Token<'_>], open: usize) -> Option<(Vec<String>, usize)> {
+    if tokens.get(open).map(|t| t.text) != Some("(") { return None; }
+    let mut cols = Vec::new();
+    let mut k = skip_comments(tokens, open + 1);
+    loop {
+        let t = tokens.get(k)?;
+        if t.kind != TokKind::Word { return None; }
+        cols.push(bare(t).to_string());
+        k = skip_comments(tokens, k + 1);
+        // optional ASC / DESC
+        if let Some(d) = tokens.get(k) {
+            if is_word(d, "ASC") || is_word(d, "DESC") { k = skip_comments(tokens, k + 1); }
+        }
+        match tokens.get(k).map(|t| t.text) {
+            Some(",") => k = skip_comments(tokens, k + 1),
+            Some(")") => return Some((cols, k + 1)),
+            _ => return None,
+        }
+    }
+}
+
+/// Every index the batch declares. Unparseable declarations are skipped, which
+/// is the safe direction: we then behave exactly as before (recommend an index).
+fn declared_indexes(tokens: &[Token<'_>]) -> Vec<DeclaredIndex> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if !is_word(t, "INDEX") { continue; }
+        // Must be a CREATE ... INDEX, not DROP INDEX / ALTER INDEX / a column named INDEX.
+        let mut back = i;
+        let mut is_create = false;
+        for _ in 0..4 {
+            if back == 0 { break; }
+            back -= 1;
+            let p = &tokens[back];
+            if p.kind == TokKind::Comment { continue; }
+            if is_word(p, "CREATE") { is_create = true; break; }
+            if is_word(p, "UNIQUE") || is_word(p, "CLUSTERED") || is_word(p, "NONCLUSTERED") { continue; }
+            break;
+        }
+        if !is_create { continue; }
+
+        // INDEX <name> ON <table_ref> (
+        let mut k = skip_comments(tokens, i + 1);
+        if tokens.get(k).map(|t| t.kind) != Some(TokKind::Word) { continue; }
+        let index_name = bare(&tokens[k]).to_string();
+        k = skip_comments(tokens, k + 1);
+        if !tokens.get(k).is_some_and(|t| is_word(t, "ON")) { continue; }
+        k = skip_comments(tokens, k + 1);
+
+        // table reference: Word [. Word]*
+        let mut table = String::new();
+        while let Some(tok) = tokens.get(k) {
+            if tok.kind == TokKind::Word { table.push_str(tok.text); }
+            else if tok.text == "." { table.push('.'); }
+            else { break; }
+            k = skip_comments(tokens, k + 1);
+        }
+        if table.is_empty() { continue; }
+
+        let Some((key_cols, after_key)) = column_list(tokens, k) else { continue };
+        let mut include_cols = Vec::new();
+        let j = skip_comments(tokens, after_key);
+        if tokens.get(j).is_some_and(|t| is_word(t, "INCLUDE")) {
+            let open = skip_comments(tokens, j + 1);
+            if let Some((cols, _)) = column_list(tokens, open) { include_cols = cols; }
+        }
+        out.push(DeclaredIndex {
+            name: index_name,
+            table: table_short_name(&table),
+            key_cols,
+            include_cols,
+        });
+    }
+    out
+}
+
 /// The bare table name (last dotted segment, brackets stripped) for naming.
 fn table_short_name(table_ref: &str) -> String {
     let last = table_ref.rsplit('.').next().unwrap_or(table_ref);
@@ -642,6 +755,18 @@ fn table_short_name(table_ref: &str) -> String {
 /// Build a `CREATE NONCLUSTERED INDEX` statement string. Key = eq cols then a
 /// single range col; INCLUDE = projected cols not already in the key.
 fn build_create_index(stmt: &SelectStmt, include_cols: &[String]) -> String {
+    build_create_index_as(stmt, include_cols, None)
+}
+
+/// `redefine` names an index the batch already declares that this DDL should
+/// replace. Emitting a second `CREATE INDEX` under a name already in use just
+/// fails, so we reuse the name and add `DROP_EXISTING = ON` — the supported way
+/// to redefine an index in place, keeping the copy-paste promise honest.
+fn build_create_index_as(
+    stmt: &SelectStmt,
+    include_cols: &[String],
+    redefine: Option<&str>,
+) -> String {
     let mut key: Vec<String> = stmt.eq_cols.iter().map(|c| c.name.clone()).collect();
     // SARGable ordering: at most one trailing range column is useful as a key.
     if let Some(first_range) = stmt.range_cols.first() {
@@ -661,11 +786,14 @@ fn build_create_index(stmt: &SelectStmt, include_cols: &[String]) -> String {
         .cloned()
         .collect();
 
-    let name = format!(
-        "IX_{}_{}",
-        table_short_name(&stmt.table_ref),
-        key.iter().map(|c| ident_frag(c)).collect::<Vec<_>>().join("_")
-    );
+    let name = match redefine {
+        Some(existing) => existing.to_string(),
+        None => format!(
+            "IX_{}_{}",
+            table_short_name(&stmt.table_ref),
+            key.iter().map(|c| ident_frag(c)).collect::<Vec<_>>().join("_")
+        ),
+    };
 
     let mut sql = format!(
         "CREATE NONCLUSTERED INDEX [{}]\n    ON {} ({})",
@@ -678,6 +806,9 @@ fn build_create_index(stmt: &SelectStmt, include_cols: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         sql.push_str(&format!("\n    INCLUDE ({})", incl_join));
+    }
+    if redefine.is_some() {
+        sql.push_str("\n    WITH (DROP_EXISTING = ON)");
     }
     sql.push(';');
     sql
@@ -692,9 +823,26 @@ fn build_create_index(stmt: &SelectStmt, include_cols: &[String]) -> String {
 /// range key) with an INCLUDE list covering the projection.
 pub fn missing_index_from_predicate(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
+    let declared = declared_indexes(ctx.tokens);
     for stmt in parse_single_table_selects(ctx.tokens) {
         // Need at least one seekable predicate column to recommend a key.
         if stmt.eq_cols.is_empty() && stmt.range_cols.is_empty() { continue; }
+        // The message asserts no matching index is declared in this batch, so
+        // check before saying it. A declared index leading with the same column
+        // already provides the seek; recommending a duplicate is noise.
+        let leading = stmt
+            .eq_cols
+            .first()
+            .or_else(|| stmt.range_cols.first())
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let table = table_short_name(&stmt.table_ref);
+        if declared
+            .iter()
+            .any(|d| name_eq_ci(&d.table, &table) && d.leads_with(&leading))
+        {
+            continue;
+        }
         // Confidence guard: at least one equality column, OR a single clean range
         // column. Pure multi-range with no equality is weaker; still emit but it
         // remains a valid (single trailing range) key.
@@ -849,12 +997,23 @@ pub fn order_by_forces_sort(ctx: &RuleCtx) -> Vec<Finding> {
 /// list of meaningful width.
 pub fn key_lookup_risk(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
+    let declared = declared_indexes(ctx.tokens);
     for stmt in parse_single_table_selects(ctx.tokens) {
         // Require a narrow predicate: at least one equality column, no range
         // (range widens the seek and changes the calculus).
         if stmt.eq_cols.is_empty() || !stmt.range_cols.is_empty() { continue; }
         // Require a genuine, understood projection of several columns.
         if stmt.select_star || stmt.select_cols.is_empty() { continue; }
+        // A key lookup presupposes a seek — which presupposes an index. When the
+        // batch declares none, `missing_index_from_predicate` already emits the
+        // covering DDL, and speaking here would duplicate it under the same
+        // generated name. Only fire when the seek exists and fails to cover.
+        let table = table_short_name(&stmt.table_ref);
+        let seek = declared
+            .iter()
+            .find(|d| name_eq_ci(&d.table, &table) && d.leads_with(&stmt.eq_cols[0].name));
+        let Some(seek) = seek else { continue };
+        if seek.covers(&stmt.select_cols) { continue; }
         // Count projected columns that are NOT already the predicate keys —
         // those are exactly the columns a key lookup would have to fetch.
         let lookup_cols: Vec<String> = stmt
@@ -868,18 +1027,18 @@ pub fn key_lookup_risk(ctx: &RuleCtx) -> Vec<Finding> {
         if lookup_cols.len() < 3 { continue; }
 
         let anchor = stmt.eq_cols[0].tok;
-        let ddl = build_create_index(&stmt, &stmt.select_cols);
+        let ddl = build_create_index_as(&stmt, &stmt.select_cols, Some(&seek.name));
 
         out.push(finding(
             "index.key_lookup_risk",
             Severity::Info,
             format!(
-                "SELECT on {} returns {} columns behind a narrow equality filter. If the seek index doesn't cover these columns, every matching row pays a key lookup back to the base table.",
-                stmt.table_ref, stmt.select_cols.len()
+                "SELECT on {} returns {} columns behind a narrow equality filter, but [{}] keys {} without covering them. Every matching row pays a key lookup back to the base table.",
+                stmt.table_ref, stmt.select_cols.len(), seek.name, stmt.eq_cols[0].name
             ),
             Some(make_loc(&ctx.tokens[anchor])),
             Some(format!(
-                "Make the index cover the query: key on the filter column(s) and INCLUDE the fetched columns so no key lookup is needed:\n\n{}\nConfirm with the actual plan that a Key Lookup / RID Lookup is present before adding the index.",
+                "Redefine that index so it covers the query — same key, INCLUDE the fetched columns:\n\n{}\nConfirm with the actual plan that a Key Lookup / RID Lookup is present before rebuilding; a wider INCLUDE costs more on write.",
                 ddl
             )),
         ));
@@ -1089,14 +1248,33 @@ mod tests {
     // ---- rule (c): key_lookup_risk ------------------------------------------
 
     #[test]
-    fn key_lookup_fires_on_wide_projection_narrow_filter() {
-        let sql = "SELECT Id, FirstName, LastName, Email, Phone FROM dbo.Customer WHERE CustomerCode = @c;";
+    fn key_lookup_fires_when_declared_index_does_not_cover() {
+        // A key lookup presupposes a seek, which presupposes an index. With one
+        // declared but no INCLUDE, the four other columns each cost a lookup.
+        let sql = "CREATE NONCLUSTERED INDEX IX_Customer_Code ON dbo.Customer (CustomerCode);\n\
+                   SELECT Id, FirstName, LastName, Email, Phone FROM dbo.Customer WHERE CustomerCode = @c;";
         let f = fired(sql, "index.key_lookup_risk")
-            .expect("rule (c) should fire: many columns behind a narrow equality filter");
+            .expect("should fire: many columns behind a seek that doesn't cover them");
         assert!(f.location.is_some());
         let rec = f.recommendation.unwrap();
         assert!(rec.contains("INCLUDE"), "covering index must use INCLUDE: {rec}");
         assert!(rec.contains("[CustomerCode]"), "filter col must be the key: {rec}");
+        // It must redefine the index that already exists rather than emit a
+        // second CREATE under a name the batch has already used.
+        assert!(rec.contains("IX_Customer_Code"), "must reuse the declared name: {rec}");
+        assert!(rec.contains("DROP_EXISTING = ON"), "must be runnable as written: {rec}");
+    }
+
+    #[test]
+    fn key_lookup_defers_to_missing_index_when_nothing_is_declared() {
+        // With no index in the batch, missing_index_from_predicate already emits
+        // the covering DDL. Firing here too produced two CREATE statements under
+        // the same generated name, the second of which fails.
+        let sql = "SELECT Id, FirstName, LastName, Email, Phone FROM dbo.Customer WHERE CustomerCode = @c;";
+        assert!(fired(sql, "index.key_lookup_risk").is_none(),
+            "must defer to the missing-index rule when no index is declared");
+        assert!(fired(sql, "index.missing_index_from_predicate").is_some(),
+            "the missing-index rule must still cover this case");
     }
 
     #[test]

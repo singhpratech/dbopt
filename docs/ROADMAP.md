@@ -15,7 +15,7 @@ directions, not committed releases or dates.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
 - AI assistant (local Ollama + cloud providers, fanout) grounded on the static findings.
 - Web "observatory" UI; durable AI + analysis logs.
-- Quality: 147 eval scenarios, self-graded F1 = 1.000 (covering 73 of the 102 rules; newer
+- Quality: 152 eval scenarios, self-graded F1 = 1.000 (covering 75 of the 102 rules; newer
   packs still being backfilled); Rust unit + HTTP integration tests; Playwright UI e2e.
 
 ## The engine seam (landed — an exploratory foundation, not a committed multi-engine release)
