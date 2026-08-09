@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&color=d4ff4e&labelColor=0a0d12" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/rules-102-d4ff4e?style=flat-square&labelColor=0a0d12" alt="102 rules" />
-  <img src="https://img.shields.io/badge/runtime-Rust%20%E2%86%92%20WASM-3c72ff?style=flat-square&labelColor=0a0d12" alt="Rust to WebAssembly" />
-  <img src="https://img.shields.io/badge/network-none-3ad29f?style=flat-square&labelColor=0a0d12" alt="no network" />
+  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
+  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/dm/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=downloads&color=3ad29f&logo=npm" alt="downloads per month" /></a>
+  <a href="https://bundlephobia.com/package/dbopt"><img src="https://img.shields.io/bundlephobia/minzip/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=gzipped&color=3c72ff&logo=webassembly" alt="bundle size" /></a>
+  <a href="https://github.com/singhpratech/dbopt/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
 </p>
 
 A database performance analyzer that reads your queries and execution plans and tells

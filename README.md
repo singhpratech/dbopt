@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/singhpratech/dbopt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/ci.yml?branch=main&style=flat-square&label=ci&labelColor=0a0d12&color=3ad29f" alt="CI" /></a>
-  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&label=crates.io&labelColor=0a0d12&color=d4ff4e" alt="crates.io" /></a>
-  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&label=npm&labelColor=0a0d12&color=d4ff4e" alt="npm" /></a>
-  <a href="https://github.com/singhpratech/dbopt/releases/latest"><img src="https://img.shields.io/github/v/release/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&color=3c72ff" alt="latest release" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&color=7e879b" alt="Apache-2.0" /></a>
+  <a href="https://github.com/singhpratech/dbopt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/singhpratech/dbopt/ci.yml?branch=main&style=flat-square&labelColor=0a0d12&logoColor=white&label=ci&color=3ad29f&logo=githubactions" alt="CI" /></a>
+  <a href="https://crates.io/crates/dbopt"><img src="https://img.shields.io/crates/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=crates.io&color=d4ff4e&logo=rust" alt="crates.io" /></a>
+  <a href="https://www.npmjs.com/package/dbopt"><img src="https://img.shields.io/npm/v/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&label=npm&color=d4ff4e&logo=npm" alt="npm" /></a>
+  <a href="https://github.com/singhpratech/dbopt/releases/latest"><img src="https://img.shields.io/github/v/release/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=3c72ff&logo=github" alt="latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/singhpratech/dbopt?style=flat-square&labelColor=0a0d12&logoColor=white&color=7e879b&logo=apache" alt="Apache-2.0" /></a>
 </p>
 
 <p align="center">
