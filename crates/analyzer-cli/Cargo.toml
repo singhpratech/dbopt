@@ -1,15 +1,20 @@
 [package]
-name = "analyzer-cli"
+name = "dbopt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Find and fix slow SQL Server queries offline. Lints T-SQL and execution plans with 102 rules, no database connection required."
+repository.workspace = true
+readme = "README.md"
+keywords = ["sql", "sqlserver", "tsql", "linter", "sarif"]
+categories = ["command-line-utilities", "database", "development-tools"]
 
 [[bin]]
 name = "dbopt"
 path = "src/main.rs"
 
 [dependencies]
-analyzer-core = { path = "../analyzer-core" }
+analyzer-core = { package = "dbopt-core", path = "../analyzer-core", version = "0.3.6" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 walkdir = "2"

@@ -24,33 +24,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "analyzer-cli"
-version = "0.3.6"
-dependencies = [
- "analyzer-core",
- "anyhow",
- "serde_json",
- "walkdir",
-]
-
-[[package]]
-name = "analyzer-core"
-version = "0.3.6"
-dependencies = [
- "once_cell",
- "quick-xml",
- "regex",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "analyzer-wasm"
 version = "0.3.6"
 dependencies = [
- "analyzer-core",
  "console_error_panic_hook",
+ "dbopt-core",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -655,7 +633,6 @@ dependencies = [
 name = "backend"
 version = "0.3.6"
 dependencies = [
- "analyzer-core",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -664,6 +641,7 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "axum",
  "chrono",
+ "dbopt-core",
  "futures",
  "mime_guess",
  "open",
@@ -990,6 +968,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbopt"
+version = "0.3.6"
+dependencies = [
+ "anyhow",
+ "dbopt-core",
+ "serde_json",
+ "walkdir",
+]
+
+[[package]]
+name = "dbopt-core"
+version = "0.3.6"
+dependencies = [
+ "once_cell",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1126,10 +1126,10 @@ dependencies = [
 name = "eval"
 version = "0.3.6"
 dependencies = [
- "analyzer-core",
  "anyhow",
  "chrono",
  "colored",
+ "dbopt-core",
  "serde",
  "serde_json",
  "walkdir",

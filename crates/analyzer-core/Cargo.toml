@@ -1,10 +1,16 @@
 [package]
-name = "analyzer-core"
+name = "dbopt-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "The dbopt SQL Server analyzer engine: token-level T-SQL rules, execution-plan parsing and DMV-driven index advice."
+repository.workspace = true
+readme = "README.md"
+keywords = ["sql", "sqlserver", "tsql", "performance", "linter"]
+categories = ["database", "development-tools"]
 
 [lib]
+name = "analyzer_core"
 crate-type = ["rlib"]
 
 [dependencies]

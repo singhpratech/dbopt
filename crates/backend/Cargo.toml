@@ -11,7 +11,7 @@ name = "dbopt-backend"
 path = "src/main.rs"
 
 [dependencies]
-analyzer-core = { path = "../analyzer-core" }
+analyzer-core = { package = "dbopt-core", path = "../analyzer-core" }
 sentinel = { path = "../sentinel" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
