@@ -227,5 +227,5 @@ a small per-engine flavor tag (`dbopt · SQL Server` → `PostgreSQL` → `MySQL
 <p align="center">
   <sub>Local-first by design — your queries, schema, and metrics stay on your infrastructure.</sub><br>
   <sub><a href="https://dbopt.org">dbopt.org</a></sub><br>
-  <sub>© 2026 <a href="https://theaivibe.org">Prateek Singh</a></sub>
+  <sub>© 2026 <a href="https://theaivibe.org/about">Prateek Singh</a></sub>
 </p>
