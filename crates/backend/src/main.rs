@@ -21,10 +21,25 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "info,backend=info".into()))
         .init();
 
+    // Loopback origins only. dbopt binds to 127.0.0.1 and holds live database
+    // credentials, so `allow_origin(Any)` meant any page the user happened to
+    // visit could talk to it from their browser. The embedded UI is same-origin
+    // and unaffected; this exists for the Vite dev server on :5173.
     let cors = CorsLayer::new()
         .allow_methods(Any)
         .allow_headers(Any)
-        .allow_origin(Any);
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            |origin: &axum::http::HeaderValue, _req| {
+                origin
+                    .to_str()
+                    .map(|o| {
+                        o.starts_with("http://localhost:")
+                            || o.starts_with("http://127.0.0.1:")
+                            || o.starts_with("http://[::1]:")
+                    })
+                    .unwrap_or(false)
+            },
+        ));
 
     let app = Router::new()
         .nest("/api", routes::router())

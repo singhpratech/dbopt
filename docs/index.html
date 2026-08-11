@@ -270,8 +270,8 @@ footer{border-top:1px solid var(--line);padding:44px 0;background:var(--paper-2)
       <h1>Find and fix slow SQL <em>before</em> it reaches production.</h1>
       <p class="lede">
         dbopt reads your queries, your execution plans and your live server metrics, then tells you what is
-        going to hurt and how to fix it — with the reasoning cited. No execution, no locks, no load on
-        production.
+        going to hurt and how to fix it — with the reasoning cited. Reading a query or a saved plan
+        runs nothing at all; the live surfaces read only metadata and telemetry.
       </p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#install">Download — free &amp; open</a>
@@ -283,7 +283,7 @@ footer{border-top:1px solid var(--line);padding:44px 0;background:var(--paper-2)
       <aside class="markup" aria-label="An example file after analysis">
         <div class="mk-head">
           <span class="mk-file">orders.sql</span>
-          <span class="mk-meta">6 findings</span>
+          <span class="mk-meta">3 findings</span>
         </div>
         <div class="mk-body">
           <div class="mk-line"><span class="mk-n">4</span><span>SELECT *</span></div>
@@ -440,7 +440,7 @@ ORDER BY o.Total DESC;</textarea>
         <thead><tr><th>&nbsp;</th><th>Free DBA scripts</th><th>Commercial monitors</th><th>dbopt</th></tr></thead>
         <tbody>
           <tr><td>Cost</td><td class="yes">Free</td><td class="no">Per-instance licence</td><td class="yes">Free &amp; open</td></tr>
-          <tr><td>Works with no connection</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes — static + plan</td></tr>
+          <tr><td>Works with no connection</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes — SQL + saved plan file</td></tr>
           <tr><td>Catches it before it runs</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes</td></tr>
           <tr><td>Tells you what to type</td><td class="part">Some advice</td><td class="part">Metrics, rarely fixes</td><td class="yes">Rewrite + reason</td></tr>
           <tr><td>Your data leaves the box</td><td class="yes">Never</td><td class="part">Often a hosted service</td><td class="yes">Never, unless you pick a cloud model</td></tr>
@@ -496,7 +496,7 @@ ORDER BY o.Total DESC;</textarea>
       silent when they shouldn't.</p>
     <div class="stats">
       <div class="stat"><b>102</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>160</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>171</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>

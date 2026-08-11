@@ -66,7 +66,16 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
         Ok(s) => s,
         Err(e) => {
             let msg = format!("{e}");
-            if msg.contains("query_store_query") || msg.contains("Invalid object name") {
+            // Match on shape, not on one object name: any "this object/function
+            // does not exist here" error means Query Store is unavailable on
+            // this target, and turning that into a hard poll error every tick
+            // buries the log for a condition the operator cannot fix.
+            let unavailable = msg.contains("query_store_query")
+                || msg.contains("Invalid object name")
+                || msg.contains("is not a recognized built-in function name")
+                || msg.contains("Invalid column name")
+                || msg.contains("Could not find stored procedure");
+            if unavailable {
                 tracing::warn!(
                     target: "sentinel::poll::query_store",
                     "Query Store appears to be disabled on {}: {msg}",

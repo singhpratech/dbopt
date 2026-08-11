@@ -194,6 +194,20 @@ pub(crate) fn is_word(t: &Token, kw: &str) -> bool {
     matches!(t.kind, TokKind::Word) && word_eq_ci(t.text.trim_matches(|c| c == '[' || c == ']'), kw)
 }
 
+/// Like `is_word`, but for *keyword* positions only.
+///
+/// `is_word` deliberately trims delimiters so `[Orders]` matches `Orders` when
+/// we are looking for a name. That is exactly wrong when the answer decides how
+/// a statement is parsed: a column called `[Merge]` or `[Go]` is a name the
+/// author chose, never the keyword. Reading it as one let an identifier steer
+/// control flow and silence a critical rule for the rest of the batch.
+pub(crate) fn is_keyword(t: &Token, kw: &str) -> bool {
+    matches!(t.kind, TokKind::Word)
+        && !t.text.starts_with('[')
+        && !t.text.starts_with('"')
+        && word_eq_ci(t.text, kw)
+}
+
 pub(crate) fn finding(rule: &str, sev: Severity, msg: impl Into<String>, loc: Option<Location>, rec: impl Into<Option<String>>) -> Finding {
     Finding {
         rule: RuleId(rule.into()),

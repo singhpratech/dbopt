@@ -539,7 +539,7 @@ export async function qstoreSetCapture(info: ConnectionInfo, mode: "AUTO" | "ALL
   const r = await fetch(`${BASE}/qstore/capture`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...info, mode }),
+    body: JSON.stringify({ ...info, mode, confirmed: true }),
   });
   const json = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error((json as any).error ?? `set capture mode failed (${r.status})`);

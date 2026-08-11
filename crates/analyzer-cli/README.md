@@ -101,7 +101,7 @@ engine-level reasoning behind it.
 
 ## Quality
 
-160 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
+171 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
 hand-authored, so that number proves *no regression on the cases we wrote* — not a
 measured real-world false-positive rate. 63 of the 102 token rules have a scenario,
 plus 12 covering the plan-XML and DMV analyzers; the rest are being backfilled.

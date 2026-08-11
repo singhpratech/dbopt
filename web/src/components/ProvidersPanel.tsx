@@ -35,6 +35,11 @@ export function ProvidersPanel({
   setProviders: (p: Record<ProviderKey, ProviderConfig>) => void;
 }) {
   const [expanded, setExpanded] = useState<ProviderKey | null>(null);
+  // The launch-time update check was previously only switchable from inside the
+  // "an update is available" modal, so a user who was up to date had no way to
+  // turn it off — and by the time anyone saw that modal the request had already
+  // gone out. Settings is always reachable.
+  const [autoCheck, setAutoCheck] = useState<boolean>(() => loadLS<boolean>("auto_check_updates", true));
   const [statuses, setStatuses] = useState<Record<ProviderKey, ProviderRuntimeStatus | null>>(
     () => Object.fromEntries(ORDER.map((k) => [k, null])) as any,
   );
@@ -402,6 +407,26 @@ export function ProvidersPanel({
           </div>
         );
       })}
+
+      <div className="pd-card" style={{ marginTop: 28 }}>
+        <label className="pd-check">
+          <input
+            type="checkbox"
+            checked={autoCheck}
+            onChange={(e) => {
+              setAutoCheck(e.target.checked);
+              saveLS("auto_check_updates", e.target.checked);
+            }}
+          />
+          <span>Check for updates on launch</span>
+        </label>
+        <p className="pd-hint">
+          When on, dbopt asks GitHub once at startup whether a newer release exists. It is an
+          anonymous request for a version number — no account, no identifiers, nothing about your
+          databases. Turning it off means dbopt makes no network request of its own at all, and you
+          check for new versions yourself.
+        </p>
+      </div>
 
       <div className="form-actions" style={{ marginTop: 28 }}>
         <button className="btn danger" onClick={resetAll}>Reset all local settings</button>

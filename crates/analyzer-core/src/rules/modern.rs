@@ -1,4 +1,4 @@
-use super::{finding, is_word, make_loc, RuleCtx};
+use super::{finding, is_keyword, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -13,9 +13,23 @@ fn update_has_from_clause(tokens: &[Token<'_>], update_idx: usize) -> bool {
         else if t.text == ")" { depth -= 1; }
         else if depth == 0 && t.text == ";" { return false; }
         else if depth == 0 && is_word(t, "FROM") { return true; }
+        // Stop at the next statement. Without this the scan runs to end-of-file
+        // on a missing semicolon, so any later statement containing FROM made
+        // an unqualified `UPDATE Orders` look like `UPDATE <alias>`.
+        else if depth == 0 && j > update_idx + 1 && is_statement_head(t) { return false; }
         j += 1;
     }
     false
+}
+
+/// Keywords that can only open a new statement, used to stop forward scans when
+/// the author omitted the `;`.
+fn is_statement_head(t: &Token<'_>) -> bool {
+    ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP",
+     "TRUNCATE", "DECLARE", "EXEC", "EXECUTE", "GO", "WHILE", "IF", "BEGIN",
+     "COMMIT", "ROLLBACK", "GRANT", "REVOKE", "DENY", "USE"]
+        .iter()
+        .any(|kw| is_keyword(t, kw))
 }
 
 pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
@@ -24,15 +38,22 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     // Collect CTE names defined as `<name> AS (` (covers `WITH x AS (...)` and
     // `, y AS (...)`). These are not real tables and must not be flagged when
     // later referenced in FROM/JOIN. Case-insensitive.
-    let mut cte_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Scoped to the batch that defines them: a CTE dies at `GO`, so a `WITH
+    // Recent AS (...)` in one batch must not silence advice about a real table
+    // called Recent in the next one.
+    let mut cte_names: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
+    let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
+        if is_keyword(t, "GO") { batch += 1; continue; }
         if t.kind != TokKind::Word { continue; }
         let is_cte = tokens.get(i + 1).map(|n| is_word(n, "AS")).unwrap_or(false)
             && tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false);
-        if is_cte { cte_names.insert(t.text.to_ascii_lowercase()); }
+        if is_cte { cte_names.insert((batch, t.text.to_ascii_lowercase())); }
     }
     // Heuristic: after FROM / JOIN / UPDATE / INTO, expect schema.Object, not Object alone.
+    let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
+        if is_keyword(t, "GO") { batch += 1; continue; }
         let triggers = is_word(t, "FROM") || is_word(t, "JOIN") || is_word(t, "UPDATE") || is_word(t, "INTO");
         if !triggers { continue; }
 
@@ -60,12 +81,13 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
         if name.text == "(" { continue; }
         // Skip if next token is '.' (schema.table is fine)
         if tokens.get(i + 2).map(|n| n.text == ".").unwrap_or(false) { continue; }
-        // A following '(' makes this a function call — OPENJSON(@j),
-        // STRING_SPLIT(@s, ','), GENERATE_SERIES(1, 10) and every other rowset
-        // function. Built-ins have no schema to qualify.
-        if tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false) { continue; }
+        // NOTE: a following '(' is deliberately *not* treated as "this is a
+        // function call". `INSERT INTO Orders (OrderId, Total) VALUES ...` puts
+        // a column list there, and skipping on the paren silenced one of the
+        // most common statement shapes in T-SQL. The rowset built-ins that
+        // motivated that skip are named explicitly below instead.
         // Skip CTE references (defined via WITH … AS (…)) — they aren't tables.
-        if cte_names.contains(&name.text.to_ascii_lowercase()) { continue; }
+        if cte_names.contains(&(batch, name.text.to_ascii_lowercase())) { continue; }
         // Reserved words that land in the name slot but are never table names:
         // `MERGE ... WHEN MATCHED THEN UPDATE SET` puts SET here, and
         // `INSERT INTO t OUTPUT INSERTED.*` puts INSERTED here.

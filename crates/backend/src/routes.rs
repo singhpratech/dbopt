@@ -293,12 +293,28 @@ pub struct QStoreCaptureReq {
     pub conn: ConnectReq,
     /// AUTO | ALL | NONE — validated server-side against an allowlist.
     pub mode: String,
+    /// Must be `true`. The confirmation prompt lives in the UI, but a prompt is
+    /// a convention, not a boundary: this endpoint is reachable by anything
+    /// that can send a request to the loopback port. Requiring the flag on the
+    /// wire means the only DDL dbopt can issue cannot be triggered by accident
+    /// or by a page the user merely visited.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 /// POST /api/qstore/capture — set the connected DB's Query Store capture mode.
 /// This runs DDL; the UI must preview the statement and get explicit user
 /// confirmation first (Safe-Apply). Mode is allowlisted in `set_query_store_capture`.
 async fn qstore_capture(Json(req): Json<QStoreCaptureReq>) -> impl IntoResponse {
+    if !req.confirmed {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "this endpoint changes database settings and requires an explicit confirmation from the user"
+            })),
+        )
+            .into_response();
+    }
     match sqlserver::set_query_store_capture(&req.conn, &req.mode).await {
         Ok(msg) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "message": msg }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),

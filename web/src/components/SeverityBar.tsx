@@ -16,8 +16,26 @@ export function SeverityBar({
   loading?: boolean;
   error?: string | null;
 }) {
-  if (!data || data.length === 0) {
-    return <EmptyChart glyph="≡" title="No SQL to evaluate" hint="Paste T-SQL into the editor to see per-line severity distribution." action={action} loading={loading} error={error} />;
+  // An all-zero timeline is not data. Empty input still yields one bucket
+  // (line 1, no findings), which rendered as bare 0→1 axes and a legend over an
+  // empty grid — a chart that looks broken instead of a screen that tells you
+  // what to do next.
+  const hasFindings = !!data?.some((d) => d.critical + d.error + d.warning + d.info > 0);
+  if (!data || data.length === 0 || !hasFindings) {
+    return (
+      <EmptyChart
+        glyph="≡"
+        title={data && data.length > 0 ? "No findings to plot" : "No SQL to evaluate"}
+        hint={
+          data && data.length > 0
+            ? "This batch analyzed clean — there are no findings to distribute across lines."
+            : "Paste T-SQL into the editor to see per-line severity distribution."
+        }
+        action={action}
+        loading={loading}
+        error={error}
+      />
+    );
   }
   const c = chartPalette(theme);
   const lines = data.map((d) => `${d.line}`);

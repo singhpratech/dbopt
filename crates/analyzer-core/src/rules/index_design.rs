@@ -915,6 +915,47 @@ fn declares_a_variable(tokens: &[Token<'_>], type_idx: usize) -> bool {
     false
 }
 
+/// Is this type name the target of a `CAST(x AS nvarchar(max))` /
+/// `CONVERT(nvarchar(max), x)` conversion rather than a column declaration?
+///
+/// `ddl.varchar_max_overuse` is column-design advice ("this can never be an
+/// index key"). A conversion in a SELECT list declares nothing, so the advice
+/// has no referent — the reader is told to redesign a column that doesn't exist.
+fn is_conversion_target(tokens: &[Token<'_>], type_idx: usize) -> bool {
+    // CAST( expr AS nvarchar(max) ) — walk back over the expression to `CAST(`.
+    if let Some(prev) = type_idx.checked_sub(1).and_then(|k| tokens.get(k)) {
+        if is_word(prev, "AS") {
+            let mut depth = 0i32;
+            let mut k = type_idx - 1;
+            while k > 0 {
+                k -= 1;
+                let t = &tokens[k];
+                if t.text == ")" { depth += 1; }
+                else if t.text == "(" {
+                    if depth == 0 {
+                        return k
+                            .checked_sub(1)
+                            .and_then(|m| tokens.get(m))
+                            .map(|f| is_word(f, "CAST") || is_word(f, "TRY_CAST"))
+                            .unwrap_or(false);
+                    }
+                    depth -= 1;
+                }
+            }
+            return false;
+        }
+        // CONVERT( nvarchar(max), expr ) — the type is the first argument.
+        if prev.text == "(" {
+            return type_idx
+                .checked_sub(2)
+                .and_then(|k| tokens.get(k))
+                .map(|f| is_word(f, "CONVERT") || is_word(f, "TRY_CONVERT"))
+                .unwrap_or(false);
+        }
+    }
+    false
+}
+
 pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -936,6 +977,7 @@ pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
             // and column advice ("can't be index keys", "use NVARCHAR(400)")
             // is impossible to act on and wrong to follow.
             if declares_a_variable(tokens, i) { continue; }
+            if is_conversion_target(tokens, i) { continue; }
             count += 1;
             if count > 3 { break; }
             out.push(finding(

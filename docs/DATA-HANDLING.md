@@ -27,8 +27,18 @@ not your rows:
 - `sys.sql_modules` — the **source text of your stored procedures and views**
   (this is your code, not table data — disclosed for completeness)
 
-**We never run `SELECT` against your application tables. Your row data is never
-read.** (See ACCESS.md for the least-privilege grants this needs.)
+Two `DBCC` probes are also issued through `EXEC` during a health scan —
+`DBCC DBINFO() WITH TABLERESULTS` (when CHECKDB last ran) and `DBCC TRACESTATUS(-1)`
+(active trace flags) — each captured into a table variable. They report server
+state, not table contents.
+
+**The analyzer, the health scan, the DMV pull and the sentinel never run
+`SELECT` against your application tables.** There is exactly one path that does:
+pressing **ACTUAL PLAN** executes the T-SQL in your editor — that is what makes a
+plan "actual" — inside a transaction that always rolls back, and reads the rows
+it returns. Nothing is written and nothing is kept, but the query really runs on
+your server. **ESTIMATED PLAN** compiles without executing and never touches a
+row. (See ACCESS.md for the least-privilege grants this needs.)
 
 ## Where it's stored — all local
 
@@ -66,14 +76,15 @@ any dbopt server (there isn't one).
 web-llm).** The deterministic analyzer/health/scan never needs AI at all — AI only
 rephrases findings the engine already produced.
 
-### The update check (Help ▸ Check for updates)
+### The update check (topbar ▸ UPDATES)
 
 dbopt can tell you when a newer release exists. By default this fires **twice**:
-once automatically when the app launches, and whenever you click "Check for
-updates" in the Help panel. **The launch check is on by default and you can turn
-it off** — untick "Check automatically on launch" in the update dialog, or set
-`auto_check_updates` to false in local storage. Turning it off leaves the manual
-button working.
+once automatically when the app launches, and whenever you click **UPDATES** in
+the topbar. **The launch check is on by default and you can turn it off** — untick
+"Check for updates on launch" in Settings, which is reachable whether or not an
+update happens to be available. (Equivalently: set `dbopt.auto_check_updates` to
+`false` in local storage.) Turning it off leaves the manual button working and
+means dbopt makes no network request of its own at all.
 
 The request is an anonymous public `GET` from your **browser** to `api.github.com`
 (the dbopt releases endpoint). It carries no identifiers, no telemetry, and no

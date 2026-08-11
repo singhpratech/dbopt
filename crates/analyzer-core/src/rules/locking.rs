@@ -75,9 +75,14 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         if j >= tokens.len() || tokens[j].kind != TokKind::Word {
             continue;
         }
-        // Filter out non-DML usages (e.g. "FOR UPDATE", "UPDATE STATISTICS", "DELETE FROM <temp>"
-        // — we still flag temp-table DML with WHERE; just exclude `UPDATE STATISTICS`).
+        // Filter out non-DML usages (e.g. "FOR UPDATE", "UPDATE STATISTICS").
         if is_update && is_word(&tokens[j], "STATISTICS") {
+            continue;
+        }
+        // A #temp or @table variable is session-scoped and bounded by whatever
+        // just populated it. Lock escalation on one blocks nobody else, so
+        // batching advice there is advice you can never act on.
+        if tokens[j].text.starts_with('#') || tokens[j].text.starts_with('@') {
             continue;
         }
 
@@ -120,6 +125,7 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         let mut has_where = false;
         let mut has_top_paren = false;
         let mut wide_predicate = false;
+        let mut equality_predicate = false;
         let mut depth = 0i32;
         let mut p = j + 1;
         while p < tokens.len() {
@@ -141,6 +147,8 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
                         has_top_paren = true;
                     }
                 }
+            } else if has_where && depth == 0 && tk.kind == TokKind::Punct && tk.text == "=" {
+                equality_predicate = true;
             } else if has_where && depth == 0 && is_wide_predicate_token(tk) {
                 wide_predicate = true;
             }
@@ -151,7 +159,13 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         // rows. `WHERE OrderID = 42` is the single most common correct DML
         // statement in the language; telling its author to add TOP (n) is noise
         // that trains people to ignore the rule.
-        if has_where && !has_top_paren && wide_predicate {
+        // An equality anywhere in the predicate means the author is naming a
+        // specific row (or a specific value), so `WHERE OrderId = 42 AND Note
+        // IS NOT NULL` is not a bulk statement just because it also contains an
+        // `IS`. Requiring a wide predicate *and no equality* is deliberately
+        // conservative: this rule is a prompt, and a prompt that fires on
+        // single-row updates is one people learn to ignore.
+        if has_where && !has_top_paren && wide_predicate && !equality_predicate {
             out.push(finding(
                 "locking.dml_without_batching",
                 Severity::Info,

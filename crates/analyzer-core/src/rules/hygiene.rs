@@ -1,4 +1,4 @@
-use super::{finding, is_word, make_loc, next_nonws, RuleCtx};
+use super::{finding, is_keyword, is_word, make_loc, next_nonws, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -8,16 +8,37 @@ use crate::tokens::{TokKind, Token};
 /// is never evaluated, so there is no read amplification and no covering-index
 /// consequence. Flagging it is the classic linter false positive.
 fn is_exists_subquery(tokens: &[Token], i: usize) -> bool {
-    let Some(open) = i.checked_sub(1).and_then(|k| tokens.get(k)) else {
-        return false;
+    // Step back over comments. The token stream keeps them, so indexing raw
+    // `i-1`/`i-2` meant `EXISTS ( -- why` on one line and `SELECT *` on the
+    // next fell straight back into the false positive this guard exists to
+    // prevent.
+    let mut back = move |from: usize| -> Option<usize> {
+        let mut k = from;
+        while k > 0 {
+            k -= 1;
+            if tokens[k].kind != TokKind::Comment {
+                return Some(k);
+            }
+        }
+        None
     };
+    let Some(open_at) = back(i) else { return false };
+    let open = &tokens[open_at];
     if !(open.kind == TokKind::Punct && open.text == "(") {
         return false;
     }
-    i.checked_sub(2)
-        .and_then(|k| tokens.get(k))
-        .map(|kw| is_word(kw, "EXISTS"))
-        .unwrap_or(false)
+    // `EXISTS ((SELECT ...))` is still an EXISTS subquery; walk out through any
+    // number of redundant parentheses before demanding the keyword.
+    let mut at = open_at;
+    loop {
+        let Some(prev) = back(at) else { return false };
+        let t = &tokens[prev];
+        if t.kind == TokKind::Punct && t.text == "(" {
+            at = prev;
+            continue;
+        }
+        return is_word(t, "EXISTS");
+    }
 }
 
 pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
@@ -81,11 +102,35 @@ pub fn cursor_usage(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// The verb a `TOP` belongs to, looking past `DISTINCT`/`ALL` and comments.
+fn top_owner<'a>(tokens: &'a [Token<'a>], i: usize) -> Option<&'a Token<'a>> {
+    let mut k = i;
+    let mut steps = 0;
+    while k > 0 && steps < 4 {
+        k -= 1;
+        steps += 1;
+        let t = &tokens[k];
+        if t.kind == TokKind::Comment || is_word(t, "DISTINCT") || is_word(t, "ALL") {
+            continue;
+        }
+        return Some(t);
+    }
+    None
+}
+
 pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
         if !is_word(t, "TOP") { continue; }
+        // `DELETE TOP (5000) ... WHERE ...` in a loop is the batching pattern
+        // `locking.dml_without_batching` tells the reader to write, and T-SQL
+        // does not even allow ORDER BY on DELETE/UPDATE/INSERT. Warning here
+        // meant following our own advice produced a new warning.
+        if matches!(top_owner(tokens, i), Some(v) if is_word(v, "DELETE") || is_word(v, "UPDATE") || is_word(v, "INSERT"))
+        {
+            continue;
+        }
         // scan forward up to a statement terminator (;) or end and see if ORDER BY appears
         let mut j = i + 1;
         let mut has_order = false;
@@ -144,19 +189,57 @@ fn is_merge_action(tokens: &[Token], i: usize) -> bool {
     {
         return true;
     }
-    // Fall back to scanning this statement for a MERGE verb.
+    // Fall back to scanning *this statement only* for a MERGE verb. The scan
+    // has to stop at every statement boundary, not just `;`: a batch that ends
+    // in `GO`, or simply omits its semicolon, otherwise lets an earlier MERGE
+    // vouch for an unrelated UPDATE further down the file. Combined with
+    // `is_keyword`, this is what stops a column named `[Merge]` from silencing
+    // the only critical-severity rule we have.
     let mut k = i;
     while k > 0 {
         k -= 1;
         let t = &tokens[k];
-        if t.text == ";" {
+        if t.kind == TokKind::Comment {
+            continue;
+        }
+        if t.text == ";" || is_keyword(t, "GO") {
             return false;
         }
-        if is_word(t, "MERGE") {
+        if is_keyword(t, "MERGE") {
             return true;
+        }
+        // Any other statement head means this DML opens its own statement.
+        // UPDATE/DELETE/INSERT are excluded because they are the legal action
+        // half of a MERGE and appear inside one.
+        if starts_statement(t)
+            && !["UPDATE", "DELETE", "INSERT", "MERGE"]
+                .iter()
+                .any(|kw| is_word(t, kw))
+        {
+            return false;
         }
     }
     false
+}
+
+/// Does this JOIN's `ON` clause actually constrain the *target* of the DML?
+///
+/// Only an inner join does. A `LEFT JOIN ... ON` filters nothing on the left
+/// side, so `UPDATE t SET Flag = 1 FROM dbo.T t LEFT JOIN dbo.U u ON u.tid = t.Id`
+/// still rewrites every row of T — the exact statement this rule exists to
+/// catch. Treating any `ON` as a bound made the rule miss it entirely.
+fn join_bounds_target(tokens: &[Token], j: usize) -> bool {
+    for back in 1..=2usize {
+        let Some(k) = j.checked_sub(back) else { break };
+        let t = &tokens[k];
+        if is_keyword(t, "OUTER") {
+            continue;
+        }
+        return !["LEFT", "RIGHT", "FULL", "CROSS"]
+            .iter()
+            .any(|kw| is_keyword(t, kw));
+    }
+    true
 }
 
 pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
@@ -184,7 +267,7 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
         let mut j = i + 1;
         let mut depth = 0i32;
         let mut bounded = false;
-        let mut saw_from_or_join = false;
+        let mut inner_join_seen = false;
         while j < tokens.len() {
             let tk = &tokens[j];
             if tk.text == "(" {
@@ -196,9 +279,11 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
             } else if depth == 0 && is_word(tk, "WHERE") {
                 bounded = true;
                 break;
-            } else if depth == 0 && (is_word(tk, "FROM") || is_word(tk, "JOIN")) {
-                saw_from_or_join = true;
-            } else if depth == 0 && saw_from_or_join && is_word(tk, "ON") {
+            } else if depth == 0 && is_word(tk, "JOIN") {
+                if join_bounds_target(tokens, j) {
+                    inner_join_seen = true;
+                }
+            } else if depth == 0 && inner_join_seen && is_word(tk, "ON") {
                 // `UPDATE a SET ... FROM dbo.A a JOIN #Due d ON d.Id = a.Id` is
                 // bounded by the join predicate. This is the most common bulk
                 // update shape in production T-SQL; treating it as unbounded

@@ -70,8 +70,11 @@ Conventions:
   prove a newer-engine rule stays quiet on older targets.
 
 Verify: `cargo run -p eval` — your scenario must show `PASS`, and overall
-`F1` must stay ≥ 0.95 (we hold it at 1.000). Every rule must have **both** a
-positive and a negative scenario.
+`F1` must stay ≥ 0.95 (we hold it at 1.000). Every rule you **add or change**
+must have **both** a positive and a negative scenario. This is the requirement
+for new work, not a claim about the existing registry — 63 of the 102 rules have
+scenarios today and the rest are being backfilled, so don't read a passing eval
+as proof that a rule you didn't touch is covered.
 
 ## Tests
 

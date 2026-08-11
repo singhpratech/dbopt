@@ -386,12 +386,40 @@ pub async fn set_query_store_capture(req: &ConnectReq, mode: &str) -> anyhow::Re
         return Err(anyhow::anyhow!("select a database first — Query Store capture mode is per-database"));
     }
     let mut client = open(req).await?;
-    // Query Store must be ON before its capture mode can be set; ON when already
-    // on is a no-op. CURRENT = the connected database (no name interpolation).
-    let _ = client.simple_query("ALTER DATABASE CURRENT SET QUERY_STORE = ON").await;
+    // Query Store must be ON before its capture mode can be set. This used to
+    // fire unconditionally and was NOT part of what the UI previewed, so
+    // clicking AUTO on a database with Query Store off silently turned it on —
+    // a second, undisclosed DDL statement. Now it runs only when it is actually
+    // needed, and the UI previews it whenever it will run.
+    let mut already_on = false;
+    if let Ok(stream) = client
+        .simple_query("SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options")
+        .await
+    {
+        if let Ok(rows) = stream.into_first_result().await {
+            already_on = rows
+                .into_iter()
+                .next()
+                .and_then(|r| r.get::<i32, _>(0))
+                .map(|state| state != 0)
+                .unwrap_or(false);
+        }
+    }
+
+    let mut ran: Vec<String> = Vec::new();
+    if !already_on {
+        // CURRENT = the connected database (no name interpolation).
+        const ENABLE: &str = "ALTER DATABASE CURRENT SET QUERY_STORE = ON";
+        client.simple_query(ENABLE).await?;
+        ran.push(ENABLE.to_string());
+    }
     let stmt = format!("ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = {mode})");
     client.simple_query(stmt.as_str()).await?;
-    Ok(format!("Query Store capture mode set to {mode}"))
+    ran.push(stmt);
+    Ok(format!(
+        "Query Store capture mode set to {mode} ({} statement(s) run)",
+        ran.len()
+    ))
 }
 
 /// One Query Store query aggregated across its plans/intervals, ranked by
@@ -1240,10 +1268,14 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
     let mut m = LiveMetrics::default();
 
     // --- server clock (ms since epoch) so the UI can compute rate = Δcounter/Δt
-    if let Ok(s) = client
-        .simple_query("SELECT DATEDIFF_BIG(MILLISECOND, '19700101', SYSUTCDATETIME())")
-        .await
-    {
+    // Deliberately NOT DATEDIFF_BIG: that is 2016+, and on 2014 this query
+    // failed silently, leaving server_time_ms at 0. The UI computes every rate
+    // as delta-counter over delta-time, so a frozen clock rendered permanent
+    // zeros for throughput and IO — a falsely reassuring number, which is worse
+    // than an empty panel. Days-since-epoch plus milliseconds-into-today keeps
+    // both DATEDIFFs inside int range and works on every supported version.
+    const CLOCK_SQL: &str = "SELECT CAST(DATEDIFF(DAY, '19700101', SYSUTCDATETIME()) AS BIGINT) * 86400000                              + CAST(DATEDIFF(MILLISECOND, CAST(SYSUTCDATETIME() AS DATE), SYSUTCDATETIME()) AS BIGINT)";
+    if let Ok(s) = client.simple_query(CLOCK_SQL).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.server_time_ms = r.get::<i64, _>(0).unwrap_or(0);

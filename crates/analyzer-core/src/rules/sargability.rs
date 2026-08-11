@@ -209,7 +209,15 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
             at_stmt_start = false;
         }
         if is_word(t, "WHERE") || (is_word(t, "ON") && !stmt_is_ddl) { in_pred = true; }
-        else if is_word(t, "GROUP") || is_word(t, "ORDER") { in_pred = false; }
+        // A MERGE's ON opens a predicate that no `;` closes until the whole
+        // statement ends, so `... OUTPUT inserted.Id INTO dbo.Audit (Id)` was
+        // read as a scalar UDF call inside a predicate. These keywords all end
+        // the predicate region they follow.
+        else if ["GROUP", "ORDER", "WHEN", "THEN", "OUTPUT", "INTO", "VALUES",
+                 "UNION", "EXCEPT", "INTERSECT", "OPTION"]
+            .iter()
+            .any(|kw| is_word(t, kw))
+        { in_pred = false; }
         else if t.text == ";" { in_pred = false; at_stmt_start = true; stmt_is_ddl = false; }
         if !in_pred { continue; }
         if t.kind != TokKind::Word { continue; }

@@ -110,11 +110,17 @@ export function HelpPanel({
         onClick={onClose}
         aria-hidden
       />
+      {/* The panel stays mounted and slides off-canvas via transform, which
+          keeps it in the accessibility tree: a screen reader announced a modal
+          help dialog on every screen. `inert` + `aria-hidden` remove it from
+          both the a11y tree and the tab order while it is closed. */}
       <aside
         className={`help-panel${open ? " open" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="Help and glossary"
+        aria-hidden={!open}
+        {...(open ? {} : { inert: "" as unknown as boolean })}
       >
         <header className="help-panel-header">
           <span className="help-panel-eyebrow">Help &amp; glossary</span>
@@ -193,7 +199,8 @@ export function HelpPanel({
               pulse poller. You start it, and it samples those views on an interval and keeps a
               local time-series in <code>~/.dbopt/sentinel.db</code>, so runtime pain accumulates
               into real history you can grade against — and into the pain report. It captures data
-              and writes a report you read yourself; it does not page or alert.
+              and writes a report you read yourself. Set thresholds on the collected
+              signals and it will POST to a webhook when one is breached.
             </p>
             <p className="help-sentinel-why">
               <span className="health-signal-eye" aria-hidden>

@@ -304,8 +304,8 @@ export function SentinelView({ conn, onAnalyzeSql }: { conn: SqlConnectionConfig
             connected SQL Server on demand. It polls Query Store, wait stats, deadlocks,
             live blocking, index usage, and table sizes into a local SQLite time-series, then rolls
             them up into the pain report below. Polling runs in the background while it's started —
-            leave this tab any time. It captures data and writes a report you read yourself; it does
-            not page or alert.
+            leave this tab any time. It writes a report you read yourself, and you can set
+            thresholds on any collected signal to have it POST to a webhook when one is breached.
           </div>
           <div style={{ ...mono, color: "var(--text-dim)", marginTop: 10, opacity: 0.8 }}>
             Uses the connection from the Connection tab (SQL authentication).
@@ -648,8 +648,17 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
 
   const mode = status?.capture_mode ?? "—";
   const canAlter = !!status?.can_alter;
-  const stmt = (m: string) => `ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = ${m})`;
-  const copy = (m: "AUTO" | "ALL") => { try { navigator.clipboard?.writeText(stmt(m) + ";"); } catch { /* clipboard may be blocked */ } };
+  // Every statement the APPLY button will run, in order. Setting a capture mode
+  // on a database whose Query Store is off also has to turn it on, and that
+  // second ALTER used to fire without ever appearing in the preview — so the
+  // confirmation showed one statement and the click ran two.
+  const stmts = (m: string) => {
+    const list: string[] = [];
+    if (status && !status.enabled) list.push("ALTER DATABASE CURRENT SET QUERY_STORE = ON");
+    list.push(`ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = ${m})`);
+    return list;
+  };
+  const copy = (m: "AUTO" | "ALL") => { try { navigator.clipboard?.writeText(stmts(m).join(";\n") + ";"); } catch { /* clipboard may be blocked */ } };
   const tryToggle = (m: "AUTO" | "ALL") => {
     if (mode === m) return;
     if (!canAlter) { setErr(`Your login can't change this — it needs ALTER on ${conn.database} (db_owner / sysadmin). Use COPY to hand the statement to a DBA.`); return; }
@@ -684,8 +693,12 @@ function QStoreCapture({ conn }: { conn: SqlConnectionConfig }) {
       {err && <div className="qstore-err">{err}</div>}
       {pending && (
         <div className="qstore-confirm">
-          <span>Apply this change to <b>{conn.database}</b>?</span>
-          <code>{stmt(pending)}</code>
+          <span>
+            Apply {stmts(pending).length === 1 ? "this statement" : `these ${stmts(pending).length} statements`} to <b>{conn.database}</b>?
+          </span>
+          {stmts(pending).map((line) => (
+            <code key={line}>{line}</code>
+          ))}
           <div className="qstore-confirm-ops">
             <button className="primary" disabled={busy} onClick={() => apply(pending)}>{busy ? "APPLYING…" : "APPLY"}</button>
             <button

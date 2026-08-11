@@ -63,8 +63,11 @@ non-SARGable — the optimizer cannot seek the index and must scan.
   built for `wasm32-unknown-unknown` — which is why pasting a query there uploads nothing.
 - **False positives are the worst outcome.** Rules bail out the moment a statement's shape
   is anything they cannot read with confidence, rather than guessing.
-- **Every rule is version-gated and carries a fix.** A finding without a remedy is a
-  complaint, not advice.
+- **Every rule carries a fix.** A finding without a remedy is a complaint, not advice.
+- **Version-specific advice is version-gated.** The 14 rules whose recommendation only
+  applies to a particular release check `ctx.server_version` before firing, so a 2022+
+  rewrite is never suggested against a 2019 target. The rest describe patterns that are
+  wrong on every supported version and are not gated.
 - **Engine-agnostic from the core out.** Rules declare the databases they apply to and
   `engine` picks the target. SQL Server is live with all 102 rules; PostgreSQL and MySQL
   are next, and an engine without rules yields an empty report rather than a guess.
@@ -74,8 +77,10 @@ non-SARGable — the optimizer cannot seek the index and must scan.
 Rules are `fn(&RuleCtx) -> Vec<Finding>` registered in a single `REGISTRY` table, each
 declaring the engines it applies to. See
 [CONTRIBUTING.md](https://github.com/singhpratech/dbopt/blob/main/CONTRIBUTING.md) —
-every rule ships with a positive and a negative scenario in the eval corpus
-(160 scenarios, F1 = 1.000, self-graded).
+new rules ship with a positive and a negative scenario in the eval corpus
+(171 scenarios, F1 = 1.000, self-graded). That is the standard going forward, not a
+description of the whole registry: 63 of the 102 rules have scenarios today and the
+remainder are being backfilled.
 
 ## See also
 

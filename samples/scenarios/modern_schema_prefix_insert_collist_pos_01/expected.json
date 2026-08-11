@@ -1,0 +1,6 @@
+{
+  "must_fire": ["modern.missing_schema_prefix"],
+  "must_not_fire": [],
+  "server_version": 2022,
+  "category": "modern"
+}

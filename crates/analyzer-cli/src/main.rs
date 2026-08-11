@@ -126,6 +126,19 @@ fn legacy(args: &[String]) -> anyhow::Result<()> {
         input.server_version = Some(target.unwrap_or(lint::DEFAULT_SERVER_VERSION));
     }
 
+    // "We found nothing" and "we understood nothing" must not look the same.
+    // Reporting `findings: []` with exit 0 on a file that isn't SQL is the one
+    // failure mode a linter can never afford, so say so on stderr and exit 2 —
+    // matching what `dbopt lint` does for the same input.
+    if let Some(sql) = input.sql.as_deref() {
+        if source::is_effectively_empty(sql) {
+            eprintln!("warning: input contains no statements (only whitespace or comments)");
+        } else if !source::looks_like_sql(sql) {
+            eprintln!("error: input does not look like SQL — no recognizable statement was found");
+            std::process::exit(2);
+        }
+    }
+
     let report = analyze(&input);
     let json = serde_json::to_string_pretty(&report)?;
     println!("{json}");

@@ -392,7 +392,7 @@ export function App() {
   // an inline error so the chart's empty state can offer Retry. Returns nothing;
   // callers just trigger it. A live `dmvLoading` guard prevents double-pulls.
   async function pullDmvInline() {
-    if (!conn.server || dmvLoading) return;
+    if (!P.isConfigured(conn) || dmvLoading) return;
     setDmvLoading(true);
     setDmvErr(null);
     try {
@@ -402,6 +402,11 @@ export function App() {
         user: conn.auth_mode === "sql" ? conn.user : undefined,
         password: conn.auth_mode === "sql" ? conn.password : undefined,
         trust_cert: conn.trust_cert,
+        // Without this the backend saw an empty user and fell back to
+        // integrated auth, so a missing SQL login was reported as "Windows
+        // authentication isn't available in this build" — the wrong diagnosis,
+        // in build-flag jargon, for a user who simply hadn't logged in yet.
+        auth_mode: conn.auth_mode,
       };
       const bundle = await backend.pullDmv(info as any);
       setDmv(bundle);
@@ -840,7 +845,12 @@ export function App() {
                 data={report?.charts.index_heatmap ?? []}
                 theme={ui.theme}
                 action={
-                  conn.server
+                  // `conn.server` is pre-filled with "localhost,1433", so it was
+                  // true on a fresh install: the button offered to pull from a
+                  // server nobody had entered, and the guard now silently
+                  // swallowed the click. Route to Connection until there is
+                  // actually something to connect with.
+                  P.isConfigured(conn)
                     ? { label: "Pull now", onClick: () => void pullDmvInline() }
                     : { label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }
                 }
@@ -858,7 +868,12 @@ export function App() {
                 data={report?.charts.size_treemap ?? []}
                 theme={ui.theme}
                 action={
-                  conn.server
+                  // `conn.server` is pre-filled with "localhost,1433", so it was
+                  // true on a fresh install: the button offered to pull from a
+                  // server nobody had entered, and the guard now silently
+                  // swallowed the click. Route to Connection until there is
+                  // actually something to connect with.
+                  P.isConfigured(conn)
                     ? { label: "Pull now", onClick: () => void pullDmvInline() }
                     : { label: "Connect & pull DMVs", onClick: () => setUi({ ...ui, workspace: "connection" }) }
                 }
@@ -913,7 +928,7 @@ export function App() {
         )}
 
         {ui.workspace === "sentinel" && (
-          <Workspace title="Sentinel" subtitle="live pulse · on-demand poller · pain report (no alerting)">
+          <Workspace title="Sentinel" subtitle="live pulse · on-demand poller · pain report · threshold alerts">
             <SentinelView
               conn={conn}
               onAnalyzeSql={(sql) => setUi({ ...ui, draft_sql: sql, draft_plan: "", workspace: "analyze" })}

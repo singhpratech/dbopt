@@ -17,7 +17,7 @@
 //   * SELECT *                                               -> skip the INCLUDE-bearing rules
 // When unsure we drop the finding rather than emit noise.
 
-use super::{finding, is_word, make_loc, RuleCtx};
+use super::{is_keyword, finding, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{Token, TokKind};
 
@@ -70,9 +70,17 @@ struct SelectStmt {
 /// `CREATE INDEX` on it, and its columns may be computed window values that do
 /// not exist anywhere on disk. Emitting index DDL against one produces a script
 /// that fails to parse — the worst kind of copy-paste advice.
-fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<String> {
+/// Keyed by batch, because a CTE does not survive `GO`. A file-wide set let a
+/// CTE in one batch suppress index advice for a *real* table of the same name
+/// in every later batch — silence on exactly the query the rule exists for.
+fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<(u32, String)> {
     let mut names = std::collections::HashSet::new();
+    let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
+        if is_keyword(t, "GO") {
+            batch += 1;
+            continue;
+        }
         if !(is_word(t, "WITH") || t.text == ",") {
             continue;
         }
@@ -83,7 +91,7 @@ fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<String> {
         let is_cte = tokens.get(i + 2).map(|n| is_word(n, "AS")).unwrap_or(false)
             && tokens.get(i + 3).map(|n| n.text == "(").unwrap_or(false);
         if is_cte {
-            names.insert(name.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase());
+            names.insert((batch, name.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase()));
         }
     }
     names
@@ -93,7 +101,9 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
     let ctes = cte_names(tokens);
     let mut out = Vec::new();
     let mut i = 0;
+    let mut batch = 0u32;
     while i < tokens.len() {
+        if is_keyword(&tokens[i], "GO") { batch += 1; i += 1; continue; }
         if !is_word(&tokens[i], "SELECT") { i += 1; continue; }
         let select_tok = i;
 
@@ -112,7 +122,14 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
 
         if let Some(stmt) = parse_one(tokens, select_tok, stmt_end) {
             let short = table_short_name(&stmt.table_ref).to_ascii_lowercase();
-            if !ctes.contains(&short) {
+            // System catalog views and DMVs are not yours to index; emitting
+            // `CREATE INDEX ON sys.indexes` is DDL nobody can run.
+            let schema = stmt.table_ref.to_ascii_lowercase();
+            let system_object = schema.starts_with("sys.")
+                || schema.starts_with("[sys].")
+                || schema.starts_with("information_schema.")
+                || short.starts_with("dm_");
+            if !ctes.contains(&(batch, short)) && !system_object {
                 out.push(stmt);
             }
         }

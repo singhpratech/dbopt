@@ -186,7 +186,7 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     match opts.format {
         Format::Human => print_human(&all, analyzed, &read_errors, suppressed, &notes),
         Format::Json => print_json(&all, analyzed, &read_errors, suppressed)?,
-        Format::Sarif => print_sarif(&all)?,
+        Format::Sarif => print_sarif(&all, &read_errors)?,
     }
 
     // An input we could not read is an I/O failure, not a finding. Exiting 1
@@ -311,9 +311,14 @@ fn parse_severity(v: &str) -> anyhow::Result<Severity> {
 /// Returning an internal major here silently disables every version-gated rule:
 /// `16 < 2022` is true, so a 2022 target would be treated as ancient.
 fn parse_server_version(v: &str) -> anyhow::Result<u16> {
-    let n: u16 = v
+    // Parse wide, then range-check, so `--server-version 99999` reports what is
+    // actually wrong ("unsupported") instead of "is not a number" leaked from a
+    // u16 overflow.
+    let wide: u64 = v
+        .trim()
         .parse()
         .map_err(|_| anyhow::anyhow!("--server-version '{v}' is not a number"))?;
+    let n: u16 = u16::try_from(wide).unwrap_or(u16::MAX);
     Ok(match n {
         2014 | 2016 | 2017 | 2019 | 2022 | 2025 => n,
         // Raw internal major versions are accepted as a convenience.
@@ -323,8 +328,8 @@ fn parse_server_version(v: &str) -> anyhow::Result<u16> {
         15 => 2019,
         16 => 2022,
         17 => 2025,
-        other => anyhow::bail!(
-            "unsupported --server-version '{other}' (expected 2014|2016|2017|2019|2022|2025)"
+        _ => anyhow::bail!(
+            "unsupported --server-version '{v}' (expected 2014|2016|2017|2019|2022|2025)"
         ),
     })
 }
@@ -563,7 +568,7 @@ fn sarif_security_severity(s: Severity) -> &'static str {
     }
 }
 
-fn print_sarif(all: &[FileFinding]) -> anyhow::Result<()> {
+fn print_sarif(all: &[FileFinding], read_errors: &[(String, String)]) -> anyhow::Result<()> {
     // Build the rules[] catalog: one descriptor per distinct rule id we emitted,
     // carrying the most severe sample message/severity for that rule.
     let mut rule_index: BTreeMap<String, usize> = BTreeMap::new();
@@ -634,7 +639,25 @@ fn print_sarif(all: &[FileFinding]) -> anyhow::Result<()> {
                     "rules": rules
                 }
             },
-            "results": results
+            "results": results,
+            // A file we could not read is not a file that passed. Without this,
+            // a SARIF consumer that ignores our exit code sees an empty, green
+            // run for a directory that failed to lint at all.
+            "invocations": [{
+                "executionSuccessful": read_errors.is_empty(),
+                "toolExecutionNotifications": read_errors
+                    .iter()
+                    .map(|(path, err)| serde_json::json!({
+                        "level": "error",
+                        "message": { "text": format!("could not read {path}: {err}") },
+                        "locations": [{
+                            "physicalLocation": {
+                                "artifactLocation": { "uri": uri_for(path) }
+                            }
+                        }]
+                    }))
+                    .collect::<Vec<_>>()
+            }]
         }]
     });
 
