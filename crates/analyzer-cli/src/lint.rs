@@ -5,8 +5,11 @@
 //! (`json`), or SARIF 2.1.0 (`sarif`, ingestible by code-scanning dashboards and
 //! editor Problems panels). Exit code is driven by `--fail-on`.
 
+use crate::source::{self, Source};
+use crate::suppress::{spec_matches, split_specs, FileSuppressions};
 use analyzer_core::{analyze, AnalyzeInput, Finding, Severity};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use walkdir::WalkDir;
@@ -30,44 +33,143 @@ struct Options {
     format: Format,
     fail_on: Severity,
     server_version: Option<u16>,
+    /// `--ignore` specs: exact rule ids, families, or globs.
+    ignore: Vec<String>,
+    /// Read one SQL document from stdin instead of walking paths.
+    stdin: bool,
 }
+
+pub const LINT_USAGE: &str = "\
+dbopt lint - lint T-SQL files for CI and editors
+
+USAGE:
+    dbopt lint <paths...> [OPTIONS]
+    dbopt lint --stdin [OPTIONS]
+
+OPTIONS:
+    --format <human|json|sarif>   Output format (default: human)
+    --fail-on <info|warning|error|critical>
+                                  Exit 1 if any finding is at or above this
+                                  severity (default: error)
+    --server-version <2014|2016|2017|2019|2022|2025>
+                                  Target engine for version-gated rules
+                                  (default: 2025)
+    --ignore <rules>              Suppress rules. Repeatable and comma-separated.
+                                  Accepts an exact id (hygiene.nolock), a family
+                                  (hygiene), or a glob (hygiene.*).
+    --stdin                       Read SQL from stdin, reported as <stdin>
+    -h, --help                    Show this help
+
+SUPPRESSING IN SOURCE:
+    -- dbopt-ignore-file [rules]        whole file
+    -- dbopt-ignore-next-line [rules]   the following line
+    SELECT ... ;  -- dbopt-ignore [rules]   this line
+    Omitting [rules] suppresses every rule at that scope.
+
+EXIT CODES:
+    0   clean (nothing at or above the fail-on threshold)
+    1   findings at or above the threshold
+    2   usage error, or an input that could not be read";
 
 /// Parse args, lint, print, and return the process exit code.
 /// Errors returned here are usage errors (caller maps them to exit code 2).
 pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     let opts = parse_args(args)?;
 
-    let files = discover_files(&opts.paths)?;
-    if files.is_empty() {
-        anyhow::bail!(
-            "no .sql files found under: {}",
-            opts.paths.join(", ")
-        );
-    }
+    // Default to the newest supported target so the CLI agrees with the UI and
+    // the WASM build. Without this, `unwrap_or(0)` inside every gate makes the
+    // analyzer behave as if the target were older than any real SQL Server.
+    let server_version = Some(opts.server_version.unwrap_or(DEFAULT_SERVER_VERSION));
 
     let mut all: Vec<FileFinding> = Vec::new();
     let mut analyzed = 0usize;
     let mut read_errors: Vec<(String, String)> = Vec::new();
+    let mut suppressed = 0usize;
+    let mut notes: Vec<(String, String)> = Vec::new();
 
-    for file in &files {
-        let display = display_path(file);
-        match std::fs::read_to_string(file) {
-            Ok(sql) => {
-                analyzed += 1;
-                let input = AnalyzeInput {
-                    sql: Some(sql),
-                    server_version: opts.server_version,
-                    ..Default::default()
-                };
-                let report = analyze(&input);
-                for finding in report.findings {
-                    all.push(FileFinding {
-                        path: display.clone(),
-                        finding,
-                    });
-                }
+    let mut documents: Vec<(String, Result<Source, String>)> = Vec::new();
+    if opts.stdin {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        documents.push(("<stdin>".to_string(), source::decode(&buf)));
+    }
+    if !opts.paths.is_empty() {
+        let files = discover_files(&opts.paths)?;
+        if files.is_empty() {
+            anyhow::bail!("no .sql files found under: {}", opts.paths.join(", "));
+        }
+        for file in &files {
+            let display = display_path(file);
+            let decoded = std::fs::read(file)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| source::decode(&bytes));
+            documents.push((display, decoded));
+        }
+    }
+
+    for (display, decoded) in documents {
+        let src = match decoded {
+            Ok(src) => src,
+            Err(e) => {
+                read_errors.push((display, e));
+                continue;
             }
-            Err(e) => read_errors.push((display, e.to_string())),
+        };
+        analyzed += 1;
+        if let Some(note) = src.encoding_note {
+            notes.push((display.clone(), note.to_string()));
+        }
+
+        let suppressions = FileSuppressions::parse(&src.text);
+        let mut push = |finding: Finding, all: &mut Vec<FileFinding>, suppressed: &mut usize| {
+            let rule = finding.rule.0.as_str();
+            let line = finding.location.as_ref().map(|l| l.line);
+            let ignored_by_flag = opts.ignore.iter().any(|spec| spec_matches(spec, rule));
+            if ignored_by_flag || suppressions.covers(rule, line) {
+                *suppressed += 1;
+                return;
+            }
+            all.push(FileFinding {
+                path: display.clone(),
+                finding,
+            });
+        };
+
+        // A file that is not SQL must not be reported as passing. This is the
+        // difference between "we found nothing" and "we understood nothing".
+        if source::is_effectively_empty(&src.text) {
+            push(
+                synthetic(
+                    "lint.empty_file",
+                    Severity::Info,
+                    "File contains no statements — only whitespace or comments.",
+                    "If this file is a placeholder, that is fine. If it was meant to hold a migration, it is empty and nothing will run.",
+                ),
+                &mut all,
+                &mut suppressed,
+            );
+            continue;
+        }
+        if !source::looks_like_sql(&src.text) {
+            push(
+                synthetic(
+                    "lint.unrecognized_input",
+                    Severity::Warning,
+                    "No recognizable T-SQL statement found — this file was analyzed but nothing in it parsed as SQL.",
+                    "Check the file is not truncated, binary, or in an encoding dbopt could not detect. It is reported here rather than counted as clean.",
+                ),
+                &mut all,
+                &mut suppressed,
+            );
+        }
+
+        let input = AnalyzeInput {
+            sql: Some(src.text),
+            server_version,
+            ..Default::default()
+        };
+        for finding in analyze(&input).findings {
+            push(finding, &mut all, &mut suppressed);
         }
     }
 
@@ -82,14 +184,16 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     });
 
     match opts.format {
-        Format::Human => print_human(&all, analyzed, &read_errors),
-        Format::Json => print_json(&all, analyzed, &read_errors)?,
+        Format::Human => print_human(&all, analyzed, &read_errors, suppressed, &notes),
+        Format::Json => print_json(&all, analyzed, &read_errors, suppressed)?,
         Format::Sarif => print_sarif(&all)?,
     }
 
-    // Read errors are real failures regardless of the severity threshold.
+    // An input we could not read is an I/O failure, not a finding. Exiting 1
+    // here would masquerade as "the threshold was tripped" and make a single
+    // unreadable file indistinguishable from a real lint failure.
     if !read_errors.is_empty() {
-        return Ok(ExitCode::from(1));
+        return Ok(ExitCode::from(2));
     }
 
     let threshold = opts.fail_on.rank();
@@ -103,15 +207,47 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     })
 }
 
+/// The default target when `--server-version` is not given.
+pub const DEFAULT_SERVER_VERSION: u16 = 2025;
+
+/// Build a finding that comes from the linter itself rather than a rule.
+fn synthetic(rule: &str, severity: Severity, message: &str, fix: &str) -> Finding {
+    Finding {
+        rule: analyzer_core::RuleId(rule.to_string()),
+        severity,
+        message: message.to_string(),
+        location: Some(analyzer_core::Location {
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
+        }),
+        recommendation: Some(fix.to_string()),
+    }
+}
+
 fn parse_args(args: &[String]) -> anyhow::Result<Options> {
     let mut paths = Vec::new();
     let mut format = Format::Human;
     let mut fail_on = Severity::Error;
     let mut server_version = None;
+    let mut ignore: Vec<String> = Vec::new();
+    let mut stdin = false;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--help" | "-h" => {
+                println!("{LINT_USAGE}");
+                std::process::exit(0);
+            }
+            "--stdin" => stdin = true,
+            "--ignore" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--ignore requires a rule id, family or glob"))?;
+                ignore.extend(split_specs(v));
+            }
             "--format" => {
                 let v = it
                     .next()
@@ -144,8 +280,8 @@ fn parse_args(args: &[String]) -> anyhow::Result<Options> {
         }
     }
 
-    if paths.is_empty() {
-        anyhow::bail!("no paths given; usage: dbopt lint <paths...> [--format human|json|sarif] [--fail-on info|warning|error|critical] [--server-version 2019|2022|2025]");
+    if paths.is_empty() && !stdin {
+        anyhow::bail!("no paths given\n\n{LINT_USAGE}");
     }
 
     Ok(Options {
@@ -153,6 +289,8 @@ fn parse_args(args: &[String]) -> anyhow::Result<Options> {
         format,
         fail_on,
         server_version,
+        ignore,
+        stdin,
     })
 }
 
@@ -168,25 +306,45 @@ fn parse_severity(v: &str) -> anyhow::Result<Severity> {
     })
 }
 
+/// Normalize to the **marketing year**, because that is the unit every gate in
+/// analyzer-core compares against (`ctx.server_version.unwrap_or(0) < 2022`).
+/// Returning an internal major here silently disables every version-gated rule:
+/// `16 < 2022` is true, so a 2022 target would be treated as ancient.
 fn parse_server_version(v: &str) -> anyhow::Result<u16> {
-    // Accept friendly marketing years (2019) and raw major versions (15).
     let n: u16 = v
         .parse()
         .map_err(|_| anyhow::anyhow!("--server-version '{v}' is not a number"))?;
-    let major = match n {
-        2014 => 12,
-        2016 => 13,
-        2017 => 14,
-        2019 => 15,
-        2022 => 16,
-        2025 => 17,
-        // Already a raw internal major version.
-        12..=17 => n,
+    Ok(match n {
+        2014 | 2016 | 2017 | 2019 | 2022 | 2025 => n,
+        // Raw internal major versions are accepted as a convenience.
+        12 => 2014,
+        13 => 2016,
+        14 => 2017,
+        15 => 2019,
+        16 => 2022,
+        17 => 2025,
         other => anyhow::bail!(
             "unsupported --server-version '{other}' (expected 2014|2016|2017|2019|2022|2025)"
         ),
-    };
-    Ok(major)
+    })
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::parse_server_version;
+
+    #[test]
+    fn years_pass_through_and_majors_map_up() {
+        // The bug this guards: returning 16 for "2022" made every `< 2022`
+        // gate in analyzer-core fire, silencing all modern-rewrite advice.
+        assert_eq!(parse_server_version("2022").unwrap(), 2022);
+        assert_eq!(parse_server_version("2025").unwrap(), 2025);
+        assert_eq!(parse_server_version("2014").unwrap(), 2014);
+        assert_eq!(parse_server_version("16").unwrap(), 2022);
+        assert_eq!(parse_server_version("12").unwrap(), 2014);
+        assert!(parse_server_version("2018").is_err());
+        assert!(parse_server_version("nope").is_err());
+    }
 }
 
 /// Recursively collect `*.sql` files under each path. A path may be a directory
@@ -252,7 +410,13 @@ fn severity_label(s: Severity) -> &'static str {
 // human output
 // ---------------------------------------------------------------------------
 
-fn print_human(all: &[FileFinding], analyzed: usize, read_errors: &[(String, String)]) {
+fn print_human(
+    all: &[FileFinding],
+    analyzed: usize,
+    read_errors: &[(String, String)],
+    suppressed: usize,
+    notes: &[(String, String)],
+) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut w = stdout.lock();
@@ -281,6 +445,10 @@ fn print_human(all: &[FileFinding], analyzed: usize, read_errors: &[(String, Str
         }
     }
 
+    for (path, note) in notes {
+        let _ = writeln!(w, "\nnote: {path}: {note}");
+    }
+
     for (path, err) in read_errors {
         let _ = writeln!(w, "\n{path}\n  error: could not read file: {err}");
     }
@@ -295,12 +463,20 @@ fn print_human(all: &[FileFinding], analyzed: usize, read_errors: &[(String, Str
         .filter_map(|k| counts.get(k).map(|n| format!("{n} {k}")))
         .collect();
     let files_word = if analyzed == 1 { "file" } else { "files" };
+    let suppressed_note = if suppressed > 0 {
+        format!(" ({suppressed} suppressed)")
+    } else {
+        String::new()
+    };
     if all.is_empty() && read_errors.is_empty() {
-        let _ = writeln!(w, "\nclean: no findings across {analyzed} {files_word}");
+        let _ = writeln!(
+            w,
+            "\nclean: no findings across {analyzed} {files_word}{suppressed_note}"
+        );
     } else {
         let _ = writeln!(
             w,
-            "\n{} finding(s) across {analyzed} {files_word}{}",
+            "\n{} finding(s) across {analyzed} {files_word}{}{suppressed_note}",
             all.len(),
             if summary.is_empty() {
                 String::new()
@@ -319,6 +495,7 @@ fn print_json(
     all: &[FileFinding],
     analyzed: usize,
     read_errors: &[(String, String)],
+    suppressed: usize,
 ) -> anyhow::Result<()> {
     let findings: Vec<serde_json::Value> = all
         .iter()
@@ -351,6 +528,7 @@ fn print_json(
     let out = serde_json::json!({
         "filesAnalyzed": analyzed,
         "findingCount": all.len(),
+        "suppressedCount": suppressed,
         "countsBySeverity": by_sev,
         "findings": findings,
         "readErrors": errors,

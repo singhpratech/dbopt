@@ -90,10 +90,10 @@ guesses — the analyzer would rather say nothing than say something wrong.
 
 ## Quality
 
-152 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
+160 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
 so that proves *no regression on the cases we wrote*, not a measured real-world
-false-positive rate. 75 of the 102 rules have a scenario; the newer packs are being
-backfilled.
+false-positive rate. 63 of the 102 token rules have a scenario, plus 12 scenarios for
+the plan-XML and DMV analyzers; the rest are being backfilled.
 
 ## The rest of dbopt
 

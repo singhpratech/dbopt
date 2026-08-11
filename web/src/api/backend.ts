@@ -460,7 +460,10 @@ export async function pullDmv(info: ConnectionInfo) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(info),
   });
-  if (!r.ok) throw new Error((await r.text()) || "DMV pull failed");
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}) as any);
+    throw new Error((e as any).error ?? `DMV pull failed (${r.status})`);
+  }
   return r.json();
 }
 

@@ -90,7 +90,7 @@ export function AdvisorPanel({
             <div className="empty-hint">
               The advisor reads accumulated DMV signals (missing-index scans, unused and
               duplicate indexes, columnstore candidates) and ranks exact, copy-paste fixes.
-              Connect a SQL Server to populate it — nothing leaves your machine.
+              Connect a SQL Server to populate it — the analysis runs here, and your schema never leaves this machine.
             </div>
             <div className="empty-action">
               <button className="btn primary" onClick={() => setUi({ ...ui, workspace: "connection" })}>

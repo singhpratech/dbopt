@@ -75,7 +75,7 @@ Rules are `fn(&RuleCtx) -> Vec<Finding>` registered in a single `REGISTRY` table
 declaring the engines it applies to. See
 [CONTRIBUTING.md](https://github.com/singhpratech/dbopt/blob/main/CONTRIBUTING.md) —
 every rule ships with a positive and a negative scenario in the eval corpus
-(152 scenarios, F1 = 1.000, self-graded).
+(160 scenarios, F1 = 1.000, self-graded).
 
 ## See also
 

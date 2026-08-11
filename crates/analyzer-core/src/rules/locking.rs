@@ -1,6 +1,6 @@
 use super::{finding, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
-use crate::tokens::TokKind;
+use crate::tokens::{TokKind, Token};
 
 /// Rule 1: SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
 /// Detects a session-wide dirty-read isolation switch.
@@ -31,6 +31,16 @@ pub fn session_read_uncommitted(ctx: &RuleCtx) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Does this token indicate a predicate that can match a wide range of rows?
+/// Equality on a key is the overwhelmingly common (and correct) case, so only
+/// range/pattern/null comparisons are treated as batching candidates.
+fn is_wide_predicate_token(t: &Token) -> bool {
+    matches!(t.text, ">" | "<" | ">=" | "<=" | "<>" | "!=" | "!<" | "!>")
+        || is_word(t, "BETWEEN")
+        || is_word(t, "LIKE")
+        || is_word(t, "IS")
 }
 
 /// Rule 2: UPDATE / DELETE that has a WHERE clause but no TOP (n) batching.
@@ -105,9 +115,11 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         }
 
-        // Walk forward to statement terminator looking for: WHERE (at top depth) and TOP (
+        // Walk forward to statement terminator looking for: WHERE (at top depth),
+        // TOP (n), and the *shape* of the predicate.
         let mut has_where = false;
         let mut has_top_paren = false;
+        let mut wide_predicate = false;
         let mut depth = 0i32;
         let mut p = j + 1;
         while p < tokens.len() {
@@ -129,17 +141,23 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
                         has_top_paren = true;
                     }
                 }
+            } else if has_where && depth == 0 && is_wide_predicate_token(tk) {
+                wide_predicate = true;
             }
             p += 1;
         }
 
-        if has_where && !has_top_paren {
+        // Only advise batching when the predicate could plausibly touch many
+        // rows. `WHERE OrderID = 42` is the single most common correct DML
+        // statement in the language; telling its author to add TOP (n) is noise
+        // that trains people to ignore the rule.
+        if has_where && !has_top_paren && wide_predicate {
             out.push(finding(
-                "locking.update_without_index",
-                Severity::Warning,
-                format!("{} … WHERE without TOP (n) batching risks lock escalation on large affected rowsets.", t.text.to_uppercase()),
+                "locking.dml_without_batching",
+                Severity::Info,
+                format!("{} with a range predicate and no TOP (n) batching — if this matches a large rowset it can escalate to a table lock.", t.text.to_uppercase()),
                 Some(make_loc(t)),
-                Some("Bulk DML accumulates row/page locks and escalates at the 5,000-lock threshold, blocking the whole table. Batch into 1,000-5,000-row chunks: `DELETE TOP (1000) FROM ... WHERE ... ;` in a loop. On 2025 enable `OPTIMIZED_LOCKING` + ADR for LAQ.".into()),
+                Some("dbopt cannot see how many rows this matches, so treat this as a prompt, not a verdict. If the affected set is large: bulk DML accumulates row/page locks and escalates at the 5,000-lock threshold, blocking the whole table. Batch into 1,000-5,000-row chunks — `DELETE TOP (1000) FROM ... WHERE ...;` in a loop. On 2025, OPTIMIZED_LOCKING + ADR reduce the exposure.".into()),
             ));
         }
     }

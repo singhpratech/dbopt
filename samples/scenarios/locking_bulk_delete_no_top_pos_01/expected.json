@@ -1,5 +1,5 @@
 {
-  "must_fire": ["locking.update_without_index"],
+  "must_fire": ["locking.dml_without_batching"],
   "must_not_fire": [],
   "server_version": 2025,
   "category": "locking"

@@ -194,6 +194,16 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
     let mut at_stmt_start = true;
     for (i, t) in tokens.iter().enumerate() {
         if t.kind == TokKind::Comment { continue; }
+        // `GO` is a batch separator, not a statement. Letting it consume
+        // `at_stmt_start` meant the CREATE that follows was never recognized as
+        // DDL, so `CREATE INDEX ... ON dbo.View (col)` reported a scalar UDF
+        // that does not exist — in every deployment script ever written.
+        if is_word(t, "GO") {
+            in_pred = false;
+            at_stmt_start = true;
+            stmt_is_ddl = false;
+            continue;
+        }
         if at_stmt_start && t.kind == TokKind::Word {
             stmt_is_ddl = is_word(t, "CREATE") || is_word(t, "ALTER") || is_word(t, "DROP");
             at_stmt_start = false;

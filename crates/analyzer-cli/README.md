@@ -44,12 +44,33 @@ $ dbopt lint ./db --fail-on warning         # exit 1 to gate a pull request
 Wire it into GitHub Actions and findings land inline on the diff:
 
 ```yaml
-- run: dbopt lint ./db --format sarif > dbopt.sarif || true
+- run: dbopt lint ./db --format sarif > dbopt.sarif
+  continue-on-error: true          # upload the report even when the gate trips
 - uses: github/codeql-action/upload-sarif@v3
   with: { sarif_file: dbopt.sarif }
+- run: dbopt lint ./db --fail-on error   # the gate itself
 ```
 
 The SARIF also opens in the VS Code SARIF Viewer, so findings appear in the Problems panel.
+
+## Silencing a rule
+
+A linter you cannot silence is a linter you end up ignoring. Three levers, from
+broadest to narrowest:
+
+```console
+$ dbopt lint ./db --ignore hygiene.nolock          # one rule
+$ dbopt lint ./db --ignore hygiene,sarg.or_chain   # a family, and one more rule
+```
+
+```sql
+-- dbopt-ignore-file hygiene.select_star     -- the whole file
+-- dbopt-ignore-next-line hygiene.nolock     -- just the next line
+SELECT * FROM dbo.Orders;                    -- dbopt-ignore hygiene.select_star
+```
+
+Omit the rule list to silence everything at that scope. Suppressed findings are
+counted in the summary line, so a file full of ignores can't quietly look clean.
 
 ## Analyze one thing
 
@@ -61,7 +82,7 @@ $ cat query.sql | dbopt --stdin
 
 ## What it looks at
 
-**102 rules**, every one version-gated against your target engine so a 2022+ rewrite
+**102 rules**. Version-specific advice is gated against your target, so a 2022+ rewrite
 is never suggested for a 2019 server:
 
 | | |
@@ -80,10 +101,10 @@ engine-level reasoning behind it.
 
 ## Quality
 
-152 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
+160 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
 hand-authored, so that number proves *no regression on the cases we wrote* — not a
-measured real-world false-positive rate. 75 of the 102 rules currently have a
-scenario; the newer packs are being backfilled.
+measured real-world false-positive rate. 63 of the 102 token rules have a scenario,
+plus 12 covering the plan-XML and DMV analyzers; the rest are being backfilled.
 
 ## Which databases
 

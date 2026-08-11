@@ -29,9 +29,11 @@ or the server's real usage.
 
 **Proof.**
 - The static analyzer runs **102 rules** in milliseconds with a self-graded **F1 = 1.000** on our
-  145-scenario corpus (covering 73 of those rules) — so the flags it's tested on are precise, not noise.
-- On a real 82 KB / 3000-line script it produced **2,249 findings in 0.02 s**, then **grouped them
-  into a handful of ranked cards** instead of a flat 2,249-row dump.
+  160-scenario corpus (covering 63 of those rules, plus 12 plan-XML/DMV checks) — so the flags it's tested on are precise, not noise.
+- It is fast enough that scale is not the interesting part: linting is a token pass, so a
+  multi-megabyte directory finishes in well under a second on a laptop. What matters is that
+  findings arrive **grouped into a handful of ranked cards**, not as a flat dump. Measure it on
+  your own code — `dbopt lint ./db` prints the totals.
 
 ### How to optimize indexes — the workflow
 
@@ -111,16 +113,16 @@ for monitoring. See [ACCESS.md](ACCESS.md).
 (copy-paste script in [ACCESS.md](ACCESS.md)) → run `./dbopt` and open `http://127.0.0.1:3690`.
 
 **Deployment matrix & exact grants:** see [ACCESS.md](ACCESS.md). Works against self-managed SQL
-Server 2019–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
+Server 2014–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
 
 ---
 
 ## 4. Engineering Manager / Decision-maker
 *"Will it help my team, and can I trust the output?"*
 
-- **Trust:** verified live against SQL Server **2019, 2022, and 2025**; static-rule self-graded **F1 = 1.000**
+- **Trust:** live-tested against SQL Server **2025**; 2014–2022 are supported static-analysis targets; static-rule self-graded **F1 = 1.000**
   across 145 tagged scenarios (73 rules covered); **never reads your data**; never auto-executes changes.
-- **Coverage:** version-aware 2019→2025 (a 2022 rewrite is never suggested against a 2019 target).
+- **Coverage:** version-aware 2014→2025 (a 2022 rewrite is never suggested against a 2019 target). Live Watch/Query-Store surfaces need 2016+.
 - **Adoption is low-friction:** a developer can get value with **zero database access** (static
   analysis) on day one, then opt into deeper, connection-backed analysis as access is granted.
 

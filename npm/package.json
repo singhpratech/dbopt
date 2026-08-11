@@ -25,17 +25,23 @@
     "tsql",
     "mssql"
   ],
-  "types": "./index.d.ts",
+  "types": "./node.d.ts",
   "main": "./node/index.cjs",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
+      "types": "./node.d.ts",
       "node": "./node/index.cjs",
-      "browser": "./web/index.mjs",
-      "default": "./web/index.mjs"
+      "browser": {
+        "types": "./web.d.ts",
+        "default": "./web/index.mjs"
+      },
+      "default": {
+        "types": "./web.d.ts",
+        "default": "./web/index.mjs"
+      }
     },
     "./web": {
-      "types": "./index.d.ts",
+      "types": "./web.d.ts",
       "default": "./web/index.mjs"
     },
     "./package.json": "./package.json"
@@ -43,7 +49,9 @@
   "files": [
     "node/",
     "web/",
-    "index.d.ts",
+    "types.d.ts",
+    "node.d.ts",
+    "web.d.ts",
     "README.md"
   ],
   "sideEffects": false,

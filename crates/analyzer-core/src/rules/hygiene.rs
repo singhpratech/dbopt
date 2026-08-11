@@ -2,10 +2,31 @@ use super::{finding, is_word, make_loc, next_nonws, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
+/// Is this SELECT the head of an `EXISTS (SELECT ...)` subquery?
+///
+/// `SELECT *` inside EXISTS is the documented idiomatic form: the column list
+/// is never evaluated, so there is no read amplification and no covering-index
+/// consequence. Flagging it is the classic linter false positive.
+fn is_exists_subquery(tokens: &[Token], i: usize) -> bool {
+    let Some(open) = i.checked_sub(1).and_then(|k| tokens.get(k)) else {
+        return false;
+    };
+    if !(open.kind == TokKind::Punct && open.text == "(") {
+        return false;
+    }
+    i.checked_sub(2)
+        .and_then(|k| tokens.get(k))
+        .map(|kw| is_word(kw, "EXISTS"))
+        .unwrap_or(false)
+}
+
 pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for (i, t) in ctx.tokens.iter().enumerate() {
         if is_word(t, "SELECT") {
+            if is_exists_subquery(ctx.tokens, i) {
+                continue;
+            }
             if let Some((_, nxt)) = next_nonws(ctx.tokens, i) {
                 if nxt.kind == TokKind::Punct && nxt.text == "*" {
                     out.push(finding(
@@ -94,33 +115,117 @@ pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Statement-starting keywords, used to stop a forward scan when the author
+/// omitted the `;`. Without this, an unterminated UPDATE can "borrow" the
+/// bounding clause of the next statement (or vice versa).
+fn starts_statement(t: &Token) -> bool {
+    // Deliberately excludes SET, WITH, FROM, TOP, OUTPUT and INTO: all of those
+    // appear *inside* a legal UPDATE/DELETE, and treating them as boundaries
+    // stops the scan before it ever reaches the WHERE clause.
+    [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP", "TRUNCATE",
+        "DECLARE", "EXEC", "EXECUTE", "GO", "WHILE", "COMMIT", "ROLLBACK",
+        "GRANT", "REVOKE", "DENY", "USE",
+    ]
+    .iter()
+    .any(|kw| is_word(t, kw))
+}
+
+/// Is this DML the action half of a MERGE (`WHEN MATCHED THEN UPDATE SET ...`)?
+///
+/// A MERGE action is scoped by the MERGE's own ON clause, so it rewrites
+/// nothing "unbounded". Reporting it as critical on a textbook upsert is the
+/// fastest possible way to lose a reader's trust.
+fn is_merge_action(tokens: &[Token], i: usize) -> bool {
+    if i.checked_sub(1)
+        .and_then(|k| tokens.get(k))
+        .map(|p| is_word(p, "THEN"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Fall back to scanning this statement for a MERGE verb.
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ";" {
+            return false;
+        }
+        if is_word(t, "MERGE") {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
-        let is_dml = is_word(t, "UPDATE") || is_word(t, "DELETE");
-        if !is_dml { continue; }
-        // skip "DELETE TOP" / "DELETE FROM"
+        let is_update = is_word(t, "UPDATE");
+        let is_delete = is_word(t, "DELETE");
+        if !(is_update || is_delete) {
+            continue;
+        }
+        // `UPDATE STATISTICS dbo.T` is not DML.
+        if is_update
+            && tokens
+                .get(i + 1)
+                .map(|n| is_word(n, "STATISTICS"))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        if is_merge_action(tokens, i) {
+            continue;
+        }
+
         let mut j = i + 1;
         let mut depth = 0i32;
-        let mut has_where = false;
-        let mut hit_terminator = false;
+        let mut bounded = false;
+        let mut saw_from_or_join = false;
         while j < tokens.len() {
             let tk = &tokens[j];
-            if tk.text == "(" { depth += 1; }
-            else if tk.text == ")" { depth -= 1; }
-            else if depth == 0 && tk.text == ";" { hit_terminator = true; break; }
-            else if depth == 0 && is_word(tk, "WHERE") { has_where = true; break; }
+            if tk.text == "(" {
+                depth += 1;
+            } else if tk.text == ")" {
+                depth -= 1;
+            } else if depth == 0 && tk.text == ";" {
+                break;
+            } else if depth == 0 && is_word(tk, "WHERE") {
+                bounded = true;
+                break;
+            } else if depth == 0 && (is_word(tk, "FROM") || is_word(tk, "JOIN")) {
+                saw_from_or_join = true;
+            } else if depth == 0 && saw_from_or_join && is_word(tk, "ON") {
+                // `UPDATE a SET ... FROM dbo.A a JOIN #Due d ON d.Id = a.Id` is
+                // bounded by the join predicate. This is the most common bulk
+                // update shape in production T-SQL; treating it as unbounded
+                // made the rule fire on correct code at critical severity.
+                bounded = true;
+                break;
+            } else if depth == 0 && j > i + 1 && starts_statement(tk) {
+                break;
+            }
             j += 1;
         }
-        let _ = hit_terminator;
-        if !has_where {
+
+        if !bounded {
+            let verb = t.text.to_uppercase();
+            // TRUNCATE replaces a whole-table DELETE. Suggesting it for an
+            // UPDATE would destroy the rows the author meant to modify.
+            let rec = if is_delete {
+                "Add a WHERE clause. If you really mean every row, TRUNCATE TABLE is faster and logs less than an unfiltered DELETE — and add a comment saying the scope is intentional."
+            } else {
+                "Add a WHERE clause, or bound the statement with a JOIN predicate. If every row really is the target, say so in a comment so the next reader knows it was deliberate."
+            };
             out.push(finding(
                 "hygiene.unbounded_dml",
                 Severity::Critical,
-                format!("{} without a WHERE clause rewrites every row in the table.", t.text.to_uppercase()),
+                format!("{verb} without a WHERE clause rewrites every row in the table."),
                 Some(make_loc(t)),
-                Some("Add a WHERE clause. If you really mean every row, prefer TRUNCATE TABLE (DELETE) for performance + log savings, and add an explicit comment that it is intentional.".into()),
+                Some(rec.into()),
             ));
         }
     }
@@ -198,6 +303,19 @@ pub fn merge_statement_upsert(ctx: &RuleCtx) -> Vec<Finding> {
             }
             j += 1;
         }
+        // If the author already took the serializing lock this rule's own
+        // recommendation asks for, the concurrency argument no longer applies.
+        // Repeating the warning at that point trains people to ignore it.
+        let mut has_holdlock = false;
+        let mut k = i;
+        while k < tokens.len() {
+            let tk = &tokens[k];
+            if tk.text == ";" { break; }
+            if is_word(tk, "HOLDLOCK") || is_word(tk, "SERIALIZABLE") { has_holdlock = true; break; }
+            k += 1;
+        }
+        if has_holdlock { continue; }
+
         let sev = if has_matched && has_not_by_source { Severity::Error } else { Severity::Warning };
         out.push(finding(
             "hygiene.merge_statement_for_upsert",
@@ -241,6 +359,17 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
     let mut in_proj = false;
     let mut seen = std::collections::HashSet::new();
     for (i, t) in tokens.iter().enumerate() {
+        // A projection ends at the statement, not just at FROM. Without this,
+        // `CREATE INDEX IX ON dbo.SomeView (col)` after an earlier SELECT was
+        // still "in the projection", and `dbo.SomeView (` matched the
+        // `Word DOT Word LPAREN` call shape — a scalar UDF that never existed.
+        if t.text == ";" || is_word(t, "GO") || is_word(t, "CREATE")
+            || is_word(t, "ALTER") || is_word(t, "DROP") || is_word(t, "UPDATE")
+            || is_word(t, "DELETE") || is_word(t, "INSERT") || is_word(t, "MERGE")
+        {
+            in_proj = false;
+            continue;
+        }
         if is_word(t, "SELECT") { in_proj = true; continue; }
         if is_word(t, "FROM") { in_proj = false; continue; }
         if !in_proj || t.kind != TokKind::Word { continue; }

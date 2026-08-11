@@ -1,6 +1,6 @@
 {
   "must_fire": [],
   "must_not_fire": ["locking.dml_without_batching", "hygiene.unbounded_dml"],
-  "server_version": 2025,
+  "server_version": 2022,
   "category": "locking"
 }

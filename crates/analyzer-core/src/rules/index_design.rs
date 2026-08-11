@@ -895,6 +895,26 @@ pub fn wide_covering_request(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Is the token before this type name a `@variable` (a DECLARE or a procedure
+/// parameter) rather than a column name?
+fn declares_a_variable(tokens: &[Token<'_>], type_idx: usize) -> bool {
+    let Some(prev) = type_idx.checked_sub(1).and_then(|k| tokens.get(k)) else {
+        return false;
+    };
+    if prev.text.starts_with('@') {
+        return true;
+    }
+    // `DECLARE @x AS nvarchar(max)` puts AS between the two.
+    if is_word(prev, "AS") {
+        return type_idx
+            .checked_sub(2)
+            .and_then(|k| tokens.get(k))
+            .map(|p| p.text.starts_with('@'))
+            .unwrap_or(false);
+    }
+    false
+}
+
 pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -911,6 +931,11 @@ pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
             && maxw.map(|m| m.kind == TokKind::Word && m.text.eq_ignore_ascii_case("MAX")).unwrap_or(false)
             && rp.map(|p| p.text == ")").unwrap_or(false)
         {
+            // A local variable or parameter is not a column. `DECLARE @sql
+            // nvarchar(max)` is the *required* type for sp_executesql's @stmt,
+            // and column advice ("can't be index keys", "use NVARCHAR(400)")
+            // is impossible to act on and wrong to follow.
+            if declares_a_variable(tokens, i) { continue; }
             count += 1;
             if count > 3 { break; }
             out.push(finding(

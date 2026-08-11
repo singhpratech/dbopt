@@ -84,8 +84,9 @@ async fn capabilities() -> impl IntoResponse {
 
 /// The running binary's identity — used by the in-app "Check for updates" flow
 /// to compare against the latest GitHub release. Purely local: it reads compile-
-/// time constants only and makes NO network call (the update check itself is a
-/// browser→GitHub request the user triggers explicitly).
+/// time constants only and makes NO network call. The update check itself is a
+/// browser→GitHub request, fired once on launch by default (opt-out) and
+/// whenever the user clicks "Check for updates" — see docs/DATA-HANDLING.md.
 async fn version() -> impl IntoResponse {
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),

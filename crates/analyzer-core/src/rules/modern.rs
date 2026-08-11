@@ -2,6 +2,22 @@ use super::{finding, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
+/// Does this UPDATE draw its target from a FROM clause? If so the token right
+/// after UPDATE is an alias, not a table name.
+fn update_has_from_clause(tokens: &[Token<'_>], update_idx: usize) -> bool {
+    let mut depth = 0i32;
+    let mut j = update_idx + 1;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && t.text == ";" { return false; }
+        else if depth == 0 && is_word(t, "FROM") { return true; }
+        j += 1;
+    }
+    false
+}
+
 pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -19,6 +35,24 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     for (i, t) in tokens.iter().enumerate() {
         let triggers = is_word(t, "FROM") || is_word(t, "JOIN") || is_word(t, "UPDATE") || is_word(t, "INTO");
         if !triggers { continue; }
+
+        // `FETCH NEXT FROM cur` names a cursor, not a table.
+        if is_word(t, "FROM") {
+            if let Some(prev) = i.checked_sub(1).and_then(|k| tokens.get(k)) {
+                if ["FETCH", "NEXT", "PRIOR", "FIRST", "LAST", "ABSOLUTE", "RELATIVE"]
+                    .iter()
+                    .any(|kw| is_word(prev, kw))
+                {
+                    continue;
+                }
+            }
+        }
+
+        // `UPDATE a SET ... FROM dbo.Accounts a JOIN ...` — the token after
+        // UPDATE is an alias defined by the FROM clause, and an alias cannot be
+        // schema-qualified. Advice you cannot act on is worse than silence.
+        if is_word(t, "UPDATE") && update_has_from_clause(tokens, i) { continue; }
+
         let Some(name) = tokens.get(i + 1) else { continue };
         if name.kind != TokKind::Word { continue; }
         // Skip if it's a subquery, table variable, temp table, or CTE-y thing
@@ -26,11 +60,23 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
         if name.text == "(" { continue; }
         // Skip if next token is '.' (schema.table is fine)
         if tokens.get(i + 2).map(|n| n.text == ".").unwrap_or(false) { continue; }
+        // A following '(' makes this a function call — OPENJSON(@j),
+        // STRING_SPLIT(@s, ','), GENERATE_SERIES(1, 10) and every other rowset
+        // function. Built-ins have no schema to qualify.
+        if tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false) { continue; }
         // Skip CTE references (defined via WITH … AS (…)) — they aren't tables.
         if cte_names.contains(&name.text.to_ascii_lowercase()) { continue; }
-        // Skip common DML/DDL noise words after INTO etc.
+        // Reserved words that land in the name slot but are never table names:
+        // `MERGE ... WHEN MATCHED THEN UPDATE SET` puts SET here, and
+        // `INSERT INTO t OUTPUT INSERTED.*` puts INSERTED here.
         let lo = name.text.to_ascii_lowercase();
-        if matches!(lo.as_str(), "openrowset" | "openquery") { continue; }
+        if matches!(
+            lo.as_str(),
+            "set" | "values" | "inserted" | "deleted" | "output" | "select" | "cursor"
+                | "openrowset" | "openquery" | "openxml" | "opendatasource"
+                | "openjson" | "string_split" | "generate_series"
+                | "freetexttable" | "containstable" | "changetable"
+        ) { continue; }
         out.push(finding(
             "modern.missing_schema_prefix",
             Severity::Info,
@@ -226,7 +272,7 @@ pub fn greatest_least_case_pattern(ctx: &RuleCtx) -> Vec<Finding> {
             Severity::Info,
             "`CASE WHEN a > b THEN a ELSE b END` pattern. `GREATEST(a, b)` / `LEAST(a, b)` (2022+) are clearer.",
             Some(make_loc(t)),
-            Some("`GREATEST(a, b)` / `LEAST(a, b)` (2022+) handle NULL semantics correctly and are far more readable.".into()),
+            Some("`GREATEST(a, b)` / `LEAST(a, b)` (2022+) are far more readable. Check NULLs before swapping: GREATEST ignores NULL arguments and returns the largest non-NULL value, whereas `CASE WHEN a > b THEN a ELSE b END` returns `b` when `a` is NULL. If either input is nullable the two are not equivalent.".into()),
         ));
     }
     out

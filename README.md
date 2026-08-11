@@ -87,14 +87,23 @@ dbopt lint ./db --format human               # grouped by file (default)
 dbopt lint ./db --format json                # machine-readable findings
 dbopt lint ./db --format sarif > dbopt.sarif # SARIF 2.1.0 for code scanning
 dbopt lint ./db --fail-on warning            # exit 1 to gate a pull request
+dbopt lint ./db --ignore hygiene.nolock      # silence a rule (or a family, or a glob)
+dbopt lint --stdin                           # lint a query on stdin
 ```
 
-Exit codes: **0** clean · **1** findings at/above `--fail-on` (default `error`) · **2** usage error.
+Exit codes: **0** clean · **1** findings at/above `--fail-on` (default `error`) · **2** usage error or
+an input that could not be read.
+
+Silence a rule with `--ignore`, or in the SQL itself — `-- dbopt-ignore-file`,
+`-- dbopt-ignore-next-line`, or a trailing `-- dbopt-ignore <rules>`. Suppressed findings are
+counted in the summary, so an ignore-riddled file cannot quietly look clean.
 
 ```yaml
-- run: dbopt lint ./db --format sarif > dbopt.sarif || true
+- run: dbopt lint ./db --format sarif > dbopt.sarif
+  continue-on-error: true      # still upload the report when the gate trips
 - uses: github/codeql-action/upload-sarif@v3
   with: { sarif_file: dbopt.sarif }
+- run: dbopt lint ./db --fail-on error   # the gate itself
 ```
 
 Findings then appear inline on the PR diff. The SARIF also opens in the VS Code
@@ -143,11 +152,10 @@ the `bedrock` feature — it is not in the prebuilt downloads.)*
 
 ## Quality bar
 
-- **152 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
+- **160 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
   **self-graded** — the scenarios are hand-authored, so this proves *no regression on the cases we wrote*,
   not a measured real-world false-positive rate. A held-out third-party corpus is on the roadmap.
-- **75 of the 102 rules** currently have a scenario, each with a positive case (proves it fires) and a
-  negative case (proves it stays silent). The newer rule packs are being backfilled.
+- **63 of the 102 token rules** have a scenario, each with a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers. The remaining rules are being backfilled.
 - Rust unit + HTTP integration tests, and a Playwright UI suite.
 
 ```bash

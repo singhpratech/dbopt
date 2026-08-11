@@ -68,18 +68,28 @@ rephrases findings the engine already produced.
 
 ### The update check (Help ▸ Check for updates)
 
-dbopt can tell you when a newer release exists. This is **manual only** — it fires
-when you click "Check for updates" in the Help panel, never automatically and never
-on startup. The request is an anonymous public `GET` from your **browser** to
-`api.github.com` (the dbopt releases endpoint). It carries no identifiers, no
-telemetry, and no body — nothing about your databases, queries, or config is sent.
-The local backend is not involved in this call. If you never click it, dbopt never
-contacts GitHub. The code is one self-contained file: `web/src/api/updates.ts`.
+dbopt can tell you when a newer release exists. By default this fires **twice**:
+once automatically when the app launches, and whenever you click "Check for
+updates" in the Help panel. **The launch check is on by default and you can turn
+it off** — untick "Check automatically on launch" in the update dialog, or set
+`auto_check_updates` to false in local storage. Turning it off leaves the manual
+button working.
+
+The request is an anonymous public `GET` from your **browser** to `api.github.com`
+(the dbopt releases endpoint). It carries no identifiers, no telemetry, and no
+body — nothing about your databases, queries, or config is sent. What GitHub can
+see is what any web request reveals: your IP address and the time. The local
+backend is not involved in this call. The code is one self-contained file:
+`web/src/api/updates.ts`.
+
+If you need an environment with **zero** unattended egress, turn the launch check
+off before you connect anything; after that, the only remaining outbound path is a
+cloud AI provider you pick yourself.
 
 ## How to verify this yourself
 
-- Watch the network: with only the analyzer in use (no cloud AI, no update check),
-  the backend makes outbound connections **only** to your SQL Server.
+- Watch the network: with only the analyzer in use (no cloud AI, launch update
+  check off), the backend makes outbound connections **only** to your SQL Server.
 - Grep the source: the only `https://` egress in the backend is in
   `crates/backend/src/providers/*` and `ollama.rs` — i.e. the AI providers. The
   update check is browser-side and lives only in `web/src/api/updates.ts`.

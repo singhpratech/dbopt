@@ -1,12 +1,10 @@
 /**
- * dbopt — a database performance analyzer, compiled to WebAssembly.
+ * dbopt — shared types for the analyzer.
  *
- * The same Rust engine that powers the dbopt CLI and desktop app. No database
- * connection, no network, no server: your SQL is analyzed in-process.
- *
- * The engine is engine-agnostic by construction — rules declare which databases
- * they apply to and `engine` selects the target. SQL Server is the one with
- * rules today; asking for another returns an empty report rather than guesses.
+ * The two entry points differ in one way only: `dbopt-core` (Node) analyzes
+ * synchronously, `dbopt-core/web` returns a promise because the WebAssembly
+ * module is fetched on first use. Each has its own declaration file so neither
+ * forces you to write a cast.
  */
 
 export type Severity = "info" | "warning" | "error" | "critical";
@@ -65,25 +63,3 @@ export interface AnalyzeOptions {
   /** Target engine. Defaults to SQL Server, the only one with rules today. */
   engine?: Engine;
 }
-
-/**
- * Analyze T-SQL, an execution plan, a DMV bundle, or any combination.
- *
- * ```ts
- * import { analyze } from "dbopt";
- *
- * const { findings } = analyze("SELECT * FROM Orders WHERE YEAR(d) = 2025", {
- *   server_version: 2025,
- * });
- * ```
- *
- * In Node this is synchronous. In the browser it returns a promise, because the
- * WebAssembly module is fetched on first use.
- */
-export function analyze(
-  input: string | AnalyzeOptions,
-  options?: AnalyzeOptions & { wasmUrl?: string | URL },
-): AnalysisReport | Promise<AnalysisReport>;
-
-/** Browser only: preload the WebAssembly module so the first `analyze()` is instant. */
-export function ready(wasmUrl?: string | URL): Promise<void>;

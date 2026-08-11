@@ -4,11 +4,18 @@
 > This page answers it precisely, so your DBA/security team can sign off before you roll it out.
 > dbopt is **free and open** — this is about *access*, never licensing.
 
-dbopt is **read-only**. It never executes DDL, never changes a setting, and — verifiably —
+dbopt is **read-only, with one explicit exception you have to click.** It
 **never reads your table data.** Every query it runs is against system catalog views
 (`sys.tables`, `sys.indexes`, …), dynamic management views (`sys.dm_*`), Query Store
 (`sys.query_store_*`), or a compile-only execution plan (`SET SHOWPLAN_XML ON`). It reads
 *metadata, statistics, query telemetry, and object definitions* — not the rows in your tables.
+
+**The one exception:** the optional Query Store capture toggle runs
+`ALTER DATABASE CURRENT SET QUERY_STORE …` on the database you point it at. dbopt
+shows you the exact statement first and runs it only when you confirm, and it needs
+`ALTER` on that database — which the least-privilege grant below deliberately does
+**not** include. Leave that permission ungranted and dbopt cannot change anything at
+all. Index DDL is always preview-only: dbopt writes the script, you run it.
 
 ---
 
@@ -16,13 +23,13 @@ dbopt is **read-only**. It never executes DDL, never changes a setting, and — 
 
 | Tier | Access required | What dbopt can do | Result quality |
 |---|---|---|---|
-| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (102 rules: sargability, plan shape, deprecated syntax, hygiene, transactions, security, index design…). Version-aware (2019→2025). | Full, instantly. Great for code review / CI. |
+| **0 — None** | No database connection at all | Static T-SQL analysis of any script or stored-proc text (102 rules: sargability, plan shape, deprecated syntax, hygiene, transactions, security, index design…). Version-aware (2014→2025). | Full, instantly. Great for code review / CI. |
 | **1 — Connect + read metadata** | A login that can connect, plus `VIEW DEFINITION` and `SHOWPLAN` | Reads object/index definitions; fetches **estimated** execution plans (compile-only, query is *not* run); database-scoped index analysis (usage, missing indexes, table sizes) where `VIEW DATABASE STATE` is granted. | Strong for a single database. |
 | **2 — Server state**  ⭐ | Tier 1 **+ `VIEW SERVER STATE`** | Unlocks server-scoped signals: **wait statistics, top queries by duration, blocking, I/O, the full Advisor depth, and the Health score's reliability lane.** | **This is the "real, full picture" tier.** |
-| **3 — Pulse poller** | Tier 2 **+ Query Store enabled** on each DB | The **Sentinel** poller (started on demand) samples Query Store, wait deltas, deadlocks (`system_health`), live blocking, index usage, and sizes into a local time-series → on-demand pain report + regression detection. (Data capture + report you read yourself — no paging or alerting.) | Trend/regression analysis over time. |
+| **3 — Pulse poller** | Tier 2 **+ Query Store enabled** on each DB | The **Sentinel** poller (started on demand) samples Query Store, wait deltas, deadlocks (`system_health`), live blocking, index usage, and sizes into a local time-series → on-demand pain report + regression detection. (Data capture, a report you read yourself, plus threshold alerts to a webhook you configure. No paging or escalation service — alerts fire, you triage.) | Trend/regression analysis over time. |
 
-Without `VIEW SERVER STATE` (Tier 2) the tool **degrades gracefully** — it logs once and
-skips the signals it can't see, rather than failing — but the live results are partial.
+Without `VIEW SERVER STATE` (Tier 2) the tool **degrades gracefully** — it skips the
+signals it can't see rather than failing (some skips are currently silent) — but the live results are partial.
 **For a true 100% live assessment, grant Tier 2 (and Tier 3 if you want the on-demand pulse poller and trend history).**
 
 ---
@@ -55,7 +62,7 @@ and **nothing else** — it cannot see your table data, change anything, or run 
 
 | Platform | Auth | Full results (Tier 2/3) achievable? | Notes |
 |---|---|---|---|
-| **Self-managed SQL Server 2019–2025** (Windows or Linux) | SQL auth ✅ *(verified live: 2019, 2022, 2025)*; Windows/integrated ⚠️ *(build with `--features integrated-auth`; needs an AD domain)* | **Yes — 100%.** | The primary, fully-tested target. |
+| **Self-managed SQL Server 2014–2025** (Windows or Linux) | SQL auth ✅ *(live-tested against 2025)*; Windows/integrated ✅ *(built in on Windows; on Linux/macOS Kerberos needs `--features integrated-auth` and an AD domain)* | **Yes** — full on 2016+; on 2014 the live Watch/Query-Store surfaces are skipped. | The primary target. |
 | **AWS RDS for SQL Server** | SQL auth (RDS master user) ✅; AWS Managed AD ⚠️ | **Yes.** RDS is the *real* engine. The master user is not `sysadmin`, but it **can grant `VIEW SERVER STATE`** — which is all dbopt needs. `system_health` and Query Store are available. | Use the RDS endpoint `:1433`; trust-cert or the RDS CA bundle for TLS. Not yet live-tested by us, but engine-identical to the verified self-managed builds. |
 | **Azure SQL Managed Instance** | SQL auth ✅; Entra ID (Azure AD) ❌ *(not yet supported)* | **Mostly yes.** Near-full instance; `VIEW SERVER STATE` is grantable. | Not yet live-tested. |
 | **Azure SQL Database** (single DB / elastic pool) | SQL auth ✅; Entra ID ❌ | **Partial.** It's a different PaaS engine: some server-scoped DMVs don't exist (e.g. `sys.dm_os_wait_stats` → `sys.dm_db_wait_stats`), and there's no `system_health` session. DB-scoped index analysis + Query Store work. | Static analysis + per-DB advisor work; server-wide signals are limited by the platform, not dbopt. |

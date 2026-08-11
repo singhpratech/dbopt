@@ -69,6 +69,16 @@ export interface SqlConnectionConfig {
   auth_mode: AuthMode;
 }
 
+/// Has the user actually set up a connection, or are we still looking at the
+/// placeholder defaults? `server` alone is not enough: it ships pre-filled with
+/// "localhost,1433", so treating it as configured made a fresh install scan a
+/// server nobody entered and greet the user with a failed-scan error.
+export function isConfigured(c: SqlConnectionConfig): boolean {
+  if (!c.server.trim()) return false;
+  if (c.auth_mode === "sql") return !!c.user?.trim();
+  return true;
+}
+
 export const defaultConn: SqlConnectionConfig = {
   server: "localhost,1433",
   database: "",
@@ -229,7 +239,7 @@ export type Mode = "developer" | "dba";
 
 export interface UiPrefs {
   workspace: "health" | "analyze" | "plan" | "indexes" | "sizes" | "severity" | "connection" | "ai" | "logs" | "sentinel" | "workload" | "history" | "advisor" | "settings";
-  server_version: 2019 | 2022 | 2025;
+  server_version: 2014 | 2016 | 2017 | 2019 | 2022 | 2025;
   theme: Theme;
   mode: Mode;
   draft_sql: string;

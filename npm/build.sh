@@ -8,6 +8,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Strip absolute build paths out of the .wasm. Panic-location strings from
+# dependencies otherwise embed the build machine's home directory — and the
+# browser build is re-served to every end user who bundles this package.
+# (`trim-paths` in Cargo.toml would be tidier but still needs nightly here.)
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=${PWD}=/dbopt"
+
 wasm-pack build crates/analyzer-wasm --target nodejs --out-dir ../../npm/node --release
 wasm-pack build crates/analyzer-wasm --target web    --out-dir ../../npm/web  --release
 

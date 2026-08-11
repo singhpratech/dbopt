@@ -155,7 +155,7 @@ export function OnboardingWizard({
             <p className="onboarding-lede">
               dbopt lints T-SQL entirely in your browser. Here's a query with a
               few common performance traps. Lint it to see the findings and the
-              copy-paste fix — no server, no signup, nothing leaves this machine.
+              copy-paste fix — no server, no signup, and your SQL never leaves this machine.
             </p>
 
             <div className="onboarding-demo">
@@ -227,7 +227,7 @@ export function OnboardingWizard({
             <p className="onboarding-lede">
               dbopt connects to your SQL Server, reads its built-in performance
               views, and hands you a ranked, plain-English health report with
-              copy-paste fixes. Nothing leaves your machine.
+              copy-paste fixes. Your queries, schema and metrics stay on this machine — the only things that ever leave are a prompt you send to a cloud AI model you picked, and an anonymous version check you can switch off.
             </p>
 
             <div className="onboarding-mental-model">

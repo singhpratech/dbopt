@@ -9,14 +9,15 @@ behind the same API, UI and report without disturbing the ones already shipping.
 
 - 102 token-level T-SQL rules (hygiene, sargability, deprecated, modern, plan-shape,
   locking, tempdb, statistics, transactions, security, datatypes, index design),
-  version-gated 2019 → 2025.
+  version-gated 2014 → 2025.
 - Estimated-plan analysis (`SET SHOWPLAN_XML`, compile-only — no execution, no locks).
 - Live DMV pull (index usage, missing indexes, sizes) + `/api/scan/database` schema sweep.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
 - AI assistant (local Ollama + cloud providers, fanout) grounded on the static findings.
 - Web "observatory" UI; durable AI + analysis logs.
-- Quality: 152 eval scenarios, self-graded F1 = 1.000 (covering 75 of the 102 rules; newer
-  packs still being backfilled); Rust unit + HTTP integration tests; Playwright UI e2e.
+- Quality: 160 eval scenarios, self-graded F1 = 1.000 (covering 63 of the 102 token
+  rules plus 12 plan-XML/DMV checks; the rest still being backfilled); Rust unit +
+  HTTP integration tests; Playwright UI e2e.
 
 ## The engine seam (landed)
 

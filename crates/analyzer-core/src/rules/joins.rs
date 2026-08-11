@@ -43,7 +43,22 @@ fn is_clause_boundary(t: &Token) -> bool {
         || is_word(t, "INTERSECT")
         || is_word(t, "OPTION")
         || is_word(t, "FOR")
+        // `FETCH NEXT FROM cur INTO @a, @b` — the commas separate output
+        // variables, not tables. Without INTO here the variable list was read
+        // as a cartesian product on a cursor fetch.
+        || is_word(t, "INTO")
+        || is_word(t, "GO")
         || t.text == ";"
+}
+
+/// Is this FROM the cursor half of a FETCH statement rather than a table list?
+fn is_cursor_fetch(tokens: &[Token<'_>], from_idx: usize) -> bool {
+    let Some(prev) = from_idx.checked_sub(1).and_then(|k| tokens.get(k)) else {
+        return false;
+    };
+    ["FETCH", "NEXT", "PRIOR", "FIRST", "LAST", "ABSOLUTE", "RELATIVE"]
+        .iter()
+        .any(|kw| is_word(prev, kw))
 }
 
 /// True if a Word token is a set operator (UNION / EXCEPT / INTERSECT). These
@@ -170,6 +185,10 @@ pub fn comma_cross_join(ctx: &RuleCtx) -> Vec<Finding> {
     let mut i = 0;
     while i < tokens.len() {
         if !is_word(&tokens[i], "FROM") {
+            i += 1;
+            continue;
+        }
+        if is_cursor_fetch(tokens, i) {
             i += 1;
             continue;
         }

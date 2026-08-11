@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
+import * as P from "../store/persist";
 import * as backend from "../api/backend";
 import type { BaselineTrend, Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
@@ -53,7 +54,11 @@ export function HealthOverview({
     () => scanlog.history(conn.server, conn.database || undefined),
   );
 
-  const connected = !!conn.server;
+  // A pre-filled default server string is not a connection. Treating it as one
+  // meant the "No SQL Server connected" empty state below could never render,
+  // so a fresh install landed on a blank panel (or a failed scan) instead of
+  // being told what to do next.
+  const connected = P.isConfigured(conn);
 
   const scan = useCallback(async () => {
     if (!conn.server) return;
@@ -102,7 +107,7 @@ export function HealthOverview({
     // the persisted history of the new server·db on its next scan).
     setDiff(null);
     setDiffDismissed(false);
-    if (conn.server) void scan();
+    if (P.isConfigured(conn)) void scan();
     else {
       setReport(null);
       setErr(null);
@@ -230,12 +235,20 @@ export function HealthOverview({
             <div className="empty-title">No SQL Server connected</div>
             <div className="empty-hint">
               Point dbopt at a SQL Server instance and it will read the built-in
-              performance views, then grade your database in plain English. Nothing
-              leaves your machine.
+              performance views, then grade your database in plain English. Your
+              schema and metrics stay on this machine.
+              <br />
+              <br />
+              <strong>No database handy?</strong> The analyzer needs no connection at
+              all — paste a query or a stored procedure into Analyze and dbopt will
+              lint it here, in this tab.
             </div>
             <div className="empty-action">
               <button className="btn primary" onClick={() => setUi({ ...ui, workspace: "connection" })}>
                 Connect a SQL Server
+              </button>
+              <button className="btn" onClick={() => setUi({ ...ui, workspace: "analyze" })}>
+                Analyze SQL without connecting
               </button>
             </div>
             {onOpenHelp && (

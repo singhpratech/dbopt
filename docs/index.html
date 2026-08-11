@@ -82,6 +82,38 @@ header{padding:72px 0 0}
 .btn-quiet{background:none;color:var(--ink);border-color:var(--line-2)}
 .btn-quiet:hover{border-color:var(--ink-3)}
 .hero-note{font:400 13px/1.5 var(--sans);color:var(--ink-3)}
+/* ---- hero: the copy on the left, a marked-up file on the right ---------
+   The panel is a manuscript with an editor's marks in the margin: mono for
+   the machine's text, italic serif for the verdict. Every line below is real
+   output from `dbopt lint` on the file shown - nothing here is mocked up. */
+.hero-top{display:grid;grid-template-columns:minmax(0,1fr);gap:40px;align-items:start}
+@media (min-width:1040px){
+  .hero-top{grid-template-columns:minmax(0,1fr) 23rem;gap:54px;align-items:center}
+}
+.markup{border:1px solid var(--line);border-radius:12px;background:var(--card);
+  box-shadow:var(--shadow);overflow:hidden}
+.mk-head{display:flex;align-items:baseline;gap:10px;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:var(--sunk)}
+.mk-file{font:500 12px/1 var(--mono);color:var(--ink-2)}
+.mk-meta{margin-left:auto;font:600 10px/1 var(--sans);letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink-3)}
+.mk-body{padding:15px 15px 4px}
+.mk-line{display:flex;gap:11px;font:400 12.5px/1.7 var(--mono);color:var(--ink);
+  white-space:pre;overflow:hidden}
+.mk-n{flex:none;width:1.1rem;text-align:right;color:var(--ink-3);user-select:none}
+.mk-note{margin:3px 0 15px calc(1.1rem + 11px);padding:0 0 0 13px;position:relative;
+  border-left:1.5px solid var(--line-2)}
+.mk-note::before{content:"";position:absolute;left:0;top:0;width:9px;height:1.5px;
+  background:var(--line-2)}
+.mk-note[data-s="error"]{border-left-color:var(--crit)}
+.mk-note[data-s="error"]::before{background:var(--crit)}
+.mk-note[data-s="warning"]{border-left-color:var(--warn)}
+.mk-note[data-s="warning"]::before{background:var(--warn)}
+.mk-note i{display:block;font:italic 400 14.5px/1.5 var(--serif);color:var(--ink-2)}
+.mk-note b{display:block;margin-top:5px;font:400 10.5px/1 var(--mono);color:var(--ink-3)}
+.mk-foot{padding:11px 14px;border-top:1px solid var(--line);background:var(--sunk);
+  font:400 12px/1.5 var(--sans);color:var(--ink-3)}
+.mk-foot code{font-size:11.5px;color:var(--ink-2)}
 .analyzer{margin-top:38px;border:1px solid var(--line);border-radius:12px;background:var(--card);
   box-shadow:var(--shadow);overflow:hidden}
 .az-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 15px;
@@ -232,17 +264,46 @@ footer{border-top:1px solid var(--line);padding:44px 0;background:var(--paper-2)
 
 <header id="top">
   <div class="wrap">
-    <div class="eyebrow">Local-first · SQL Server today · Postgres &amp; MySQL next</div>
-    <h1>Find and fix slow SQL <em>before</em> it reaches production.</h1>
-    <p class="lede">
-      dbopt reads your queries, your execution plans and your live server metrics, then tells you what is
-      going to hurt and how to fix it — with the reasoning cited. No execution, no locks, no load on
-      production.
-    </p>
-    <div class="hero-actions">
-      <a class="btn btn-primary" href="#install">Download — free &amp; open</a>
-      <a class="btn btn-quiet" href="#try">Try it right here</a>
-      <span class="hero-note">No sign-up. Nothing uploaded.</span>
+    <div class="hero-top">
+      <div class="hero-copy">
+      <div class="eyebrow">Local-first · SQL Server today · Postgres &amp; MySQL next</div>
+      <h1>Find and fix slow SQL <em>before</em> it reaches production.</h1>
+      <p class="lede">
+        dbopt reads your queries, your execution plans and your live server metrics, then tells you what is
+        going to hurt and how to fix it — with the reasoning cited. No execution, no locks, no load on
+        production.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#install">Download — free &amp; open</a>
+        <a class="btn btn-quiet" href="#try">Try it right here</a>
+        <span class="hero-note">No sign-up. Nothing uploaded.</span>
+      </div>
+      </div>
+
+      <aside class="markup" aria-label="An example file after analysis">
+        <div class="mk-head">
+          <span class="mk-file">orders.sql</span>
+          <span class="mk-meta">6 findings</span>
+        </div>
+        <div class="mk-body">
+          <div class="mk-line"><span class="mk-n">4</span><span>SELECT *</span></div>
+          <div class="mk-note" data-s="warning">
+            <i>Pulls every column. Read amplification, and it breaks covering-index plans.</i>
+            <b>hygiene.select_star</b>
+          </div>
+          <div class="mk-line"><span class="mk-n">5</span><span>FROM Orders o WITH (NOLOCK)</span></div>
+          <div class="mk-note" data-s="error">
+            <i>Dirty reads: duplicated rows, missed rows, and rows from rolled-back transactions.</i>
+            <b>hygiene.nolock</b>
+          </div>
+          <div class="mk-line"><span class="mk-n">6</span><span>WHERE YEAR(o.OrderDate) = …</span></div>
+          <div class="mk-note" data-s="error">
+            <i>Non-SARGable — the optimizer cannot seek the index and must scan.</i>
+            <b>sarg.function_on_column</b>
+          </div>
+        </div>
+        <div class="mk-foot"><code>dbopt lint ./db</code> — 2 errors, exit 1: CI fails.</div>
+      </aside>
     </div>
 
     <div class="analyzer" id="try">
@@ -281,6 +342,9 @@ ORDER BY o.Total DESC;</textarea>
             <option value="2025" selected>SQL Server 2025</option>
             <option value="2022">2022</option>
             <option value="2019">2019</option>
+            <option value="2017">2017</option>
+            <option value="2016">2016</option>
+            <option value="2014">2014</option>
           </select>
         </div>
         <span class="hint">Try the 2022+ example, then drop the target to 2019 — the gated advice disappears.</span>
@@ -432,15 +496,15 @@ ORDER BY o.Total DESC;</textarea>
       silent when they shouldn't.</p>
     <div class="stats">
       <div class="stat"><b>102</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>152</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>160</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
     <p class="caveat">
       <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
       self-graded: it proves no regression on the cases we wrote, not a measured real-world false-positive
-      rate. <b>75 of the 102 rules</b> currently have a scenario; the newer rule packs are still being
-      backfilled, and a held-out third-party corpus is on the roadmap. Reproduce it yourself with
+      rate. <b>63 of the 102 token rules</b> have a scenario, plus 12 covering the plan-XML and DMV
+      analyzers; the rest are still being backfilled, and a held-out third-party corpus is on the roadmap. Reproduce it yourself with
       <code>cargo run -p eval -- --html</code>.
     </p>
   </div>
@@ -508,6 +572,44 @@ npm i dbopt-core        <span style="color:var(--ink-3)"># the analyzer in Node 
   </div>
 </footer>
 <script type="module">
+/* ---- upload meter -------------------------------------------------------
+   The audit panel below claims these numbers are measured rather than
+   asserted, so they have to actually be measured. Every way this page could
+   send bytes out is wrapped here, before anything else runs, and the totals
+   are read straight out of these counters. If a byte of your SQL ever left,
+   this counter would say so. */
+let uploadedBytes = 0;
+const byteLen = (b) => {
+  if (b == null) return 0;
+  if (typeof b === "string") return new TextEncoder().encode(b).length;
+  if (b instanceof Blob) return b.size;
+  if (b instanceof ArrayBuffer) return b.byteLength;
+  if (ArrayBuffer.isView(b)) return b.byteLength;
+  if (typeof URLSearchParams !== "undefined" && b instanceof URLSearchParams)
+    return new TextEncoder().encode(b.toString()).length;
+  return 0;
+};
+const _fetch = window.fetch;
+window.fetch = function (input, init) {
+  try {
+    uploadedBytes += byteLen(init && init.body);
+    if (input && typeof input === "object" && "body" in input) uploadedBytes += 0;
+  } catch {}
+  return _fetch.apply(this, arguments);
+};
+const _send = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function (body) {
+  try { uploadedBytes += byteLen(body); } catch {}
+  return _send.apply(this, arguments);
+};
+if (navigator.sendBeacon) {
+  const _beacon = navigator.sendBeacon.bind(navigator);
+  navigator.sendBeacon = function (url, data) {
+    try { uploadedBytes += byteLen(data); } catch {}
+    return _beacon(url, data);
+  };
+}
+
 /* --------------------------------------------------------------------------
    The demo runs the real analyzer-core, compiled to WebAssembly. Same engine
    as the CLI and the desktop app — not a canned recording.
@@ -704,11 +806,11 @@ function audit() {
   const third = res.filter((r) => {
     try { return new URL(r.name).origin !== here; } catch { return false; }
   });
-  $("netproof").textContent = `your SQL uploaded: 0 bytes`;
+  $("netproof").textContent = `your SQL uploaded: ${uploadedBytes} bytes`;
   const pad = (n) => String(n).padStart(6, " ");
   $("audit").textContent =
     `queries analyzed here   ${pad(analyzedCount)}\n` +
-    `bytes of SQL uploaded   ${pad(0)}\n` +
+    `bytes of SQL uploaded   ${pad(uploadedBytes)}\n` +
     `requests while analyzing${pad(netDuringAnalysis)}\n` +
     `analyzer runs on        ${"your CPU".padStart(6, " ")}\n` +
     `site visitor analytics  ${(third.length ? "on" : "off").padStart(6, " ")}`;

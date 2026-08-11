@@ -66,7 +66,31 @@ struct SelectStmt {
 
 /// Walk the whole token stream and return every single-base-table SELECT we can
 /// confidently model. Anything ambiguous is silently skipped.
+/// Names bound by `WITH <name> AS ( ... )`. A CTE is not a table: you cannot
+/// `CREATE INDEX` on it, and its columns may be computed window values that do
+/// not exist anywhere on disk. Emitting index DDL against one produces a script
+/// that fails to parse — the worst kind of copy-paste advice.
+fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if !(is_word(t, "WITH") || t.text == ",") {
+            continue;
+        }
+        let Some(name) = tokens.get(i + 1) else { continue };
+        if name.kind != TokKind::Word {
+            continue;
+        }
+        let is_cte = tokens.get(i + 2).map(|n| is_word(n, "AS")).unwrap_or(false)
+            && tokens.get(i + 3).map(|n| n.text == "(").unwrap_or(false);
+        if is_cte {
+            names.insert(name.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase());
+        }
+    }
+    names
+}
+
 fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
+    let ctes = cte_names(tokens);
     let mut out = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -87,7 +111,10 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
         }
 
         if let Some(stmt) = parse_one(tokens, select_tok, stmt_end) {
-            out.push(stmt);
+            let short = table_short_name(&stmt.table_ref).to_ascii_lowercase();
+            if !ctes.contains(&short) {
+                out.push(stmt);
+            }
         }
         i = stmt_end + 1;
     }
