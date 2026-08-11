@@ -1,0 +1,6 @@
+{
+  "must_fire": ["locking.dml_without_batching"],
+  "must_not_fire": [],
+  "server_version": 2022,
+  "category": "locking"
+}

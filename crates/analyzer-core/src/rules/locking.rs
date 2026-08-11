@@ -33,14 +33,75 @@ pub fn session_read_uncommitted(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
-/// Does this token indicate a predicate that can match a wide range of rows?
-/// Equality on a key is the overwhelmingly common (and correct) case, so only
-/// range/pattern/null comparisons are treated as batching candidates.
-fn is_wide_predicate_token(t: &Token) -> bool {
-    matches!(t.text, ">" | "<" | ">=" | "<=" | "<>" | "!=" | "!<" | "!>")
-        || is_word(t, "BETWEEN")
-        || is_word(t, "LIKE")
-        || is_word(t, "IS")
+/// How a comparison operator bears on "could this statement touch many rows?"
+///
+/// The tokenizer emits punctuation one byte at a time, so `<>` arrives as a `<`
+/// token followed by a `>` token and `>=` as `>` then `=`. Matching on the text
+/// `"<>"` or `">="` therefore never fired at all — the old predicate check was
+/// partly dead code that treated every `<>` as a range scan. These are resolved
+/// by looking at the adjacent token instead.
+#[derive(PartialEq)]
+enum Cmp {
+    /// `< > <= >= BETWEEN LIKE` — scans a range. A strong bulk signal on its own.
+    Range,
+    /// `<> != !< !> IS` — a negation or null test. Can match most of a table,
+    /// but beside an equality it is almost always a secondary condition on an
+    /// already-identified row (`WHERE OrderId = 42 AND Note IS NOT NULL`).
+    Negation,
+    /// `=` — names a specific value.
+    Equality,
+}
+
+/// Are these two tokens physically adjacent in the source? `<>` is one operator;
+/// `< >` (with a space) is not, and must not be read as one.
+fn adjacent(a: &Token, b: &Token) -> bool {
+    a.end == b.start
+}
+
+fn classify_comparison(tokens: &[Token], p: usize) -> Option<Cmp> {
+    let t = &tokens[p];
+    if is_word(t, "BETWEEN") || is_word(t, "LIKE") {
+        return Some(Cmp::Range);
+    }
+    if is_word(t, "IS") {
+        return Some(Cmp::Negation);
+    }
+    if t.kind != TokKind::Punct {
+        return None;
+    }
+    let next = tokens.get(p + 1).filter(|n| adjacent(t, n));
+    let prev = p
+        .checked_sub(1)
+        .and_then(|k| tokens.get(k))
+        .filter(|pv| adjacent(pv, t));
+    match t.text {
+        "<" => match next.map(|n| n.text) {
+            Some(">") => Some(Cmp::Negation), // <>
+            Some("=") => Some(Cmp::Range),    // <=
+            _ => Some(Cmp::Range),            // <
+        },
+        ">" => {
+            // The `>` of a `<>` was already classified when we saw the `<`.
+            if prev.map(|pv| pv.text == "<").unwrap_or(false) {
+                None
+            } else {
+                Some(Cmp::Range) // > and >=
+            }
+        }
+        "!" => Some(Cmp::Negation), // != !< !>
+        "=" => {
+            // Not the tail of <=, >= or !=.
+            if prev
+                .map(|pv| matches!(pv.text, "<" | ">" | "!"))
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                Some(Cmp::Equality)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Rule 2: UPDATE / DELETE that has a WHERE clause but no TOP (n) batching.
@@ -124,7 +185,8 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         // TOP (n), and the *shape* of the predicate.
         let mut has_where = false;
         let mut has_top_paren = false;
-        let mut wide_predicate = false;
+        let mut range_predicate = false;
+        let mut negation_predicate = false;
         let mut equality_predicate = false;
         let mut depth = 0i32;
         let mut p = j + 1;
@@ -147,10 +209,13 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
                         has_top_paren = true;
                     }
                 }
-            } else if has_where && depth == 0 && tk.kind == TokKind::Punct && tk.text == "=" {
-                equality_predicate = true;
-            } else if has_where && depth == 0 && is_wide_predicate_token(tk) {
-                wide_predicate = true;
+            } else if has_where && depth == 0 {
+                match classify_comparison(tokens, p) {
+                    Some(Cmp::Range) => range_predicate = true,
+                    Some(Cmp::Negation) => negation_predicate = true,
+                    Some(Cmp::Equality) => equality_predicate = true,
+                    None => {}
+                }
             }
             p += 1;
         }
@@ -159,13 +224,14 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         // rows. `WHERE OrderID = 42` is the single most common correct DML
         // statement in the language; telling its author to add TOP (n) is noise
         // that trains people to ignore the rule.
-        // An equality anywhere in the predicate means the author is naming a
-        // specific row (or a specific value), so `WHERE OrderId = 42 AND Note
-        // IS NOT NULL` is not a bulk statement just because it also contains an
-        // `IS`. Requiring a wide predicate *and no equality* is deliberately
-        // conservative: this rule is a prompt, and a prompt that fires on
-        // single-row updates is one people learn to ignore.
-        if has_where && !has_top_paren && wide_predicate && !equality_predicate {
+        // A range predicate is a bulk signal on its own. A bare negation/null
+        // test is only a bulk signal when nothing else narrows the statement —
+        // otherwise `WHERE OrderId = 42 AND Note IS NOT NULL` reads as bulk,
+        // and a prompt that fires on single-row updates is one people learn to
+        // ignore. Suppressing on *any* equality was too blunt in the other
+        // direction: it silenced `WHERE CreatedUtc < @cutoff AND IsArchived = 1`.
+        let bulk_shape = range_predicate || (negation_predicate && !equality_predicate);
+        if has_where && !has_top_paren && bulk_shape {
             out.push(finding(
                 "locking.dml_without_batching",
                 Severity::Info,
