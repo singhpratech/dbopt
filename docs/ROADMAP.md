@@ -15,7 +15,7 @@ behind the same API, UI and report without disturbing the ones already shipping.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
 - AI assistant (local Ollama + cloud providers, fanout) grounded on the static findings.
 - Web "observatory" UI; durable AI + analysis logs.
-- Quality: 173 eval scenarios, self-graded F1 = 1.000 (covering 63 of the 102 token
+- Quality: 180 eval scenarios, self-graded F1 = 1.000 (covering 63 of the 102 token
   rules plus 12 plan-XML/DMV checks; the rest still being backfilled); Rust unit +
   HTTP integration tests; Playwright UI e2e.
 

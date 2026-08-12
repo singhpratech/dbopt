@@ -213,7 +213,12 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
         // statement ends, so `... OUTPUT inserted.Id INTO dbo.Audit (Id)` was
         // read as a scalar UDF call inside a predicate. These keywords all end
         // the predicate region they follow.
-        else if ["GROUP", "ORDER", "WHEN", "THEN", "OUTPUT", "INTO", "VALUES",
+        // WHEN/THEN are deliberately NOT here. They terminate a MERGE's ON
+        // clause, but they are also CASE keywords, and closing the predicate on
+        // them made `WHERE CASE WHEN ... END = 1` — and anything after it —
+        // invisible to this rule. OUTPUT/INTO already close the MERGE case,
+        // which is what the phantom-UDF report was actually about.
+        else if ["GROUP", "ORDER", "OUTPUT", "INTO", "VALUES",
                  "UNION", "EXCEPT", "INTERSECT", "OPTION"]
             .iter()
             .any(|kw| is_word(t, kw))

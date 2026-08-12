@@ -208,6 +208,64 @@ pub(crate) fn is_keyword(t: &Token, kw: &str) -> bool {
         && word_eq_ci(t.text, kw)
 }
 
+/// Index of the previous / next token that is not a comment.
+///
+/// Every look-back in this crate needs these. Indexing raw `i-1` over a stream
+/// that retains comments is how `LEFT /* outer */ JOIN` stopped reading as an
+/// outer join and silenced a critical rule.
+pub(crate) fn prev_significant(tokens: &[Token], i: usize) -> Option<usize> {
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        if tokens[k].kind != TokKind::Comment {
+            return Some(k);
+        }
+    }
+    None
+}
+
+pub(crate) fn next_significant(tokens: &[Token], i: usize) -> Option<usize> {
+    let mut k = i + 1;
+    while k < tokens.len() {
+        if tokens[k].kind != TokKind::Comment {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// `is_keyword`, decided in context rather than on the token alone.
+///
+/// A bare `is_keyword` still says "yes" to the `Merge` in `dbo.Merge` and to the
+/// `Merge` inside `"Merge"` — the tokenizer emits the double quotes as separate
+/// punctuation, so the word arrives undecorated. Both are identifiers the author
+/// named, and reading either as a keyword changes how the statement parses.
+pub(crate) fn is_keyword_at(tokens: &[Token], i: usize, kw: &str) -> bool {
+    if !tokens.get(i).map(|t| is_keyword(t, kw)).unwrap_or(false) {
+        return false;
+    }
+    let qualified = |idx: Option<usize>| {
+        idx.map(|k| tokens[k].text == "." || tokens[k].text == "\"")
+            .unwrap_or(false)
+    };
+    !qualified(prev_significant(tokens, i)) && !qualified(next_significant(tokens, i))
+}
+
+/// Is this `GO` a batch separator rather than an identifier?
+///
+/// `GO` is only a batch terminator when it stands alone on its line. Without
+/// that check, an ordinary alias — `FROM dbo.GeoOrigin AS go` — silently split
+/// the batch and changed the meaning of every batch-scoped decision after it.
+pub(crate) fn is_batch_separator(tokens: &[Token], i: usize) -> bool {
+    if !tokens.get(i).map(|t| is_keyword(t, "GO")).unwrap_or(false) {
+        return false;
+    }
+    let line = tokens[i].line;
+    let alone = |idx: Option<usize>| idx.map(|k| tokens[k].line != line).unwrap_or(true);
+    alone(prev_significant(tokens, i)) && alone(next_significant(tokens, i))
+}
+
 pub(crate) fn finding(rule: &str, sev: Severity, msg: impl Into<String>, loc: Option<Location>, rec: impl Into<Option<String>>) -> Finding {
     Finding {
         rule: RuleId(rule.into()),

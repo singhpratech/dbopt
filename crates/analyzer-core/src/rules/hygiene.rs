@@ -1,4 +1,5 @@
-use super::{finding, is_keyword, is_word, make_loc, next_nonws, RuleCtx};
+use super::{finding, is_batch_separator, is_keyword, is_keyword_at, is_word, make_loc,
+            next_nonws, prev_significant, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -12,7 +13,7 @@ fn is_exists_subquery(tokens: &[Token], i: usize) -> bool {
     // `i-1`/`i-2` meant `EXISTS ( -- why` on one line and `SELECT *` on the
     // next fell straight back into the false positive this guard exists to
     // prevent.
-    let mut back = move |from: usize| -> Option<usize> {
+    let back = move |from: usize| -> Option<usize> {
         let mut k = from;
         while k > 0 {
             k -= 1;
@@ -163,17 +164,23 @@ pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
 /// Statement-starting keywords, used to stop a forward scan when the author
 /// omitted the `;`. Without this, an unterminated UPDATE can "borrow" the
 /// bounding clause of the next statement (or vice versa).
-fn starts_statement(t: &Token) -> bool {
+fn starts_statement(tokens: &[Token], i: usize) -> bool {
     // Deliberately excludes SET, WITH, FROM, TOP, OUTPUT and INTO: all of those
     // appear *inside* a legal UPDATE/DELETE, and treating them as boundaries
     // stops the scan before it ever reaches the WHERE clause.
+    //
+    // Decided with `is_keyword_at`, never `is_word`: a column named `[Select]`
+    // or `[Go]` in a SET list used to end the scan before it reached WHERE, so
+    // a perfectly bounded UPDATE was reported as rewriting every row — a false
+    // positive at the only severity that must never cry wolf.
     [
         "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP", "TRUNCATE",
-        "DECLARE", "EXEC", "EXECUTE", "GO", "WHILE", "COMMIT", "ROLLBACK",
+        "DECLARE", "EXEC", "EXECUTE", "WHILE", "COMMIT", "ROLLBACK",
         "GRANT", "REVOKE", "DENY", "USE",
     ]
     .iter()
-    .any(|kw| is_word(t, kw))
+    .any(|kw| is_keyword_at(tokens, i, kw))
+        || is_batch_separator(tokens, i)
 }
 
 /// Is this DML the action half of a MERGE (`WHEN MATCHED THEN UPDATE SET ...`)?
@@ -182,9 +189,8 @@ fn starts_statement(t: &Token) -> bool {
 /// nothing "unbounded". Reporting it as critical on a textbook upsert is the
 /// fastest possible way to lose a reader's trust.
 fn is_merge_action(tokens: &[Token], i: usize) -> bool {
-    if i.checked_sub(1)
-        .and_then(|k| tokens.get(k))
-        .map(|p| is_word(p, "THEN"))
+    if prev_significant(tokens, i)
+        .map(|k| is_keyword_at(tokens, k, "THEN"))
         .unwrap_or(false)
     {
         return true;
@@ -195,26 +201,42 @@ fn is_merge_action(tokens: &[Token], i: usize) -> bool {
     // vouch for an unrelated UPDATE further down the file. Combined with
     // `is_keyword`, this is what stops a column named `[Merge]` from silencing
     // the only critical-severity rule we have.
+    //
+    // The scan is depth-aware: `MERGE ... USING (SELECT ...) ... THEN UPDATE`
+    // is one statement, and a back-scan that counted the `SELECT` inside the
+    // parentheses as a statement head reported a textbook upsert as unbounded.
     let mut k = i;
+    let mut depth = 0i32;
     while k > 0 {
         k -= 1;
         let t = &tokens[k];
         if t.kind == TokKind::Comment {
             continue;
         }
-        if t.text == ";" || is_keyword(t, "GO") {
+        if t.text == ")" {
+            depth += 1;
+            continue;
+        }
+        if t.text == "(" {
+            depth -= 1;
+            continue;
+        }
+        if depth > 0 {
+            continue;
+        }
+        if t.text == ";" || is_batch_separator(tokens, k) {
             return false;
         }
-        if is_keyword(t, "MERGE") {
+        if is_keyword_at(tokens, k, "MERGE") {
             return true;
         }
         // Any other statement head means this DML opens its own statement.
         // UPDATE/DELETE/INSERT are excluded because they are the legal action
         // half of a MERGE and appear inside one.
-        if starts_statement(t)
+        if starts_statement(tokens, k)
             && !["UPDATE", "DELETE", "INSERT", "MERGE"]
                 .iter()
-                .any(|kw| is_word(t, kw))
+                .any(|kw| is_keyword_at(tokens, k, kw))
         {
             return false;
         }
@@ -229,15 +251,21 @@ fn is_merge_action(tokens: &[Token], i: usize) -> bool {
 /// still rewrites every row of T — the exact statement this rule exists to
 /// catch. Treating any `ON` as a bound made the rule miss it entirely.
 fn join_bounds_target(tokens: &[Token], j: usize) -> bool {
-    for back in 1..=2usize {
-        let Some(k) = j.checked_sub(back) else { break };
-        let t = &tokens[k];
-        if is_keyword(t, "OUTER") {
+    // Walk back over comments and an optional OUTER. `LEFT /* outer */ JOIN`
+    // read as an inner join when this indexed raw offsets.
+    let mut at = j;
+    for _ in 0..3 {
+        let Some(k) = prev_significant(tokens, at) else { return true };
+        if is_keyword(&tokens[k], "OUTER") {
+            at = k;
             continue;
         }
-        return !["LEFT", "RIGHT", "FULL", "CROSS"]
+        // RIGHT JOIN is deliberately absent: it preserves the *right* side, so
+        // its ON clause does filter the left-hand update target. LEFT and FULL
+        // preserve the target side and bound nothing; CROSS has no ON at all.
+        return !["LEFT", "FULL", "CROSS"]
             .iter()
-            .any(|kw| is_keyword(t, kw));
+            .any(|kw| is_keyword(&tokens[k], kw));
     }
     true
 }
@@ -290,7 +318,7 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
                 // made the rule fire on correct code at critical severity.
                 bounded = true;
                 break;
-            } else if depth == 0 && j > i + 1 && starts_statement(tk) {
+            } else if depth == 0 && j > i + 1 && starts_statement(tokens, j) {
                 break;
             }
             j += 1;

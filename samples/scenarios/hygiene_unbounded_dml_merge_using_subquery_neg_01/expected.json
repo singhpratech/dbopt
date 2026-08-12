@@ -1,0 +1,6 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["hygiene.unbounded_dml"],
+  "server_version": 2022,
+  "category": "hygiene"
+}

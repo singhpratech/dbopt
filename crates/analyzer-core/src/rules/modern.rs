@@ -1,4 +1,4 @@
-use super::{finding, is_keyword, is_word, make_loc, RuleCtx};
+use super::{finding, is_batch_separator, is_keyword, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -44,7 +44,7 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     let mut cte_names: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
     let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
-        if is_keyword(t, "GO") { batch += 1; continue; }
+        if is_batch_separator(tokens, i) { batch += 1; continue; }
         if t.kind != TokKind::Word { continue; }
         let is_cte = tokens.get(i + 1).map(|n| is_word(n, "AS")).unwrap_or(false)
             && tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false);
@@ -53,7 +53,7 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     // Heuristic: after FROM / JOIN / UPDATE / INTO, expect schema.Object, not Object alone.
     let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
-        if is_keyword(t, "GO") { batch += 1; continue; }
+        if is_batch_separator(tokens, i) { batch += 1; continue; }
         let triggers = is_word(t, "FROM") || is_word(t, "JOIN") || is_word(t, "UPDATE") || is_word(t, "INTO");
         if !triggers { continue; }
 
@@ -99,10 +99,18 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
                 | "openjson" | "string_split" | "generate_series"
                 | "freetexttable" | "containstable" | "changetable"
         ) { continue; }
+        // A trailing `(` means this is a table-valued function call, not a
+        // table. The advice is the same (qualify it) but calling it a "table
+        // reference" reads as a mistake to anyone who knows their own schema.
+        let kind = if tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false) {
+            "Function"
+        } else {
+            "Table reference"
+        };
         out.push(finding(
             "modern.missing_schema_prefix",
             Severity::Info,
-            format!("Table reference `{}` has no schema qualifier. Resolution falls back to the caller's default schema, which differs per login and breaks plan reuse.", name.text),
+            format!("{kind} `{}` has no schema qualifier. Resolution falls back to the caller's default schema, which differs per login and breaks plan reuse.", name.text),
             Some(make_loc(name)),
             Some("Always qualify with schema (e.g. dbo.Orders). Improves plan cache reuse, prevents per-user resolution surprises, and is friendlier to least-privilege roles.".into()),
         ));

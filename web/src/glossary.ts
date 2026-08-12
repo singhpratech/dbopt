@@ -110,7 +110,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short:
       "dbopt's on-demand pulse poller — you start it, and it samples your SQL Server on a schedule, stores the signals as a time-series, and rolls them into a pain report you read yourself. It captures data and writes a report; you can also set thresholds on the signals it collects and have it POST to a webhook when one is breached. Until it has sampled the server for a while, runtime signals read 'not monitored yet' rather than a falsely-reassuring zero.",
     long:
-      "The Sentinel is a poller you start on demand that periodically samples runtime DMVs (deadlocks, blocking, waits, query regressions), persists them to a local SQLite time-series, and summarises the trend in a pain report. It is on-demand triage — data capture plus a report you read yourself — not a hands-off APM with paging or alerting. The HEALTH grade leans on this history: with no Sentinel data the runtime signals are unknown (shown muted as '— not monitored yet') and the grade is provisional; once a workload accumulates, those signals become measured.",
+      "The Sentinel is a poller you start on demand that periodically samples runtime DMVs (deadlocks, blocking, waits, query regressions), persists them to a local SQLite time-series, and summarises the trend in a pain report. It is on-demand triage — data capture plus a report you read yourself — not a hands-off APM with an escalation service. The HEALTH grade leans on this history: with no Sentinel data the runtime signals are unknown (shown muted as '— not monitored yet') and the grade is provisional; once a workload accumulates, those signals become measured.",
   },
   query_store: {
     term: "Query Store",

@@ -17,7 +17,7 @@
 //   * SELECT *                                               -> skip the INCLUDE-bearing rules
 // When unsure we drop the finding rather than emit noise.
 
-use super::{is_keyword, finding, is_word, make_loc, RuleCtx};
+use super::{finding, is_batch_separator, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{Token, TokKind};
 
@@ -77,7 +77,7 @@ fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<(u32, String)> {
     let mut names = std::collections::HashSet::new();
     let mut batch = 0u32;
     for (i, t) in tokens.iter().enumerate() {
-        if is_keyword(t, "GO") {
+        if is_batch_separator(tokens, i) {
             batch += 1;
             continue;
         }
@@ -103,7 +103,7 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
     let mut i = 0;
     let mut batch = 0u32;
     while i < tokens.len() {
-        if is_keyword(&tokens[i], "GO") { batch += 1; i += 1; continue; }
+        if is_batch_separator(tokens, i) { batch += 1; i += 1; continue; }
         if !is_word(&tokens[i], "SELECT") { i += 1; continue; }
         let select_tok = i;
 
@@ -125,10 +125,13 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
             // System catalog views and DMVs are not yours to index; emitting
             // `CREATE INDEX ON sys.indexes` is DDL nobody can run.
             let schema = stmt.table_ref.to_ascii_lowercase();
+            // Schema-qualified only. A `dm_`-prefix guess also skipped user
+            // tables that merely start with those letters, silently withholding
+            // real advice from them.
             let system_object = schema.starts_with("sys.")
                 || schema.starts_with("[sys].")
                 || schema.starts_with("information_schema.")
-                || short.starts_with("dm_");
+                || schema.starts_with("[information_schema].");
             if !ctes.contains(&(batch, short)) && !system_object {
                 out.push(stmt);
             }

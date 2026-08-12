@@ -1,0 +1,6 @@
+{
+  "must_fire": ["sarg.scalar_udf_in_predicate"],
+  "must_not_fire": [],
+  "server_version": 2022,
+  "category": "sargability"
+}
