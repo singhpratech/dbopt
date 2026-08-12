@@ -13,8 +13,24 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
     let tokens = ctx.tokens;
     let mut in_where = false;
     for (i, t) in tokens.iter().enumerate() {
-        if is_word(t, "WHERE") || is_word(t, "ON") { in_where = true; }
-        else if is_word(t, "GROUP") || is_word(t, "ORDER") || t.text == ";" { in_where = false; }
+        if is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING") {
+            in_where = true;
+        }
+        // The predicate region has to *end*. Previously only GROUP/ORDER/`;`
+        // closed it, so in a long script everything after the first WHERE —
+        // including every later SELECT projection and IF condition — was
+        // treated as a predicate. That produced error-severity reports on
+        // `CASE WHEN LEFT(x,1) = '['` in a column list, where no index exists
+        // to lose.
+        else if ["SELECT", "FROM", "GROUP", "ORDER", "INSERT", "UPDATE", "DELETE",
+                 "VALUES", "SET", "IF", "ELSE", "BEGIN", "END", "UNION", "EXCEPT",
+                 "INTERSECT", "OPTION", "THEN", "GO", "DECLARE", "EXEC", "EXECUTE"]
+            .iter()
+            .any(|kw| is_word(t, kw))
+            || t.text == ";"
+        {
+            in_where = false;
+        }
         if !in_where || t.kind != TokKind::Word { continue; }
         let upper = t.text.to_ascii_uppercase();
         if !NON_SARG_FUNCS.iter().any(|f| *f == upper) { continue; }
@@ -23,10 +39,24 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
             // and look forward for a comparison ('=', '<', '>', 'LIKE') after the matching ')'
             let mut j = i + 2;
             let mut paren = 1i32;
+            let mut wraps_column = false;
             while j < tokens.len() && paren > 0 {
                 if tokens[j].text == "(" { paren += 1; }
                 else if tokens[j].text == ")" { paren -= 1; }
+                else if paren == 1
+                    && tokens[j].kind == TokKind::Word
+                    && !tokens[j].text.starts_with('@')
+                    && !tokens.get(j + 1).map(|n| n.text == "(").unwrap_or(false)
+                {
+                    wraps_column = true;
+                }
                 j += 1;
+            }
+            // `UPPER(@@SERVERNAME) <> UPPER(@ServerName)` compares two variables:
+            // there is no column, no index, and nothing to rewrite. The rule is
+            // about a function applied to a *column*, so require one.
+            if !wraps_column {
+                continue;
             }
             if let Some(cmp) = tokens.get(j) {
                 let is_cmp = matches!(cmp.text, "=" | "<" | ">") || is_word(cmp, "LIKE") || is_word(cmp, "IN");

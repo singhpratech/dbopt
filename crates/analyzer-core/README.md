@@ -78,7 +78,7 @@ Rules are `fn(&RuleCtx) -> Vec<Finding>` registered in a single `REGISTRY` table
 declaring the engines it applies to. See
 [CONTRIBUTING.md](https://github.com/singhpratech/dbopt/blob/main/CONTRIBUTING.md) —
 new rules ship with a positive and a negative scenario in the eval corpus
-(275 scenarios, F1 = 1.000, self-graded). That is the standard going forward, not a
+(282 scenarios, F1 = 1.000, self-graded). That is the standard going forward, not a
 description of the whole registry: every rule id now has one.
 
 ## See also

@@ -270,6 +270,111 @@ fn join_bounds_target(tokens: &[Token], j: usize) -> bool {
     true
 }
 
+
+/// The object a DML statement targets: the token after `UPDATE`, or after
+/// `DELETE [FROM]`.
+fn dml_target<'a>(tokens: &'a [Token<'a>], i: usize, is_delete: bool) -> Option<&'a Token<'a>> {
+    let mut j = prev_next(tokens, i)?;
+    if is_delete && is_word(&tokens[j], "FROM") {
+        j = prev_next(tokens, j)?;
+    }
+    tokens.get(j).filter(|t| t.kind == TokKind::Word)
+}
+
+fn prev_next(tokens: &[Token<'_>], i: usize) -> Option<usize> {
+    let mut k = i + 1;
+    while k < tokens.len() {
+        if tokens[k].kind != TokKind::Comment {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+fn bare_name(t: &Token<'_>) -> String {
+    t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase()
+}
+
+/// Does this statement's FROM clause bind `name` to a table variable or temp
+/// table, or bound the rowset with a TOP?
+///
+/// `UPDATE d SET ... FROM @tmpDatabases d` rewrites every row of a *table
+/// variable* the batch just built — the normal, correct idiom, not a production
+/// table being rewritten. Likewise `FROM (SELECT TOP 1 ...) q` is bounded by the
+/// TOP. Both showed up dozens of times in expert-written production scripts.
+fn from_clause_bounds(tokens: &[Token<'_>], stmt_start: usize, name: &str) -> bool {
+    let mut j = stmt_start;
+    let mut depth = 0i32;
+    let mut in_from = false;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; if depth < 0 { break; } }
+        else if depth == 0 && t.text == ";" { break; }
+        else if depth == 0 && is_word(t, "FROM") { in_from = true; }
+        else if depth == 0 && (is_word(t, "WHERE") || is_word(t, "OPTION")) { break; }
+        else if in_from && is_word(t, "TOP") {
+            // A TOP inside the FROM clause limits the rows the DML can touch.
+            return true;
+        }
+        else if in_from && t.kind == TokKind::Word
+            && (t.text.starts_with('@') || t.text.starts_with('#'))
+        {
+            // `FROM @tv alias` / `FROM #t alias` — is `name` that alias, or the
+            // source itself?
+            if bare_name(t) == name {
+                return true;
+            }
+            let mut k = j + 1;
+            while k < tokens.len() && tokens[k].kind == TokKind::Comment { k += 1; }
+            if tokens.get(k).map(|n| is_word(n, "AS")).unwrap_or(false) { k += 1; }
+            if let Some(alias) = tokens.get(k) {
+                if alias.kind == TokKind::Word && bare_name(alias) == name {
+                    return true;
+                }
+            }
+        }
+        j += 1;
+    }
+    false
+}
+
+/// Is `name` a CTE defined just before this statement whose body carries its
+/// own bound? `WITH q AS (SELECT ... WHERE Selected = 1) UPDATE q SET ...` is
+/// the updatable-CTE idiom: the CTE's predicate is the statement's predicate.
+fn updatable_cte_is_bounded(tokens: &[Token<'_>], i: usize, name: &str) -> bool {
+    // Walk back to a `WITH <name> AS (` (or `, <name> AS (`) before this DML.
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ";" {
+            return false;
+        }
+        if (is_word(t, "WITH") || t.text == ",")
+            && tokens.get(k + 1).map(|n| bare_name(n) == name).unwrap_or(false)
+            && tokens.get(k + 2).map(|n| is_word(n, "AS")).unwrap_or(false)
+            && tokens.get(k + 3).map(|n| n.text == "(").unwrap_or(false)
+        {
+            // Scan the CTE body for a WHERE or TOP.
+            let mut j = k + 4;
+            let mut depth = 1i32;
+            while j < tokens.len() && depth > 0 {
+                let b = &tokens[j];
+                if b.text == "(" { depth += 1; }
+                else if b.text == ")" { depth -= 1; }
+                else if is_word(b, "WHERE") || is_word(b, "TOP") {
+                    return true;
+                }
+                j += 1;
+            }
+            return false;
+        }
+    }
+    false
+}
+
 pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -290,6 +395,25 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
         }
         if is_merge_action(tokens, i) {
             continue;
+        }
+
+        // Measured against 37k lines of expert-written production T-SQL, these
+        // three shapes accounted for nearly every critical-severity report on
+        // code that was entirely correct.
+        if let Some(target) = dml_target(tokens, i, is_delete) {
+            let name = bare_name(target);
+            // A table variable or temp table is session-scoped and holds only
+            // what this batch put in it; clearing or rewriting all of it is the
+            // idiom, not an accident.
+            if name.starts_with('@') || name.starts_with('#') {
+                continue;
+            }
+            if from_clause_bounds(tokens, i + 1, &name) {
+                continue;
+            }
+            if updatable_cte_is_bounded(tokens, i, &name) {
+                continue;
+            }
         }
 
         let mut j = i + 1;

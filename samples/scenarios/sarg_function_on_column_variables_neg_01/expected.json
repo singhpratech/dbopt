@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "sargability",
+  "must_fire": [],
+  "must_not_fire": [
+    "sarg.function_on_column"
+  ],
+  "server_version": 2022
+}

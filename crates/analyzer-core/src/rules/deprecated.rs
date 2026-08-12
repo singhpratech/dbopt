@@ -1,15 +1,41 @@
-use super::{finding, make_loc, RuleCtx};
+use super::{finding, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::TokKind;
 
 pub fn old_join_syntax(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    // The old outer-join operators only ever appeared in a WHERE clause, joining
+    // two column references. `SET @MinutesBack *= -1` is the compound
+    // multiply-assign operator (2008+) and tokenizes identically — reporting it
+    // as a removed join syntax is an error-severity claim about correct,
+    // modern T-SQL.
+    let mut in_where = false;
     for (i, t) in tokens.iter().enumerate() {
+        if is_word(t, "WHERE") || is_word(t, "ON") {
+            in_where = true;
+        } else if is_word(t, "SET")
+            || is_word(t, "SELECT")
+            || is_word(t, "GROUP")
+            || is_word(t, "ORDER")
+            || is_word(t, "GO")
+            || t.text == ";"
+        {
+            in_where = false;
+        }
+        if !in_where {
+            continue;
+        }
         // Detect "*=" or "=*"
         if t.text == "*" {
             let nxt = tokens.get(i + 1);
-            if nxt.map(|n| n.text == "=").unwrap_or(false) {
+            // The left operand must be a column, not a @variable.
+            let lhs_is_var = i
+                .checked_sub(1)
+                .and_then(|k| tokens.get(k))
+                .map(|p| p.text.starts_with('@'))
+                .unwrap_or(false);
+            if nxt.map(|n| n.text == "=").unwrap_or(false) && !lhs_is_var {
                 out.push(finding(
                     "deprecated.outer_join_star_equal",
                     Severity::Error,

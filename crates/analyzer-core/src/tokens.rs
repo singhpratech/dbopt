@@ -20,6 +20,28 @@ pub struct Token<'a> {
     pub col: u32,
 }
 
+/// Newlines inside a token, and how many bytes follow the last one.
+///
+/// Any token that can span lines MUST report this. String literals and
+/// bracketed identifiers previously reported zero newlines, so every finding
+/// after the first multi-line string in a file carried a line number that was
+/// too small — by hundreds of lines in a real script full of message text. In
+/// SARIF that means CI annotates the wrong code, which is worse than not
+/// annotating at all.
+fn span_lines(seg: &[u8]) -> (u32, u32) {
+    let mut nl = 0u32;
+    let mut last = 0u32;
+    for &b in seg {
+        if b == b'\n' {
+            nl += 1;
+            last = 0;
+        } else {
+            last += 1;
+        }
+    }
+    (nl, last)
+}
+
 pub fn tokenize(src: &str) -> Vec<Token<'_>> {
     let mut out = Vec::with_capacity(src.len() / 6);
     let bytes = src.as_bytes();
@@ -74,13 +96,19 @@ pub fn tokenize(src: &str) -> Vec<Token<'_>> {
                     }
                     j += 1;
                 }
-                (TokKind::String, j - i, 0, (j - i) as u32)
+                {
+                    let (nl, last) = span_lines(&bytes[i..j]);
+                    (TokKind::String, j - i, nl, last)
+                }
             }
             b'[' => {
                 let mut j = i + 1;
                 while j < bytes.len() && bytes[j] != b']' { j += 1; }
                 if j < bytes.len() { j += 1; }
-                (TokKind::Word, j - i, 0, (j - i) as u32)
+                {
+                    let (nl, last) = span_lines(&bytes[i..j]);
+                    (TokKind::Word, j - i, nl, last)
+                }
             }
             b if b.is_ascii_alphabetic() || b == b'_' || b == b'@' || b == b'#' => {
                 let mut j = i + 1;

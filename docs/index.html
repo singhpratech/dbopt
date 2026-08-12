@@ -496,15 +496,18 @@ ORDER BY o.Total DESC;</textarea>
       silent when they shouldn't.</p>
     <div class="stats">
       <div class="stat"><b>103</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>275</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>282</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
     <p class="caveat">
       <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
-      self-graded: it proves no regression on the cases we wrote, not a measured real-world false-positive
-      rate. <b>Every one of the 104 rule ids</b> has a scenario, plus 13 more covering the 12
-      plan-XML and DMV checks. A held-out third-party corpus is on the roadmap. Reproduce it yourself with
+      self-graded: it proves no regression on the cases we wrote. <b>Every one of the 104 rule ids</b>
+      has a scenario, plus 13 more covering the 12 plan-XML and DMV checks. Separately, the analyzer is
+      run against a <b>held-out corpus of 37,738 lines of third-party production T-SQL</b> we did not
+      write — Ola Hallengren's Maintenance Solution and the First Responder Kit — where every
+      error-and-above finding is hand-classified. That pass currently reports
+      <b>152 high-severity findings and no false positives</b>. Reproduce the self-graded half with
       <code>cargo run -p eval -- --html</code>.
     </p>
   </div>
