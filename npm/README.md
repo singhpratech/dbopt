@@ -90,7 +90,7 @@ guesses — the analyzer would rather say nothing than say something wrong.
 
 ## Quality
 
-304 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
+312 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
 so that proves *no regression on the cases we wrote*, not a measured real-world
 false-positive rate. Every one of the 104 rule ids has a scenario, plus 13 more for
 the 12 plan-XML and DMV checks.

@@ -496,19 +496,23 @@ ORDER BY o.Total DESC;</textarea>
       silent when they shouldn't.</p>
     <div class="stats">
       <div class="stat"><b>103</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>304</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>312</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
     <p class="caveat">
-      <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
+      <b>What these numbers do and don't prove.</b> The eval corpus is hand-authored, so its F1 is
       self-graded: it proves no regression on the cases we wrote. <b>Every one of the 104 rule ids</b>
-      has a scenario, plus 13 more covering the 12 plan-XML and DMV checks. Separately, the analyzer is
-      run against a <b>held-out corpus of 71,758 lines of third-party production T-SQL</b> we did not
-      write — Ola Hallengren's Maintenance Solution and the First Responder Kit for DBA tooling, plus the AdventureWorks, Northwind, Pubs and Chinook schemas for application code — where every
-      error-and-above finding is hand-classified. That pass currently reports
-      <b>161 high-severity findings and no false positives</b>. Reproduce the self-graded half with
-      <code>cargo run -p eval -- --html</code>.
+      has a scenario, plus 13 more covering the 12 plan-XML and DMV checks. Two further measures run
+      against <b>71,758 lines of third-party production T-SQL we did not write</b> — DBA tooling and
+      application schemas, which fail differently. For false positives, every error-and-above finding
+      is hand-classified: <b>143 high-severity findings</b>. For false negatives — which no corpus of
+      real code can measure, since you cannot count what a linter failed to say — defects whose rule
+      is known by construction are planted into that same code behind hostile preceding context:
+      <b>4,050 injected, recall 1.000</b>. Treat both as our own classification of our own tool: an
+      independent review disputed 17 of an earlier run's 161 findings, all since fixed. Reproduce with
+      <code>cargo run -p eval -- --html</code>, <code>tools/heldout-corpus.sh</code> and
+      <code>tools/seeded-defects.py</code>.
     </p>
   </div>
 </section>

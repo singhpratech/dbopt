@@ -11,6 +11,33 @@ const NON_SARG_FUNCS: &[&str] = &[
 
 /// Type names and datepart keywords, which occupy argument positions but are
 /// never columns.
+/// Is the token at `arg` a type/datepart *in a position where one belongs*?
+/// `fname` is the index of the function name token.
+fn is_type_or_datepart_in_position(tokens: &[Token<'_>], fname: usize, arg: usize) -> bool {
+    if !is_type_or_datepart(&tokens[arg]) {
+        return false;
+    }
+    let f = tokens[fname].text.to_ascii_uppercase();
+    // `CAST(expr AS type)` — the type follows AS.
+    let after_as = arg
+        .checked_sub(1)
+        .and_then(|k| tokens.get(k))
+        .map(|p| is_word(p, "AS"))
+        .unwrap_or(false);
+    if matches!(f.as_str(), "CAST" | "TRY_CAST") {
+        return after_as;
+    }
+    // `CONVERT(type, expr)` / `DATEDIFF(datepart, a, b)` — first argument only.
+    if matches!(
+        f.as_str(),
+        "CONVERT" | "TRY_CONVERT" | "DATEDIFF" | "DATEDIFF_BIG" | "DATEPART"
+            | "DATENAME" | "DATEADD" | "DATETRUNC"
+    ) {
+        return arg == fname + 2;
+    }
+    false
+}
+
 fn is_type_or_datepart(t: &Token<'_>) -> bool {
     const WORDS: &[&str] = &[
         // types
@@ -32,11 +59,21 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
     let tokens = ctx.tokens;
     let mut in_where = false;
     let mut pred_depth = 0i32;
+    // The depth at which the current predicate region opened. A WHERE inside a
+    // subquery ends when that subquery's parens close; without this the region
+    // latched on and every later projection counted as a predicate, which is
+    // the projection false positive this rule had already been fixed for once.
+    let mut where_depth = 0i32;
     for (i, t) in tokens.iter().enumerate() {
         if t.text == "(" { pred_depth += 1; }
-        else if t.text == ")" { pred_depth -= 1; if pred_depth < 0 { pred_depth = 0; } }
+        else if t.text == ")" {
+            pred_depth -= 1;
+            if pred_depth < 0 { pred_depth = 0; }
+            if in_where && pred_depth < where_depth { in_where = false; }
+        }
         if is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING") {
             in_where = true;
+            where_depth = pred_depth;
         }
         // The predicate region has to *end*. Previously only GROUP/ORDER/`;`
         // closed it, so in a long script everything after the first WHERE —
@@ -47,7 +84,7 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
         // Closing must happen at statement level only. A nested `SELECT` inside
         // `WHERE id IN (SELECT …)`, or the `END` of a `CASE`, previously closed
         // the region and hid every non-SARGable predicate after it.
-        else if pred_depth == 0
+        else if pred_depth <= where_depth
             && (["SELECT", "FROM", "GROUP", "ORDER", "INSERT", "UPDATE", "DELETE",
                  "VALUES", "SET", "UNION", "EXCEPT", "INTERSECT", "OPTION", "GO",
                  "DECLARE", "EXEC", "EXECUTE"]
@@ -74,17 +111,15 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
                     && !tokens[j].text.starts_with('@')
                     && !tokens.get(j + 1).map(|n| n.text == "(").unwrap_or(false)
                     && !is_word(&tokens[j], "AS")
-                    // The operand of a CAST is a *type*, and DATEDIFF/DATEPART
-                    // take a datepart keyword. Counting those as columns let
-                    // `CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) LIKE …`
-                    // and `DATEDIFF(MM, @a, GETDATE()) > 6` through — both
-                    // wrap no column at all.
-                    && !is_type_or_datepart(&tokens[j])
-                    && !j
-                        .checked_sub(1)
-                        .and_then(|k| tokens.get(k))
-                        .map(|p| is_word(p, "AS"))
-                        .unwrap_or(false)
+                    // A type name or datepart keyword is only *not a column* in
+                    // the specific argument slot where it is a type or a
+                    // datepart: after `AS` in a CAST, or first argument of
+                    // CONVERT/DATEDIFF/DATEPART/DATENAME/DATEADD. Applying that
+                    // exclusion to every argument of every function made the
+                    // rule blind to columns named `month`, `date`, `text`,
+                    // `max`, `money` — some of the most common names in real
+                    // schemas — which is a silent miss, the worst kind.
+                    && !is_type_or_datepart_in_position(tokens, i, j)
                 {
                     wraps_column = true;
                 }

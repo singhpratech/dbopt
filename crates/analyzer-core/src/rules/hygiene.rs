@@ -53,8 +53,8 @@ pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
             let mut at = i;
             loop {
                 let Some((k, n)) = next_nonws(ctx.tokens, at) else { break };
-                if is_word(n, "DISTINCT") || is_word(n, "ALL") || is_word(n, "PERCENT")
-                    || is_word(n, "TIES")
+                if is_keyword_at(ctx.tokens, k, "DISTINCT") || is_keyword_at(ctx.tokens, k, "ALL")
+                    || is_keyword_at(ctx.tokens, k, "PERCENT") || is_keyword_at(ctx.tokens, k, "TIES")
                 {
                     at = k;
                     continue;
@@ -67,7 +67,7 @@ pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
                     at = k;
                     continue;
                 }
-                if is_word(n, "TOP") {
+                if is_keyword_at(ctx.tokens, k, "TOP") {
                     at = k;
                     // step over `(n)` or a bare number, plus PERCENT/WITH TIES
                     if let Some((p, pt)) = next_nonws(ctx.tokens, at) {
@@ -162,7 +162,7 @@ pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
-        if !is_word(t, "TOP") { continue; }
+        if !is_keyword_at(tokens, i, "TOP") { continue; }
         // `DELETE TOP (5000) ... WHERE ...` in a loop is the batching pattern
         // `locking.dml_without_batching` tells the reader to write, and T-SQL
         // does not even allow ORDER BY on DELETE/UPDATE/INSERT. Warning here
@@ -377,7 +377,7 @@ fn derived_table_bounds_target(tokens: &[Token<'_>], open: usize, name: &str) ->
         let t = &tokens[j];
         if t.text == "(" { depth += 1; }
         else if t.text == ")" { depth -= 1; }
-        else if depth == 1 && is_word(t, "TOP") { has_top = true; }
+        else if depth == 1 && is_keyword_at(tokens, j, "TOP") { has_top = true; }
         j += 1;
     }
     if !has_top {
@@ -424,7 +424,7 @@ fn from_clause_bounds(tokens: &[Token<'_>], stmt_start: usize, name: &str) -> bo
         else if depth == 0 && j > stmt_start && is_dml_boundary(tokens, j) { break; }
         else if depth == 0 && is_word(t, "FROM") { in_from = true; }
         else if depth == 0 && (is_word(t, "WHERE") || is_word(t, "OPTION")) { break; }
-        else if depth == 0 && is_word(t, "TOP") {
+        else if depth == 0 && is_keyword_at(tokens, j, "TOP") {
             // `UPDATE TOP (n) …` / `DELETE TOP (n) FROM …`. This appears before
             // the FROM, so it must not be gated on having seen one.
             return true;
@@ -497,6 +497,54 @@ fn updatable_cte_is_bounded(tokens: &[Token<'_>], i: usize, name: &str) -> bool 
 }
 
 
+
+
+/// Is this `ON` part of a `REFERENCES … ON DELETE/UPDATE <action>` clause?
+///
+/// Without this, a *table* named `Cascade` satisfied the referential-action
+/// test — `SET NOCOUNT ON` then `UPDATE Cascade SET …` produced nothing.
+fn in_referential_clause(tokens: &[Token<'_>], on_idx: usize) -> bool {
+    let mut k = on_idx;
+    let mut steps = 0;
+    while k > 0 && steps < 40 {
+        k -= 1;
+        steps += 1;
+        let t = &tokens[k];
+        if t.text == ";" || is_batch_separator(tokens, k) {
+            return false;
+        }
+        if is_keyword_at(tokens, k, "REFERENCES") {
+            return true;
+        }
+        if is_keyword_at(tokens, k, "FOREIGN")
+            && tokens.get(k + 1).map(|n| is_word(n, "KEY")).unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Are we inside a `CREATE`/`ALTER TRIGGER` header — i.e. before the body's
+/// `AS`? Trigger event keywords only mean "event" there.
+fn in_trigger_header(tokens: &[Token<'_>], i: usize) -> bool {
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ";" || is_batch_separator(tokens, k) {
+            return false;
+        }
+        if is_keyword_at(tokens, k, "TRIGGER")
+            && k > 0
+            && (is_word(&tokens[k - 1], "CREATE") || is_word(&tokens[k - 1], "ALTER"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Does this UPDATE/DELETE token spell a keyword that is not a DML statement?
 ///
 ///   * `... REFERENCES dbo.U (y) ON DELETE CASCADE` — a referential action.
@@ -519,7 +567,7 @@ fn is_not_dml_use(tokens: &[Token<'_>], i: usize) -> bool {
     // identified by what FOLLOWS it, never by the bare `ON`. Treating any
     // preceding `ON` as proof silenced the only critical rule after
     // `SET NOCOUNT ON`, which is how almost every production script opens.
-    if is_word(prev, "ON") {
+    if is_keyword_at(tokens, p, "ON") && in_referential_clause(tokens, p) {
         let Some(n) = next_significant(tokens, i) else { return false };
         let action = is_word(&tokens[n], "CASCADE")
             || (is_word(&tokens[n], "NO")
@@ -533,11 +581,15 @@ fn is_not_dml_use(tokens: &[Token<'_>], i: usize) -> bool {
         return action;
     }
     // Trigger event lists: AFTER / FOR / OF (from INSTEAD OF), and the comma in
-    // `AFTER INSERT, UPDATE`.
-    if ["AFTER", "FOR", "OF"].iter().any(|kw| is_word(prev, kw)) {
+    // `AFTER INSERT, UPDATE`. Only meaningful inside a trigger definition —
+    // otherwise an ordinary alias named `After` silenced the critical rule for
+    // the statement that followed it.
+    if ["AFTER", "FOR", "OF"].iter().any(|kw| is_keyword_at(tokens, p, kw))
+        && in_trigger_header(tokens, i)
+    {
         return true;
     }
-    if prev.text == "," {
+    if prev.text == "," && in_trigger_header(tokens, i) {
         if let Some(q) = prev_significant(tokens, p) {
             // `AFTER INSERT, UPDATE` — walk back over the event list.
             let mut k = q;

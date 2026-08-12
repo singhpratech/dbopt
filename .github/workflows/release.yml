@@ -351,6 +351,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Build provenance is signed with a short-lived certificate minted from
+      # this workflow's OIDC identity, so it needs id-token + attestations.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
@@ -375,6 +379,25 @@ jobs:
             exit 1
           fi
           echo "All required release assets present."
+      # Cryptographic build provenance for every published artifact.
+      #
+      # Authenticode and Apple notarization above answer "who signed this?" and
+      # both need a paid certificate tied to a legal identity, so they are gated
+      # on secrets and skipped when unconfigured. Provenance answers a different
+      # and, for an open-source tool, more useful question: "was this exact file
+      # built by this workflow, from this commit, without anyone touching it in
+      # between?" It is keyless — signed against the workflow's OIDC identity
+      # and recorded in a public transparency log — so it works with no secrets
+      # at all, and cannot be forged by someone who merely uploads a file to the
+      # release page.
+      #
+      # Anyone can check a download before running it:
+      #   gh attestation verify dbopt-linux-x86_64.tar.gz --repo singhpratech/dbopt
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'out/*'
+
       - name: gh release
         uses: softprops/action-gh-release@v2
         with:

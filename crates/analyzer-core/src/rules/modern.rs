@@ -1,4 +1,4 @@
-use super::{finding, is_batch_separator, is_keyword, is_word, make_loc, RuleCtx};
+use super::{finding, is_batch_separator, is_keyword, is_keyword_at, is_word, make_loc, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -75,7 +75,10 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
         if is_word(t, "FROM") {
             let mut k = i;
             let mut steps = 0;
-            while k > 0 && steps < 4 {
+            // `CREATE TYPE dbo.PhoneNumber FROM varchar(20)` puts TYPE five
+            // tokens back, not four — the qualified form is exactly what this
+            // rule's own recommendation tells people to write.
+            while k > 0 && steps < 7 {
                 k -= 1;
                 steps += 1;
                 if is_word(&tokens[k], "TYPE")
@@ -85,7 +88,7 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
                     break;
                 }
             }
-            if steps < 4
+            if steps < 7
                 && is_word(&tokens[k], "TYPE")
                 && k > 0
                 && (is_word(&tokens[k - 1], "CREATE") || is_word(&tokens[k - 1], "ALTER"))
@@ -107,6 +110,21 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
         // schema-qualified. Advice you cannot act on is worse than silence.
         if is_word(t, "UPDATE") && update_has_from_clause(tokens, i) { continue; }
 
+        // `ON UPDATE CASCADE`, `UPDATE TOP (@n) dbo.T` and a trigger's event
+        // list all put a keyword where a table name would go.
+        if is_word(t, "UPDATE") || is_word(t, "DELETE") {
+            if let Some(n) = tokens.get(i + 1) {
+                if ["CASCADE", "TOP", "SET", "NO", "STATISTICS", "AS", "ON"]
+                    .iter()
+                    .any(|kw| is_word(n, kw))
+                {
+                    continue;
+                }
+            }
+            if i > 0 && is_keyword_at(tokens, i - 1, "ON") {
+                continue;
+            }
+        }
         let Some(name) = tokens.get(i + 1) else { continue };
         if name.kind != TokKind::Word { continue; }
         // Skip if it's a subquery, table variable, temp table, or CTE-y thing

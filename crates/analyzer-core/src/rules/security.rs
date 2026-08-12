@@ -53,6 +53,29 @@ fn string_inner(t: &Token<'_>) -> String {
 /// token (EXEC xp_cmdshell '…', sp_configure 'xp_cmdshell', or a bare call),
 /// because every one of those is worth a human look. Comments/strings can't
 /// match (they are not Word tokens).
+
+/// Is this string literal the first argument of `sp_configure` — i.e. the
+/// statement is *setting* the option, not reading it?
+fn string_is_sp_configure_subject(tokens: &[Token<'_>], lit: &Token<'_>) -> bool {
+    let Some(idx) = tokens.iter().position(|t| t.start == lit.start && t.kind == lit.kind) else {
+        return false;
+    };
+    let mut k = idx;
+    let mut steps = 0;
+    while k > 0 && steps < 6 {
+        k -= 1;
+        steps += 1;
+        let t = &tokens[k];
+        if t.text == ";" {
+            return false;
+        }
+        if t.kind == TokKind::Word && bare(t).eq_ignore_ascii_case("sp_configure") {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn xp_cmdshell(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for t in ctx.tokens {
@@ -62,7 +85,17 @@ pub fn xp_cmdshell(ctx: &RuleCtx) -> Vec<Finding> {
         // feature on was the one form this rule could not see.
         let names_it = match t.kind {
             TokKind::Word => bare(t).eq_ignore_ascii_case("xp_cmdshell"),
-            TokKind::String => string_inner(t).eq_ignore_ascii_case("xp_cmdshell"),
+            // A string literal only counts when it is the *subject of a
+            // configuration change*. Code that reads `WHERE [name] =
+            // 'xp_cmdshell'` from sys.configurations, or passes the name to
+            // fn_my_permissions, is checking whether the feature is on — that
+            // is the opposite of enabling it, and reporting it as a critical
+            // remote-code-execution finding is a false positive on exactly the
+            // scripts a security-conscious DBA writes.
+            TokKind::String => {
+                string_inner(t).eq_ignore_ascii_case("xp_cmdshell")
+                    && string_is_sp_configure_subject(ctx.tokens, t)
+            }
             _ => false,
         };
         if !names_it {
