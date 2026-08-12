@@ -1,6 +1,12 @@
 {
-  "must_fire": ["modern.string_agg_replaces_for_xml"],
+  "also_fires": [
+    "antipattern.correlated_scalar_subquery_in_select",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "modern",
+  "must_fire": [
+    "modern.string_agg_replaces_for_xml"
+  ],
   "must_not_fire": [],
-  "server_version": 2022,
-  "category": "modern"
+  "server_version": 2022
 }

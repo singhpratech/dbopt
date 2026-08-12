@@ -1,6 +1,13 @@
 {
-  "must_fire": ["plan.optimize_for_unknown"],
-  "must_not_fire": ["plan.option_recompile_overuse"],
-  "server_version": 2022,
-  "category": "plan"
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "plan",
+  "must_fire": [
+    "plan.optimize_for_unknown"
+  ],
+  "must_not_fire": [
+    "plan.option_recompile_overuse"
+  ],
+  "server_version": 2022
 }

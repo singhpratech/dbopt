@@ -1,6 +1,11 @@
 {
-  "must_fire": ["deprecated.lob_legacy_types"],
+  "also_fires": [
+    "ddl.nullable_columns_should_be_explicit"
+  ],
+  "category": "deprecated",
+  "must_fire": [
+    "deprecated.lob_legacy_types"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "deprecated"
+  "server_version": 2025
 }

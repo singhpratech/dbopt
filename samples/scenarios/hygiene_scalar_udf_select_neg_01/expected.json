@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_columnstore_opportunity"
+  ],
+  "category": "hygiene",
   "must_fire": [],
-  "must_not_fire": ["hygiene.scalar_udf_in_select"],
-  "server_version": 2025,
-  "category": "hygiene"
+  "must_not_fire": [
+    "hygiene.scalar_udf_in_select"
+  ],
+  "server_version": 2025
 }

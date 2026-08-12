@@ -868,12 +868,54 @@ fn build_create_index_as(
 /// Single-table SELECT with WHERE equality / range predicates we can read →
 /// emit a concrete CREATE NONCLUSTERED INDEX (equality keys first, one trailing
 /// range key) with an INCLUDE list covering the projection.
+/// Does this lone equality column look like the table's identity — i.e. the
+/// column the clustered primary key is almost certainly already on?
+///
+/// `WHERE OrderId = @id` on `dbo.Orders` does not need a new index; it needs the
+/// primary key that is already there. Recommending one is advice against an
+/// index that exists, and it is the single largest source of noise in this rule:
+/// every CRUD query in a codebase filters on its own key.
+fn looks_like_primary_key(table: &str, col: &str) -> bool {
+    let col = col.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    if col == "id" {
+        return true;
+    }
+    let table = table.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    // Orders -> orderid / order_id, and the singular form (Orders -> orderid).
+    let singular = table.strip_suffix('s').unwrap_or(&table);
+    [
+        format!("{table}id"),
+        format!("{table}_id"),
+        format!("{singular}id"),
+        format!("{singular}_id"),
+    ]
+    .iter()
+    .any(|c| *c == col)
+}
+
 pub fn missing_index_from_predicate(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let declared = declared_indexes(ctx.tokens);
+    // One recommendation per (table, key) per file. A file with twenty queries
+    // filtering on CustomerId should produce one index to create, not twenty
+    // copies of the same DDL.
+    let mut emitted: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for stmt in parse_single_table_selects(ctx.tokens) {
         // Need at least one seekable predicate column to recommend a key.
         if stmt.eq_cols.is_empty() && stmt.range_cols.is_empty() { continue; }
+
+        // Skip the "you filtered on your own primary key" case: a single
+        // equality, no range, and no ORDER BY that a different key would help.
+        if stmt.eq_cols.len() == 1
+            && stmt.range_cols.is_empty()
+            && stmt.order_cols.is_empty()
+            && looks_like_primary_key(
+                &table_short_name(&stmt.table_ref),
+                &stmt.eq_cols[0].name,
+            )
+        {
+            continue;
+        }
         // The message asserts no matching index is declared in this batch, so
         // check before saying it. A declared index leading with the same column
         // already provides the seek; recommending a duplicate is noise.
@@ -904,6 +946,18 @@ pub fn missing_index_from_predicate(ctx: &RuleCtx) -> Vec<Finding> {
         let include: Vec<String> = if stmt.select_star { Vec::new() } else { stmt.select_cols.clone() };
 
         let ddl = build_create_index(&stmt, &include);
+
+        // Dedupe on the key we are actually proposing.
+        let key_sig: String = stmt
+            .eq_cols
+            .iter()
+            .chain(stmt.range_cols.iter().take(1))
+            .map(|c| c.name.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(",");
+        if !emitted.insert((table_short_name(&stmt.table_ref).to_ascii_lowercase(), key_sig)) {
+            continue;
+        }
 
         let key_desc = {
             let mut parts: Vec<String> = stmt.eq_cols.iter().map(|c| format!("{} (=)", c.name)).collect();

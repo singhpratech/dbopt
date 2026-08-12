@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "tran.begin_without_try_catch",
+    "tran.missing_xact_abort"
+  ],
+  "category": "hygiene",
   "must_fire": [],
-  "must_not_fire": ["hygiene.merge_statement_for_upsert"],
-  "server_version": 2025,
-  "category": "hygiene"
+  "must_not_fire": [
+    "hygiene.merge_statement_for_upsert"
+  ],
+  "server_version": 2025
 }

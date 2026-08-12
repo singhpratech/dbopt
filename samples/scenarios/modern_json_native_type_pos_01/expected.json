@@ -1,6 +1,12 @@
 {
-  "must_fire": ["modern.json_native_type_opportunity"],
+  "also_fires": [
+    "ddl.varchar_max_overuse",
+    "hygiene.heap_table"
+  ],
+  "category": "modern",
+  "must_fire": [
+    "modern.json_native_type_opportunity"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "modern"
+  "server_version": 2025
 }

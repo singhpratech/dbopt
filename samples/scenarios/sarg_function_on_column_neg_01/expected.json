@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "index.missing_index_from_predicate",
+    "stats.ascending_key_hotspot"
+  ],
+  "category": "sargability",
   "must_fire": [],
-  "must_not_fire": ["sarg.function_on_column"],
-  "server_version": 2025,
-  "category": "sargability"
+  "must_not_fire": [
+    "sarg.function_on_column"
+  ],
+  "server_version": 2025
 }

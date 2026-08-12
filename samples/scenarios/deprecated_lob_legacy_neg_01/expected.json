@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "ddl.nullable_columns_should_be_explicit",
+    "ddl.varchar_max_overuse"
+  ],
+  "category": "deprecated",
   "must_fire": [],
-  "must_not_fire": ["deprecated.lob_legacy_types"],
-  "server_version": 2025,
-  "category": "deprecated"
+  "must_not_fire": [
+    "deprecated.lob_legacy_types"
+  ],
+  "server_version": 2025
 }

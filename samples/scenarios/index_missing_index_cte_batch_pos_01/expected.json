@@ -1,5 +1,7 @@
 {
-  "must_fire": ["index.missing_index_from_predicate"],
+  "must_fire": [
+    "index.missing_index_from_predicate@8"
+  ],
   "must_not_fire": [],
   "server_version": 2022,
   "category": "index"

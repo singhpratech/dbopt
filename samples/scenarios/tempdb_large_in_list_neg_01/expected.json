@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "tempdb",
   "must_fire": [],
-  "must_not_fire": ["tempdb.large_in_clause_constant_list"],
-  "server_version": 2025,
-  "category": "tempdb"
+  "must_not_fire": [
+    "tempdb.large_in_clause_constant_list"
+  ],
+  "server_version": 2025
 }

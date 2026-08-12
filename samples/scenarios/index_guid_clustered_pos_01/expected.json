@@ -1,6 +1,11 @@
 {
-  "must_fire": ["index.guid_clustered_key"],
+  "also_fires": [
+    "ddl.varchar_max_overuse"
+  ],
+  "category": "indexing",
+  "must_fire": [
+    "index.guid_clustered_key"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "indexing"
+  "server_version": 2025
 }

@@ -1,6 +1,11 @@
 {
-  "must_fire": ["plan.merge_join_hint_pinned"],
+  "also_fires": [
+    "stats.ascending_key_hotspot"
+  ],
+  "category": "iqp",
+  "must_fire": [
+    "plan.merge_join_hint_pinned"
+  ],
   "must_not_fire": [],
-  "server_version": 2022,
-  "category": "iqp"
+  "server_version": 2022
 }

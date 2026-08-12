@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "hygiene.merge_statement_for_upsert"
+  ],
+  "category": "hygiene",
   "must_fire": [],
-  "must_not_fire": ["hygiene.unbounded_dml", "modern.missing_schema_prefix"],
-  "server_version": 2022,
-  "category": "hygiene"
+  "must_not_fire": [
+    "hygiene.unbounded_dml",
+    "modern.missing_schema_prefix"
+  ],
+  "server_version": 2022
 }

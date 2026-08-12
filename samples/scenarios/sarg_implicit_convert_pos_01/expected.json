@@ -1,6 +1,12 @@
 {
-  "must_fire": ["sarg.implicit_convert_unicode"],
+  "also_fires": [
+    "hygiene.select_star",
+    "index.missing_index_from_predicate"
+  ],
+  "category": "sargability",
+  "must_fire": [
+    "sarg.implicit_convert_unicode"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "sargability"
+  "server_version": 2025
 }

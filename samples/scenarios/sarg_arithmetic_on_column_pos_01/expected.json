@@ -1,6 +1,11 @@
 {
-  "must_fire": ["sarg.arithmetic_on_column"],
+  "also_fires": [
+    "hygiene.select_star"
+  ],
+  "category": "sargability",
+  "must_fire": [
+    "sarg.arithmetic_on_column"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "sargability"
+  "server_version": 2025
 }

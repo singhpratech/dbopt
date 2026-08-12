@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "modern.sp_executesql_optimized_2025"
+  ],
+  "category": "modern",
   "must_fire": [],
-  "must_not_fire": ["modern.exec_string_concat"],
-  "server_version": 2025,
-  "category": "modern"
+  "must_not_fire": [
+    "modern.exec_string_concat"
+  ],
+  "server_version": 2025
 }

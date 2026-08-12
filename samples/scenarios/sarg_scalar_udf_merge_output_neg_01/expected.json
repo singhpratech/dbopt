@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "hygiene.merge_statement_for_upsert"
+  ],
+  "category": "sargability",
   "must_fire": [],
-  "must_not_fire": ["sarg.scalar_udf_in_predicate"],
-  "server_version": 2022,
-  "category": "sargability"
+  "must_not_fire": [
+    "sarg.scalar_udf_in_predicate"
+  ],
+  "server_version": 2022
 }

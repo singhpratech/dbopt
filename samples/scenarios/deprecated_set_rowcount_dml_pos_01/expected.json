@@ -1,6 +1,11 @@
 {
-  "must_fire": ["deprecated.set_rowcount_dml"],
+  "also_fires": [
+    "locking.dml_without_batching"
+  ],
+  "category": "deprecated",
+  "must_fire": [
+    "deprecated.set_rowcount_dml"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "deprecated"
+  "server_version": 2025
 }

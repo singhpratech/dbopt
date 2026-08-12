@@ -1,6 +1,11 @@
 {
-  "must_fire": ["plan.table_variable_large"],
+  "also_fires": [
+    "stats.ascending_key_hotspot"
+  ],
+  "category": "tempdb",
+  "must_fire": [
+    "plan.table_variable_large"
+  ],
   "must_not_fire": [],
-  "server_version": 2017,
-  "category": "tempdb"
+  "server_version": 2017
 }

@@ -1,6 +1,11 @@
 {
-  "must_fire": ["hygiene.unbounded_dml"],
+  "also_fires": [
+    "hygiene.merge_statement_for_upsert"
+  ],
+  "category": "hygiene",
+  "must_fire": [
+    "hygiene.unbounded_dml"
+  ],
   "must_not_fire": [],
-  "server_version": 2022,
-  "category": "hygiene"
+  "server_version": 2022
 }

@@ -1,6 +1,11 @@
 {
-  "must_fire": ["plan.scalar_udf_in_computed_column"],
+  "also_fires": [
+    "hygiene.heap_table"
+  ],
+  "category": "plan",
+  "must_fire": [
+    "plan.scalar_udf_in_computed_column"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "plan"
+  "server_version": 2025
 }

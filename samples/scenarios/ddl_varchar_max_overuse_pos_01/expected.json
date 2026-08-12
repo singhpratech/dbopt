@@ -1,6 +1,12 @@
 {
-  "must_fire": ["ddl.varchar_max_overuse"],
+  "also_fires": [
+    "ddl.nullable_columns_should_be_explicit",
+    "hygiene.heap_table"
+  ],
+  "category": "indexing",
+  "must_fire": [
+    "ddl.varchar_max_overuse"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "indexing"
+  "server_version": 2025
 }

@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_columnstore_opportunity"
+  ],
+  "category": "modern",
   "must_fire": [],
-  "must_not_fire": ["modern.date_bucket_replaces_floor_datediff"],
-  "server_version": 2017,
-  "category": "modern"
+  "must_not_fire": [
+    "modern.date_bucket_replaces_floor_datediff"
+  ],
+  "server_version": 2017
 }

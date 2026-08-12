@@ -1,6 +1,14 @@
 {
-  "must_fire": ["stats.update_statistics_fullscan_on_huge_table"],
-  "must_not_fire": ["stats.auto_create_stats_off", "stats.auto_update_stats_off"],
-  "server_version": 2025,
-  "category": "stats"
+  "also_fires": [
+    "modern.missing_schema_prefix"
+  ],
+  "category": "stats",
+  "must_fire": [
+    "stats.update_statistics_fullscan_on_huge_table"
+  ],
+  "must_not_fire": [
+    "stats.auto_create_stats_off",
+    "stats.auto_update_stats_off"
+  ],
+  "server_version": 2025
 }

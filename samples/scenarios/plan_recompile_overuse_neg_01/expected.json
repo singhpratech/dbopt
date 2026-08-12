@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "plan",
   "must_fire": [],
-  "must_not_fire": ["plan.option_recompile_overuse"],
-  "server_version": 2019,
-  "category": "plan"
+  "must_not_fire": [
+    "plan.option_recompile_overuse"
+  ],
+  "server_version": 2019
 }

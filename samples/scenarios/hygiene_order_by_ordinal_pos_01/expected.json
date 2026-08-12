@@ -1,6 +1,11 @@
 {
-  "must_fire": ["hygiene.order_by_ordinal"],
+  "also_fires": [
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "hygiene",
+  "must_fire": [
+    "hygiene.order_by_ordinal"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "hygiene"
+  "server_version": 2025
 }

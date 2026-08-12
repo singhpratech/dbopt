@@ -1,6 +1,11 @@
 {
-  "must_fire": ["ddl.fillfactor_default_zero_on_random_inserts"],
+  "also_fires": [
+    "index.guid_clustered_key"
+  ],
+  "category": "ddl",
+  "must_fire": [
+    "ddl.fillfactor_default_zero_on_random_inserts"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "ddl"
+  "server_version": 2025
 }

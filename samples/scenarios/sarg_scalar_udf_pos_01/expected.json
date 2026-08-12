@@ -1,6 +1,11 @@
 {
-  "must_fire": ["sarg.scalar_udf_in_predicate"],
+  "also_fires": [
+    "hygiene.select_star"
+  ],
+  "category": "sargability",
+  "must_fire": [
+    "sarg.scalar_udf_in_predicate"
+  ],
   "must_not_fire": [],
-  "server_version": 2014,
-  "category": "sargability"
+  "server_version": 2014
 }

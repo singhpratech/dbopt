@@ -13,10 +13,22 @@ use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize, Default)]
 struct Expected {
+    /// Rules that must fire. An entry may carry a line assertion — `"rule.id@7"`
+    /// — which is what stops a guard from being satisfied by the same rule
+    /// firing somewhere else in the file for an unrelated reason.
     #[serde(default)]
     must_fire: Vec<String>,
     #[serde(default)]
     must_not_fire: Vec<String>,
+    /// Rules that are *allowed* to fire here without being required to.
+    ///
+    /// This is what makes the corpus closed-world. Anything a scenario emits
+    /// that is not in `must_fire` or here counts as a false positive, so a new
+    /// rule (or a newly-broadened one) that starts firing across the corpus
+    /// shows up as a measured precision drop instead of passing unnoticed.
+    /// Populate with `cargo run -p eval -- --bless` and read the diff.
+    #[serde(default)]
+    also_fires: Vec<String>,
     #[serde(default = "default_version")]
     server_version: u16,
     #[serde(default)]
@@ -33,6 +45,8 @@ struct Outcome {
     fp: Vec<String>,
     fn_: Vec<String>,
     fp_negatives: Vec<String>,
+    /// Fired but neither required nor allowed — a measured false positive.
+    unexpected: Vec<String>,
     passed: bool,
     note: String,
 }
@@ -50,6 +64,11 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1).and_then(|s| s.parse::<f64>().ok()))
         .unwrap_or(0.95);
     let json_out = args.iter().any(|a| a == "--json");
+    // `--bless`: record every currently-unexpected rule into each scenario's
+    // `also_fires`, so the corpus becomes closed-world without hand-editing 180
+    // files. Run it, read the diff: each line added is a finding the corpus was
+    // silently tolerating.
+    let bless = args.iter().any(|a| a == "--bless");
     // `--html [path]`: write a standalone visual report. Path is optional and
     // defaults to target/eval-report.html. Additive — terminal output still prints.
     let html_out: Option<String> = args.iter().position(|a| a == "--html").map(|i| {
@@ -63,6 +82,42 @@ fn main() -> Result<()> {
     if scenarios.is_empty() {
         eprintln!("{}", format!("no scenarios found under {root}").red());
         std::process::exit(2);
+    }
+
+    if bless {
+        let mut touched = 0usize;
+        let mut added_total = 0usize;
+        for sc in &scenarios {
+            let outcome = grade(sc)?;
+            if outcome.unexpected.is_empty() {
+                continue;
+            }
+            let path = Path::new(&sc.dir).join("expected.json");
+            let mut also = sc.expected.also_fires.clone();
+            also.extend(outcome.unexpected.iter().cloned());
+            also.sort();
+            also.dedup();
+            let doc = serde_json::json!({
+                "must_fire": sc.expected.must_fire,
+                "must_not_fire": sc.expected.must_not_fire,
+                "also_fires": also,
+                "server_version": sc.expected.server_version,
+                "category": sc.expected.category,
+            });
+            fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&doc)?))?;
+            println!(
+                "  blessed {:<52} +{}",
+                sc.id,
+                outcome.unexpected.join(", ")
+            );
+            touched += 1;
+            added_total += outcome.unexpected.len();
+        }
+        println!();
+        println!(
+            "  {touched} scenario(s) updated, {added_total} previously-unmeasured finding(s) recorded"
+        );
+        return Ok(());
     }
 
     let mut outcomes: Vec<Outcome> = Vec::new();
@@ -169,13 +224,24 @@ fn grade(sc: &Scenario) -> Result<Outcome> {
         engine: None, // SQL Server (v0.x default)
     };
     let report = analyze(&input);
-    let fired: Vec<String> = report.findings.iter().map(|f| f.rule.0.clone()).collect();
-    let fired_set: std::collections::BTreeSet<&String> = fired.iter().collect();
+    // (rule id, line) for every finding, so a `rule@line` assertion can be
+    // checked against the statement it was actually written to protect.
+    let fired: Vec<(String, u32)> = report
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                f.rule.0.clone(),
+                f.location.as_ref().map(|l| l.line).unwrap_or(0),
+            )
+        })
+        .collect();
+    let fired_set: std::collections::BTreeSet<&String> = fired.iter().map(|(r, _)| r).collect();
 
     let mut tp = Vec::new();
     let mut fn_ = Vec::new();
     for r in &sc.expected.must_fire {
-        if fired_matches(&fired_set, r) {
+        if must_fire_satisfied(&fired, r) {
             tp.push(r.clone());
         } else {
             fn_.push(r.clone());
@@ -187,7 +253,31 @@ fn grade(sc: &Scenario) -> Result<Outcome> {
             fp_neg.push(r.clone());
         }
     }
-    let passed = fn_.is_empty() && fp_neg.is_empty();
+
+    // Closed-world check. Every rule this scenario emits must be accounted for
+    // by `must_fire` or `also_fires`; anything else is a false positive we are
+    // measuring rather than guessing at. Without this, precision could only
+    // ever drop when an author happened to name the exact misfiring rule in
+    // `must_not_fire` — which is how a corpus at F1 = 1.000 coexisted with live
+    // false positives on the critical rule.
+    let accounted: std::collections::BTreeSet<&str> = sc
+        .expected
+        .must_fire
+        .iter()
+        .map(|r| rule_part(r))
+        .chain(sc.expected.also_fires.iter().map(|r| r.as_str()))
+        .chain(sc.expected.must_not_fire.iter().map(|r| r.as_str()))
+        .collect();
+    let mut unexpected: Vec<String> = fired_set
+        .iter()
+        .map(|r| r.as_str())
+        .filter(|r| !accounted.iter().any(|a| spec_covers(a, r)))
+        .map(|r| r.to_string())
+        .collect();
+    unexpected.sort();
+    unexpected.dedup();
+
+    let passed = fn_.is_empty() && fp_neg.is_empty() && unexpected.is_empty();
     let note = if passed {
         String::new()
     } else {
@@ -196,7 +286,10 @@ fn grade(sc: &Scenario) -> Result<Outcome> {
             parts.push(format!("missing: {}", fn_.join(", ")));
         }
         if !fp_neg.is_empty() {
-            parts.push(format!("unexpected: {}", fp_neg.join(", ")));
+            parts.push(format!("forbidden: {}", fp_neg.join(", ")));
+        }
+        if !unexpected.is_empty() {
+            parts.push(format!("unexpected: {}", unexpected.join(", ")));
         }
         parts.join(" · ")
     };
@@ -204,11 +297,40 @@ fn grade(sc: &Scenario) -> Result<Outcome> {
         id: sc.id.clone(),
         category: sc.expected.category.clone(),
         tp,
-        fp: Vec::new(),
+        fp: unexpected.clone(),
         fn_,
         fp_negatives: fp_neg,
+        unexpected,
         passed,
         note,
+    })
+}
+
+/// The rule id half of a `must_fire` entry, dropping any `@line` suffix.
+fn rule_part(spec: &str) -> &str {
+    spec.split('@').next().unwrap_or(spec)
+}
+
+/// Does an `also_fires` / `must_fire` spec cover this concrete rule id?
+fn spec_covers(spec: &str, rule: &str) -> bool {
+    let spec = rule_part(spec);
+    if let Some(prefix) = spec.strip_suffix(".*") {
+        return rule == prefix || rule.starts_with(&format!("{prefix}."));
+    }
+    spec == rule
+}
+
+/// Is a `must_fire` entry satisfied? `"rule.id@7"` additionally requires that
+/// the rule fired on line 7 — otherwise a scenario can be satisfied by an
+/// unrelated statement elsewhere in the file, which is how one guard passed
+/// with the bug it was written for still present.
+fn must_fire_satisfied(fired: &[(String, u32)], spec: &str) -> bool {
+    let (want, want_line) = match spec.split_once('@') {
+        Some((r, l)) => (r, l.trim().parse::<u32>().ok()),
+        None => (spec, None),
+    };
+    fired.iter().any(|(rule, line)| {
+        spec_covers(want, rule) && want_line.map(|w| w == *line).unwrap_or(true)
     })
 }
 

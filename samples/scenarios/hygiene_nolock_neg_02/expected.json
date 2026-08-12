@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "hygiene",
   "must_fire": [],
-  "must_not_fire": ["hygiene.nolock"],
-  "server_version": 2025,
-  "category": "hygiene"
+  "must_not_fire": [
+    "hygiene.nolock"
+  ],
+  "server_version": 2025
 }

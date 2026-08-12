@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "hygiene.heap_table"
+  ],
+  "category": "ddl",
   "must_fire": [],
-  "must_not_fire": ["ddl.nullable_columns_should_be_explicit"],
-  "server_version": 2025,
-  "category": "ddl"
+  "must_not_fire": [
+    "ddl.nullable_columns_should_be_explicit"
+  ],
+  "server_version": 2025
 }

@@ -1,6 +1,13 @@
 {
-  "must_fire": ["index.filtered_index_opportunity_soft_delete"],
+  "also_fires": [
+    "index.missing_index_from_predicate",
+    "index.order_by_forces_sort",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "indexing",
+  "must_fire": [
+    "index.filtered_index_opportunity_soft_delete"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "indexing"
+  "server_version": 2025
 }

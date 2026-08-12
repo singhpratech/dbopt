@@ -1,6 +1,15 @@
 {
-  "must_fire": ["stats.ascending_key_hotspot"],
-  "must_not_fire": ["stats.auto_create_stats_off", "stats.auto_update_stats_off"],
-  "server_version": 2014,
-  "category": "stats"
+  "also_fires": [
+    "index.order_by_forces_sort",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "stats",
+  "must_fire": [
+    "stats.ascending_key_hotspot"
+  ],
+  "must_not_fire": [
+    "stats.auto_create_stats_off",
+    "stats.auto_update_stats_off"
+  ],
+  "server_version": 2014
 }

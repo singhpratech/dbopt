@@ -1,6 +1,11 @@
 {
-  "must_fire": ["modern.missing_schema_prefix"],
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "modern",
+  "must_fire": [
+    "modern.missing_schema_prefix"
+  ],
   "must_not_fire": [],
-  "server_version": 2025,
-  "category": "modern"
+  "server_version": 2025
 }

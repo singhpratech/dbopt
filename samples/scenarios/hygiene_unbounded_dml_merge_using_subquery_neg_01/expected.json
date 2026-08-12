@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "hygiene.merge_statement_for_upsert",
+    "index.missing_index_from_predicate"
+  ],
+  "category": "hygiene",
   "must_fire": [],
-  "must_not_fire": ["hygiene.unbounded_dml"],
-  "server_version": 2022,
-  "category": "hygiene"
+  "must_not_fire": [
+    "hygiene.unbounded_dml"
+  ],
+  "server_version": 2022
 }

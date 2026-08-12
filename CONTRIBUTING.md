@@ -54,6 +54,7 @@ Each scenario is a directory under `samples/scenarios/<id>/`:
   {
     "must_fire": ["family.rule_id"],
     "must_not_fire": [],
+    "also_fires": [],
     "server_version": 2025,
     "category": "family"
   }
@@ -68,6 +69,34 @@ Conventions:
   legitimately should not fire.
 - A **version-silence** negative sets `server_version` below a rule's gate to
   prove a newer-engine rule stays quiet on older targets.
+
+### The corpus is closed-world
+
+Anything a scenario emits that is **not** listed in `must_fire` or `also_fires`
+is counted as a false positive and fails that scenario. This is the only reason
+precision means anything: before it existed, a misfiring rule could only be
+caught if some author had happened to name it in `must_not_fire`, so the corpus
+sat at precision = 1.000 while real false positives shipped on the
+critical-severity rule.
+
+- `also_fires` lists rules that are *allowed* here without being required —
+  co-occurring findings that are correct but not what the scenario is about.
+- Adding a rule, or broadening one, will therefore fail scenarios all over the
+  corpus. **That is the feature.** Read each failure and decide whether the new
+  finding is correct (add it to that scenario's `also_fires`) or a false
+  positive (fix the rule).
+- `cargo run -p eval -- --bless` records every currently-unexpected finding into
+  the relevant `also_fires`. Run it, then **read the diff** — every added line is
+  a finding you are choosing to accept.
+
+### Pin the statement, not just the rule
+
+A `must_fire` entry may carry a line: `"index.missing_index_from_predicate@8"`.
+Without it, a guard can be satisfied by the same rule firing elsewhere in the
+file for an unrelated reason — one scenario passed for months with the bug it
+was written to catch still present, because the CTE body it used as setup
+emitted the rule it was asserting. Use the line form whenever the file contains
+more than one statement that could plausibly trigger the rule.
 
 Verify: `cargo run -p eval` — your scenario must show `PASS`, and overall
 `F1` must stay ≥ 0.95 (we hold it at 1.000). Every rule you **add or change**

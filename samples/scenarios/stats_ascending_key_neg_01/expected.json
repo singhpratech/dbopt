@@ -1,6 +1,11 @@
 {
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "stats",
   "must_fire": [],
-  "must_not_fire": ["stats.ascending_key_hotspot"],
-  "server_version": 2025,
-  "category": "stats"
+  "must_not_fire": [
+    "stats.ascending_key_hotspot"
+  ],
+  "server_version": 2025
 }

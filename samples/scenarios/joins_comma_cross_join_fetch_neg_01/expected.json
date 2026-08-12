@@ -1,6 +1,12 @@
 {
+  "also_fires": [
+    "hygiene.cursor"
+  ],
+  "category": "joins",
   "must_fire": [],
-  "must_not_fire": ["joins.comma_cross_join", "modern.missing_schema_prefix"],
-  "server_version": 2022,
-  "category": "joins"
+  "must_not_fire": [
+    "joins.comma_cross_join",
+    "modern.missing_schema_prefix"
+  ],
+  "server_version": 2022
 }
