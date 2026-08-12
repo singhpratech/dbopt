@@ -152,10 +152,10 @@ the `bedrock` feature — it is not in the prebuilt downloads.)*
 
 ## Quality bar
 
-- **264 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
+- **275 eval scenarios** · precision = recall = **F1 = 1.000**. CI fails if *any* scenario fails, and separately if F1 drops below 0.95 — an aggregate alone would let a localized regression through. The harness is
   **self-graded** — the scenarios are hand-authored, so this proves *no regression on the cases we wrote*,
   not a measured real-world false-positive rate. A held-out third-party corpus is on the roadmap.
-- **Every one of the 104 rule ids** has a scenario — a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers.
+- **Every one of the 104 rule ids** has a scenario — a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 13 scenarios cover the 12 plan-XML and DMV checks.
 - Rust unit + HTTP integration tests, and a Playwright UI suite.
 
 ```bash

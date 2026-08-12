@@ -1,0 +1,7 @@
+{
+  "must_fire": ["security.add_to_privileged_role"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "security"
+}

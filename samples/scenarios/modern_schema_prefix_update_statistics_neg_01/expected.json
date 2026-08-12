@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "stats.update_statistics_fullscan_on_huge_table"
+  ],
+  "category": "modern",
+  "must_fire": [],
+  "must_not_fire": [
+    "modern.missing_schema_prefix"
+  ],
+  "server_version": 2022
+}

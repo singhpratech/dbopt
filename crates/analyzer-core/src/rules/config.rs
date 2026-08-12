@@ -100,18 +100,26 @@ fn set_option_on(
         let mut k = skip_comments(tokens, i + 2);
         while k < tokens.len() && tokens[k].text != ";" {
             if is_word(&tokens[k], "SET") {
-                let opt = skip_comments(tokens, k + 1);
-                if opt < tokens.len() && is_word(&tokens[opt], option) {
-                    let val = skip_comments(tokens, opt + 1);
-                    if val < tokens.len() && is_word(&tokens[val], "ON") {
-                        out.push(finding(
-                            rule_id,
-                            sev,
-                            msg.to_string(),
-                            Some(make_loc(&tokens[opt])),
-                            Some(rec.to_string()),
-                        ));
+                // `ALTER DATABASE db SET AUTO_CLOSE ON, AUTO_SHRINK ON` is one
+                // statement setting two options. Reading only the option that
+                // immediately follows SET meant the second one was invisible,
+                // and which one got checked depended on the order the author
+                // happened to write them in.
+                let mut m = skip_comments(tokens, k + 1);
+                while m < tokens.len() && tokens[m].text != ";" {
+                    if is_word(&tokens[m], option) {
+                        let val = skip_comments(tokens, m + 1);
+                        if val < tokens.len() && is_word(&tokens[val], "ON") {
+                            out.push(finding(
+                                rule_id,
+                                sev,
+                                msg.to_string(),
+                                Some(make_loc(&tokens[m])),
+                                Some(rec.to_string()),
+                            ));
+                        }
                     }
+                    m += 1;
                 }
                 break;
             }

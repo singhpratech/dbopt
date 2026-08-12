@@ -69,6 +69,14 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
             }
         }
 
+        // `UPDATE STATISTICS dbo.T WITH FULLSCAN` is maintenance DDL; the word
+        // after UPDATE is the keyword STATISTICS, not a table anyone can qualify.
+        if is_word(t, "UPDATE")
+            && tokens.get(i + 1).map(|n| is_word(n, "STATISTICS")).unwrap_or(false)
+        {
+            continue;
+        }
+
         // `UPDATE a SET ... FROM dbo.Accounts a JOIN ...` — the token after
         // UPDATE is an alias defined by the FROM clause, and an alias cannot be
         // schema-qualified. Advice you cannot act on is worse than silence.

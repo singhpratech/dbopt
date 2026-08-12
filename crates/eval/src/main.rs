@@ -194,6 +194,20 @@ fn main() -> Result<()> {
         }
     }
 
+    // Aggregate F1 alone is not a gate. A localized regression — a rule that
+    // starts firing on a dozen scenarios, or one that stops firing on a couple —
+    // barely moves a corpus-wide average, so a build could ship red scenarios
+    // while printing a green F1 above target. Any failing scenario now fails the
+    // run, which is the whole point of grading them individually.
+    if failed > 0 {
+        eprintln!();
+        eprintln!(
+            "  {} {} scenario(s) failed — see the FAIL lines above.",
+            "✗".red().bold(),
+            failed
+        );
+        std::process::exit(1);
+    }
     if f1 < target_f1 {
         std::process::exit(1);
     }

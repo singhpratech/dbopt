@@ -101,10 +101,10 @@ engine-level reasoning behind it.
 
 ## Quality
 
-264 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
+275 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
 hand-authored, so that number proves *no regression on the cases we wrote* — not a
 measured real-world false-positive rate. every one of the 104 rule ids has a scenario,
-plus 12 covering the plan-XML and DMV analyzers.
+plus 13 more covering the 12 plan-XML and DMV checks.
 
 ## Which databases
 

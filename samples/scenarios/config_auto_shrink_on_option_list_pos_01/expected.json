@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "config.auto_close_on"
+  ],
+  "category": "config",
+  "must_fire": [
+    "config.auto_shrink_on"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

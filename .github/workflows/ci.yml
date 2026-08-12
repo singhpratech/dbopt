@@ -23,7 +23,7 @@ jobs:
         run: cargo build --workspace --release
       - name: test (unit + HTTP integration) · gate
         run: cargo test --workspace --release
-      - name: eval (F1 ≥ 0.95) · gate
+      - name: eval · every scenario must pass, and F1 ≥ 0.95
         run: ./target/release/dbopt-eval --target 0.95
 
   web:

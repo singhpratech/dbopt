@@ -56,10 +56,16 @@ fn string_inner(t: &Token<'_>) -> String {
 pub fn xp_cmdshell(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for t in ctx.tokens {
-        if t.kind != TokKind::Word {
-            continue;
-        }
-        if !bare(t).eq_ignore_ascii_case("xp_cmdshell") {
+        // The rule's own documentation promised `sp_configure 'xp_cmdshell'`
+        // would match, but that spelling puts the name in a *string* literal,
+        // and only Word tokens were checked — so the statement that turns the
+        // feature on was the one form this rule could not see.
+        let names_it = match t.kind {
+            TokKind::Word => bare(t).eq_ignore_ascii_case("xp_cmdshell"),
+            TokKind::String => string_inner(t).eq_ignore_ascii_case("xp_cmdshell"),
+            _ => false,
+        };
+        if !names_it {
             continue;
         }
         out.push(finding(
@@ -91,26 +97,43 @@ pub fn grant_to_public(ctx: &RuleCtx) -> Vec<Finding> {
         if !is_word(t, "PUBLIC") {
             continue;
         }
-        // Token immediately before must be `TO`.
+        // PUBLIC may sit anywhere in the grantee list: `TO AppUser, PUBLIC`
+        // grants to PUBLIC just as surely as `TO PUBLIC` does, and requiring
+        // `TO` to be the immediately preceding token missed every list form.
+        // Walk back over `<name> ,` pairs only, so we do not wander out of the
+        // grantee list into the object name.
         let mut p = i;
-        let prev = loop {
-            if p == 0 {
-                break None;
+        let mut found_to = false;
+        let mut to_at = 0usize;
+        loop {
+            let Some(prev) = ({
+                let mut q = p;
+                loop {
+                    if q == 0 { break None; }
+                    q -= 1;
+                    if tokens[q].kind != TokKind::Comment { break Some(q); }
+                }
+            }) else { break };
+            if is_word(&tokens[prev], "TO") {
+                found_to = true;
+                to_at = prev;
+                break;
             }
-            p -= 1;
-            if tokens[p].kind != TokKind::Comment {
-                break Some(p);
+            // Only a `, <name>` continuation keeps us inside the list.
+            if tokens[prev].text == "," || tokens[prev].kind == TokKind::Word {
+                p = prev;
+                continue;
             }
-        };
-        let Some(prev) = prev else { continue };
-        if !is_word(&tokens[prev], "TO") {
+            break;
+        }
+        if !found_to {
             continue;
         }
         // Walk backwards to confirm this is a GRANT statement (not REVOKE/DENY,
         // both of which targeting PUBLIC are fine / even desirable). Stop at a
         // statement boundary.
         let mut is_grant = false;
-        let mut q = prev;
+        let mut q = to_at;
         while q > 0 {
             q -= 1;
             let w = &tokens[q];
@@ -361,18 +384,35 @@ pub fn add_to_privileged_role(ctx: &RuleCtx) -> Vec<Finding> {
                 k += 1;
             }
             if role_tok.is_none() {
-                // Positional form: skip a single `@param =` prefix, then read
-                // the first string argument.
-                if j + 1 < tokens.len()
-                    && tokens[j].kind == TokKind::Word
-                    && tokens[j].text.starts_with('@')
-                    && skip_comments(tokens, j + 1) < tokens.len()
-                    && tokens[skip_comments(tokens, j + 1)].text == "="
-                {
-                    j = skip_comments(tokens, skip_comments(tokens, j + 1) + 1);
-                }
-                if j < tokens.len() && tokens[j].kind == TokKind::String {
-                    role_tok = Some(j);
+                // Positional form. The two procs take their arguments in
+                // OPPOSITE orders, and reading "the first string" for both meant
+                // `EXEC sp_addsrvrolemember 'AppLogin', 'sysadmin'` — the most
+                // ordinary way to write a sysadmin grant — produced nothing at
+                // all from the highest-severity rule here.
+                //
+                //   sp_addrolemember    @rolename,  @membername   → role first
+                //   sp_addsrvrolemember @loginame,  @rolename     → role SECOND
+                let role_ordinal = if bare(t).eq_ignore_ascii_case("sp_addsrvrolemember") {
+                    1
+                } else {
+                    0
+                };
+                let mut seen = 0usize;
+                let mut k = j;
+                let mut depth = 0i32;
+                while k < tokens.len() {
+                    let tk = &tokens[k];
+                    if tk.text == "(" { depth += 1; }
+                    else if tk.text == ")" { depth -= 1; if depth < 0 { break; } }
+                    else if depth <= 0 && (tk.text == ";" || is_word(tk, "GO")) { break; }
+                    else if tk.kind == TokKind::String {
+                        if seen == role_ordinal {
+                            role_tok = Some(k);
+                            break;
+                        }
+                        seen += 1;
+                    }
+                    k += 1;
                 }
             }
             if let Some(v) = role_tok {
@@ -755,10 +795,30 @@ mod tests {
             add_to_privileged_role,
             "EXEC sp_addsrvrolemember 'AppLogin', 'sysadmin';",
         );
-        // NOTE: for sp_addsrvrolemember the ROLE is the 2nd arg, the 1st is the
-        // login. So this should NOT fire on the role-as-first-arg path; it tests
-        // that we don't false-positive when the first string is a login name.
+        // For sp_addsrvrolemember the ROLE is the 2nd argument and the login is
+        // the 1st — the opposite of sp_addrolemember. This test previously
+        // asserted *silence* and explained why, which meant the most ordinary
+        // way to write a sysadmin grant was pinned as correct behaviour. It is
+        // the single statement this rule most exists to catch.
+        assert_fires(&f, "security.add_to_privileged_role");
+    }
+
+    #[test]
+    fn sp_addsrvrolemember_non_privileged_role_is_silent() {
+        let f = run(
+            add_to_privileged_role,
+            "EXEC sp_addsrvrolemember 'AppLogin', 'dbcreator';",
+        );
         assert_silent(&f, "security.add_to_privileged_role");
+    }
+
+    #[test]
+    fn sp_addrolemember_reads_the_role_from_the_first_argument() {
+        // The other proc really is role-first; the fix must not swap both.
+        let fires = run(add_to_privileged_role, "EXEC sp_addrolemember 'db_owner', 'AppUser';");
+        assert_fires(&fires, "security.add_to_privileged_role");
+        let quiet = run(add_to_privileged_role, "EXEC sp_addrolemember 'ReportReaders', 'AppUser';");
+        assert_silent(&quiet, "security.add_to_privileged_role");
     }
     #[test]
     fn alter_server_role_sysadmin_fires() {

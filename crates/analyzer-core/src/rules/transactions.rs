@@ -203,7 +203,19 @@ fn has_xact_abort_on(tokens: &[Token<'_>]) -> bool {
         if !is_kw(&tokens[i], "SET") {
             continue;
         }
-        let j = next_code(tokens, i + 1);
+        // Find XACT_ABORT anywhere in this SET's option list, not just first:
+        // `SET NOCOUNT, XACT_ABORT ON` is the same statement written the other
+        // way round, and only the XACT_ABORT-first spelling was recognised.
+        let mut j = next_code(tokens, i + 1);
+        while j < tokens.len()
+            && !is_kw(&tokens[j], "XACT_ABORT")
+            && (tokens[j].text == "," || tokens[j].kind == TokKind::Word)
+            && !is_kw(&tokens[j], "ON")
+            && !is_kw(&tokens[j], "OFF")
+            && tokens[j].text != ";"
+        {
+            j = next_code(tokens, j + 1);
+        }
         if j >= tokens.len() || !is_kw(&tokens[j], "XACT_ABORT") {
             continue;
         }
@@ -371,6 +383,20 @@ pub fn begin_tran_without_try_catch(ctx: &RuleCtx) -> Vec<Finding> {
 /// (c) BEGIN TRAN with NO matching COMMIT or ROLLBACK anywhere in the batch.
 /// This leaves the transaction open at end-of-batch. Reads the whole stream
 /// first (the COMMIT may legitimately live inside a CATCH block far below).
+/// `ROLLBACK TRAN[SACTION] <savepoint_name>` — an inner unwind, not a close.
+/// A bare `ROLLBACK`/`ROLLBACK TRANSACTION` (optionally followed by `;`) closes
+/// the outermost transaction; a name after it does not.
+fn is_savepoint_rollback(tokens: &[Token<'_>], i: usize) -> bool {
+    let mut j = next_code(tokens, i + 1);
+    if j < tokens.len() && (is_kw(&tokens[j], "TRAN") || is_kw(&tokens[j], "TRANSACTION")) {
+        j = next_code(tokens, j + 1);
+    }
+    tokens
+        .get(j)
+        .map(|t| t.kind == TokKind::Word && !t.text.starts_with('@'))
+        .unwrap_or(false)
+}
+
 pub fn begin_tran_without_commit(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -393,7 +419,10 @@ pub fn begin_tran_without_commit(ctx: &RuleCtx) -> Vec<Finding> {
             i = tran_kw + 1;
             continue;
         }
-        if is_commit_at(tokens, i) || is_rollback_at(tokens, i) {
+        // `ROLLBACK TRANSACTION sp1` unwinds to a savepoint; the outer
+        // transaction is still open afterwards, so counting it as a close hid
+        // the exact case this rule exists for.
+        if is_commit_at(tokens, i) || (is_rollback_at(tokens, i) && !is_savepoint_rollback(tokens, i)) {
             close_count += 1;
         }
         i += 1;
