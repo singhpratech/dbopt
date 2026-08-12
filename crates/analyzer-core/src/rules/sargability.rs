@@ -8,11 +8,33 @@ const NON_SARG_FUNCS: &[&str] = &[
     "FORMAT", "REPLACE",
 ];
 
+
+/// Type names and datepart keywords, which occupy argument positions but are
+/// never columns.
+fn is_type_or_datepart(t: &Token<'_>) -> bool {
+    const WORDS: &[&str] = &[
+        // types
+        "int", "bigint", "smallint", "tinyint", "bit", "decimal", "numeric", "money",
+        "smallmoney", "float", "real", "date", "datetime", "datetime2", "smalldatetime",
+        "datetimeoffset", "time", "char", "varchar", "text", "nchar", "nvarchar", "ntext",
+        "binary", "varbinary", "image", "uniqueidentifier", "xml", "sql_variant", "max",
+        // dateparts (long and short forms)
+        "year", "yy", "yyyy", "quarter", "qq", "q", "month", "mm", "m", "dayofyear", "dy",
+        "day", "dd", "d", "week", "wk", "ww", "weekday", "dw", "hour", "hh", "minute", "mi",
+        "n", "second", "ss", "s", "millisecond", "ms", "microsecond", "mcs", "nanosecond", "ns",
+    ];
+    let lc = t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    WORDS.contains(&lc.as_str())
+}
+
 pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     let mut in_where = false;
+    let mut pred_depth = 0i32;
     for (i, t) in tokens.iter().enumerate() {
+        if t.text == "(" { pred_depth += 1; }
+        else if t.text == ")" { pred_depth -= 1; if pred_depth < 0 { pred_depth = 0; } }
         if is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING") {
             in_where = true;
         }
@@ -22,12 +44,16 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
         // treated as a predicate. That produced error-severity reports on
         // `CASE WHEN LEFT(x,1) = '['` in a column list, where no index exists
         // to lose.
-        else if ["SELECT", "FROM", "GROUP", "ORDER", "INSERT", "UPDATE", "DELETE",
-                 "VALUES", "SET", "IF", "ELSE", "BEGIN", "END", "UNION", "EXCEPT",
-                 "INTERSECT", "OPTION", "THEN", "GO", "DECLARE", "EXEC", "EXECUTE"]
-            .iter()
-            .any(|kw| is_word(t, kw))
-            || t.text == ";"
+        // Closing must happen at statement level only. A nested `SELECT` inside
+        // `WHERE id IN (SELECT …)`, or the `END` of a `CASE`, previously closed
+        // the region and hid every non-SARGable predicate after it.
+        else if pred_depth == 0
+            && (["SELECT", "FROM", "GROUP", "ORDER", "INSERT", "UPDATE", "DELETE",
+                 "VALUES", "SET", "UNION", "EXCEPT", "INTERSECT", "OPTION", "GO",
+                 "DECLARE", "EXEC", "EXECUTE"]
+                .iter()
+                .any(|kw| is_word(t, kw))
+                || t.text == ";")
         {
             in_where = false;
         }
@@ -47,6 +73,18 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
                     && tokens[j].kind == TokKind::Word
                     && !tokens[j].text.starts_with('@')
                     && !tokens.get(j + 1).map(|n| n.text == "(").unwrap_or(false)
+                    && !is_word(&tokens[j], "AS")
+                    // The operand of a CAST is a *type*, and DATEDIFF/DATEPART
+                    // take a datepart keyword. Counting those as columns let
+                    // `CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) LIKE …`
+                    // and `DATEDIFF(MM, @a, GETDATE()) > 6` through — both
+                    // wrap no column at all.
+                    && !is_type_or_datepart(&tokens[j])
+                    && !j
+                        .checked_sub(1)
+                        .and_then(|k| tokens.get(k))
+                        .map(|p| is_word(p, "AS"))
+                        .unwrap_or(false)
                 {
                     wraps_column = true;
                 }

@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.top_without_order_by"
+  ],
+  "category": "hygiene",
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.unbounded_dml"
+  ],
+  "server_version": 2022
+}

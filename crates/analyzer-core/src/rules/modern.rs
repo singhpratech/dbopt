@@ -69,6 +69,31 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
             }
         }
 
+        // `CREATE TYPE [AccountNumber] FROM nvarchar(15)` — the FROM names a
+        // base *type*, not a table, and a type alias has no schema to qualify
+        // in that position.
+        if is_word(t, "FROM") {
+            let mut k = i;
+            let mut steps = 0;
+            while k > 0 && steps < 4 {
+                k -= 1;
+                steps += 1;
+                if is_word(&tokens[k], "TYPE")
+                    && k > 0
+                    && (is_word(&tokens[k - 1], "CREATE") || is_word(&tokens[k - 1], "ALTER"))
+                {
+                    break;
+                }
+            }
+            if steps < 4
+                && is_word(&tokens[k], "TYPE")
+                && k > 0
+                && (is_word(&tokens[k - 1], "CREATE") || is_word(&tokens[k - 1], "ALTER"))
+            {
+                continue;
+            }
+        }
+
         // `UPDATE STATISTICS dbo.T WITH FULLSCAN` is maintenance DDL; the word
         // after UPDATE is the keyword STATISTICS, not a table anyone can qualify.
         if is_word(t, "UPDATE")

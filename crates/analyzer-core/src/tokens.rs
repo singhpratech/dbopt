@@ -77,14 +77,35 @@ pub fn tokenize(src: &str) -> Vec<Token<'_>> {
                 (TokKind::Comment, j - i, 0, (j - i) as u32)
             }
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                // T-SQL block comments NEST: `/* a /* b */ c */` is one comment.
+                // Stopping at the first `*/` left the tail (`c */`) as live
+                // code, so commented-out SQL produced findings — including
+                // critical ones on statements the author had deliberately
+                // disabled.
                 let mut j = i + 2;
                 let mut nl = 0u32;
                 let mut last = 2u32;
-                while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+                let mut depth = 1i32;
+                while j + 1 < bytes.len() {
+                    if bytes[j] == b'/' && bytes[j + 1] == b'*' {
+                        depth += 1;
+                        last += 2;
+                        j += 2;
+                        continue;
+                    }
+                    if bytes[j] == b'*' && bytes[j + 1] == b'/' {
+                        depth -= 1;
+                        last += 2;
+                        j += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
                     if bytes[j] == b'\n' { nl += 1; last = 0; } else { last += 1; }
                     j += 1;
                 }
-                if j + 1 < bytes.len() { j += 2; last += 2; }
+                if depth > 0 { j = bytes.len(); }
                 (TokKind::Comment, j - i, nl, last)
             }
             b'\'' => {
@@ -99,6 +120,29 @@ pub fn tokenize(src: &str) -> Vec<Token<'_>> {
                 {
                     let (nl, last) = span_lines(&bytes[i..j]);
                     (TokKind::String, j - i, nl, last)
+                }
+            }
+            // A double-quoted delimited identifier. With QUOTED_IDENTIFIER ON —
+            // the default, and required for indexed views, filtered indexes and
+            // computed columns — `"Order Details"` is a NAME, exactly like
+            // `[Order Details]`. Without this branch the quotes tokenized as
+            // bare punctuation and the words inside became keywords: `Order` in
+            // `"Order Details"` read as ORDER BY and truncated clause scans, so
+            // an ordinary `INNER JOIN "Order Details" ON ...` was reported as a
+            // join with no ON clause. `""` is an escaped quote inside the name.
+            b'"' => {
+                let mut j = i + 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'"' {
+                        if j + 1 < bytes.len() && bytes[j + 1] == b'"' { j += 2; continue; }
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                {
+                    let (nl, last) = span_lines(&bytes[i..j]);
+                    (TokKind::Word, j - i, nl, last)
                 }
             }
             b'[' => {

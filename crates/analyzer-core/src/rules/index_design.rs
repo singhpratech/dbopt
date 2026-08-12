@@ -664,6 +664,78 @@ pub fn clustered_index_guid_no_fillfactor(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+
+/// The table name following a `TABLE` keyword at `idx`, lowercased and stripped
+/// of delimiters and schema (`[Person].[Address]` -> `address`).
+fn table_name_after(tokens: &[Token<'_>], idx: usize) -> String {
+    let mut last = String::new();
+    let mut k = skip_comments(tokens, idx + 1);
+    // Read `a`, `a.b` or `a.b.c` and stop. Consuming every following word made
+    // `ALTER TABLE [Person].[Address] ADD` resolve to "add", so the table never
+    // matched and the whole later-PK check silently did nothing.
+    loop {
+        if k >= tokens.len() || tokens[k].kind != TokKind::Word {
+            break;
+        }
+        last = tokens[k]
+            .text
+            .trim_matches(|c| c == '[' || c == ']' || c == '"')
+            .to_ascii_lowercase();
+        let n = skip_comments(tokens, k + 1);
+        if n < tokens.len() && tokens[n].text == "." {
+            k = skip_comments(tokens, n + 1);
+            continue;
+        }
+        break;
+    }
+    last
+}
+
+/// Does a later statement give this table a clustered structure?
+/// `ALTER TABLE x ADD CONSTRAINT ... PRIMARY KEY [CLUSTERED]` or
+/// `CREATE [UNIQUE] CLUSTERED INDEX ... ON x`.
+fn clustered_added_later(tokens: &[Token<'_>], table: &str) -> bool {
+    for (i, t) in tokens.iter().enumerate() {
+        // ALTER TABLE <table> ... PRIMARY KEY (not NONCLUSTERED)
+        if is_word(t, "ALTER") && tokens.get(i + 1).map(|n| is_word(n, "TABLE")).unwrap_or(false) {
+            if table_name_after(tokens, i + 1) != table {
+                continue;
+            }
+            let mut k = i + 2;
+            while k < tokens.len() && tokens[k].text != ";" && !is_word(&tokens[k], "GO") {
+                if is_word(&tokens[k], "PRIMARY")
+                    && tokens.get(k + 1).map(|n| is_word(n, "KEY")).unwrap_or(false)
+                {
+                    let m = skip_comments(tokens, k + 2);
+                    if !(m < tokens.len() && is_word(&tokens[m], "NONCLUSTERED")) {
+                        return true;
+                    }
+                }
+                if is_word(&tokens[k], "CLUSTERED")
+                    && !(k > 0 && is_word(&tokens[k - 1], "NONCLUSTERED"))
+                {
+                    return true;
+                }
+                k += 1;
+            }
+        }
+        // CREATE [UNIQUE] CLUSTERED INDEX <name> ON <table>
+        if is_word(t, "CLUSTERED")
+            && tokens.get(i + 1).map(|n| is_word(n, "INDEX")).unwrap_or(false)
+            && !(i > 0 && is_word(&tokens[i - 1], "NONCLUSTERED"))
+        {
+            let mut k = i + 2;
+            while k < tokens.len() && tokens[k].text != ";" && !is_word(&tokens[k], "GO") {
+                if is_word(&tokens[k], "ON") && table_name_after(tokens, k) == table {
+                    return true;
+                }
+                k += 1;
+            }
+        }
+    }
+    false
+}
+
 pub fn nullable_columns_should_be_explicit(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -764,6 +836,14 @@ pub fn heap_table(ctx: &RuleCtx) -> Vec<Finding> {
             // Anchor at the CREATE token preceding this body.
             let mut c = open;
             while c > 0 && !is_word(&tokens[c], "TABLE") { c -= 1; }
+            // The clustered structure is very often added afterwards, in a
+            // separate statement — that is how every scripted schema in
+            // existence is generated. Looking only inside CREATE TABLE reported
+            // essentially every table in a real schema script as a heap.
+            let table_name = table_name_after(tokens, c);
+            if !table_name.is_empty() && clustered_added_later(tokens, &table_name) {
+                continue;
+            }
             out.push(finding(
                 "hygiene.heap_table",
                 Severity::Warning,

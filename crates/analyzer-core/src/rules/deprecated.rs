@@ -26,7 +26,31 @@ pub fn old_join_syntax(ctx: &RuleCtx) -> Vec<Finding> {
         if !in_where {
             continue;
         }
-        // Detect "*=" or "=*"
+        // `=*` — the right-outer form. This branch never existed: the code
+        // only ever matched `*` followed by `=`, while the comment claimed both.
+        if t.text == "=" {
+            let nxt = tokens.get(i + 1);
+            let lhs_is_var = i
+                .checked_sub(1)
+                .and_then(|k| tokens.get(k))
+                .map(|p| p.text.starts_with('@') || matches!(p.text, "<" | ">" | "!" | "+" | "-" | "*" | "/" | "%"))
+                .unwrap_or(false);
+            if nxt.map(|n| n.text == "*").unwrap_or(false) && !lhs_is_var {
+                // `=*` must be followed by an operand, not by a column list or
+                // `FROM` — `SELECT =*` is not valid, so a following Word is the
+                // right-hand table reference.
+                if tokens.get(i + 2).map(|n| n.kind == TokKind::Word).unwrap_or(false) {
+                    out.push(finding(
+                        "deprecated.outer_join_star_equal",
+                        Severity::Error,
+                        "*= / =* style outer joins were removed in SQL Server 2008 and no longer parse under compatibility level 90+.",
+                        Some(make_loc(t)),
+                        Some("Use ANSI LEFT/RIGHT OUTER JOIN syntax.".into()),
+                    ));
+                }
+            }
+        }
+        // Detect "*="
         if t.text == "*" {
             let nxt = tokens.get(i + 1);
             // The left operand must be a column, not a @variable.
@@ -36,6 +60,7 @@ pub fn old_join_syntax(ctx: &RuleCtx) -> Vec<Finding> {
                 .map(|p| p.text.starts_with('@'))
                 .unwrap_or(false);
             if nxt.map(|n| n.text == "=").unwrap_or(false) && !lhs_is_var {
+                // (falls through to the push below)
                 out.push(finding(
                     "deprecated.outer_join_star_equal",
                     Severity::Error,

@@ -1,5 +1,5 @@
 use super::{finding, is_batch_separator, is_keyword, is_keyword_at, is_word, make_loc,
-            next_nonws, prev_significant, RuleCtx};
+            next_nonws, next_significant, prev_significant, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -49,7 +49,46 @@ pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
             if is_exists_subquery(ctx.tokens, i) {
                 continue;
             }
-            if let Some((_, nxt)) = next_nonws(ctx.tokens, i) {
+            // `SELECT TOP 5 *` and `SELECT DISTINCT *` are still SELECT *.
+            let mut at = i;
+            loop {
+                let Some((k, n)) = next_nonws(ctx.tokens, at) else { break };
+                if is_word(n, "DISTINCT") || is_word(n, "ALL") || is_word(n, "PERCENT")
+                    || is_word(n, "TIES")
+                {
+                    at = k;
+                    continue;
+                }
+                if is_word(n, "WITH")
+                    && next_nonws(ctx.tokens, k)
+                        .map(|(_, w)| is_word(w, "TIES"))
+                        .unwrap_or(false)
+                {
+                    at = k;
+                    continue;
+                }
+                if is_word(n, "TOP") {
+                    at = k;
+                    // step over `(n)` or a bare number, plus PERCENT/WITH TIES
+                    if let Some((p, pt)) = next_nonws(ctx.tokens, at) {
+                        if pt.text == "(" {
+                            let mut d = 1i32;
+                            let mut q = p;
+                            while d > 0 {
+                                let Some((r, rt)) = next_nonws(ctx.tokens, q) else { break };
+                                if rt.text == "(" { d += 1; } else if rt.text == ")" { d -= 1; }
+                                q = r;
+                            }
+                            at = q;
+                        } else {
+                            at = p;
+                        }
+                    }
+                    continue;
+                }
+                break;
+            }
+            if let Some((_, nxt)) = next_nonws(ctx.tokens, at) {
                 if nxt.kind == TokKind::Punct && nxt.text == "*" {
                     out.push(finding(
                         "hygiene.select_star",
@@ -275,6 +314,23 @@ fn join_bounds_target(tokens: &[Token], j: usize) -> bool {
 /// `DELETE [FROM]`.
 fn dml_target<'a>(tokens: &'a [Token<'a>], i: usize, is_delete: bool) -> Option<&'a Token<'a>> {
     let mut j = prev_next(tokens, i)?;
+    // `DELETE TOP (5000) FROM #t` — step over the row limiter, or the target
+    // reads as `TOP` and every temp-table/alias check silently fails.
+    if is_word(&tokens[j], "TOP") {
+        j = prev_next(tokens, j)?;
+        if tokens[j].text == "(" {
+            let mut depth = 1i32;
+            while depth > 0 {
+                j = prev_next(tokens, j)?;
+                if tokens[j].text == "(" { depth += 1; }
+                else if tokens[j].text == ")" { depth -= 1; }
+            }
+            j = prev_next(tokens, j)?;
+        }
+        if is_word(&tokens[j], "PERCENT") {
+            j = prev_next(tokens, j)?;
+        }
+    }
     if is_delete && is_word(&tokens[j], "FROM") {
         j = prev_next(tokens, j)?;
     }
@@ -296,6 +352,47 @@ fn bare_name(t: &Token<'_>) -> String {
     t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase()
 }
 
+
+/// A keyword that can only begin a new statement, used to stop forward scans
+/// when the author omitted the `;`.
+fn is_dml_boundary(tokens: &[Token<'_>], i: usize) -> bool {
+    ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP",
+     "TRUNCATE", "DECLARE", "EXEC", "EXECUTE", "WHILE", "IF", "COMMIT",
+    // NOTE: `SET` is deliberately absent — it is core UPDATE syntax
+    // (`UPDATE t SET x = 1 FROM …`), and treating it as a boundary stopped the
+    // scan before it ever reached the FROM clause.
+     "ROLLBACK", "GRANT", "REVOKE", "DENY", "USE", "PRINT"]
+        .iter()
+        .any(|kw| is_keyword_at(tokens, i, kw))
+        || is_batch_separator(tokens, i)
+}
+
+/// Does the parenthesised derived table opening at `open` carry a TOP *and*
+/// stand in for `name` (i.e. its alias is the DML target)?
+fn derived_table_bounds_target(tokens: &[Token<'_>], open: usize, name: &str) -> bool {
+    let mut j = open + 1;
+    let mut depth = 1i32;
+    let mut has_top = false;
+    while j < tokens.len() && depth > 0 {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 1 && is_word(t, "TOP") { has_top = true; }
+        j += 1;
+    }
+    if !has_top {
+        return false;
+    }
+    // `) AS alias` / `) alias`
+    let mut k = j;
+    while k < tokens.len() && tokens[k].kind == TokKind::Comment { k += 1; }
+    if tokens.get(k).map(|n| is_word(n, "AS")).unwrap_or(false) { k += 1; }
+    tokens
+        .get(k)
+        .map(|a| a.kind == TokKind::Word && bare_name(a) == name)
+        .unwrap_or(false)
+}
+
 /// Does this statement's FROM clause bind `name` to a table variable or temp
 /// table, or bound the rowset with a TOP?
 ///
@@ -309,13 +406,27 @@ fn from_clause_bounds(tokens: &[Token<'_>], stmt_start: usize, name: &str) -> bo
     let mut in_from = false;
     while j < tokens.len() {
         let t = &tokens[j];
-        if t.text == "(" { depth += 1; }
+        if t.text == "(" {
+            depth += 1;
+            // A derived table bounds the DML only when it is the source the
+            // TARGET is drawn from: `FROM (SELECT TOP 1 …) QueueDatabase`.
+            // A TOP inside some *other* joined subquery bounds nothing, and
+            // counting it silenced unbounded updates of real tables.
+            if in_from && depth == 1 && derived_table_bounds_target(tokens, j, name) {
+                return true;
+            }
+        }
         else if t.text == ")" { depth -= 1; if depth < 0 { break; } }
         else if depth == 0 && t.text == ";" { break; }
+        // Stop at the next statement. Without this a following statement's
+        // `TOP`, or an alias that happens to match, vouched for this one
+        // whenever the author omitted the semicolon.
+        else if depth == 0 && j > stmt_start && is_dml_boundary(tokens, j) { break; }
         else if depth == 0 && is_word(t, "FROM") { in_from = true; }
         else if depth == 0 && (is_word(t, "WHERE") || is_word(t, "OPTION")) { break; }
-        else if in_from && is_word(t, "TOP") {
-            // A TOP inside the FROM clause limits the rows the DML can touch.
+        else if depth == 0 && is_word(t, "TOP") {
+            // `UPDATE TOP (n) …` / `DELETE TOP (n) FROM …`. This appears before
+            // the FROM, so it must not be gated on having seen one.
             return true;
         }
         else if in_from && t.kind == TokKind::Word
@@ -349,7 +460,15 @@ fn updatable_cte_is_bounded(tokens: &[Token<'_>], i: usize, name: &str) -> bool 
     while k > 0 {
         k -= 1;
         let t = &tokens[k];
-        if t.text == ";" {
+        // Only the WITH immediately preceding this statement can bind it. A
+        // `;`, a GO, or any earlier statement head means the CTE we would find
+        // belongs to something else entirely.
+        if t.text == ";" || is_batch_separator(tokens, k) {
+            return false;
+        }
+        if is_dml_boundary(tokens, k) && !is_keyword_at(tokens, k, "UPDATE")
+            && !is_keyword_at(tokens, k, "DELETE") && !is_keyword_at(tokens, k, "SELECT")
+        {
             return false;
         }
         if (is_word(t, "WITH") || t.text == ",")
@@ -364,12 +483,77 @@ fn updatable_cte_is_bounded(tokens: &[Token<'_>], i: usize, name: &str) -> bool 
                 let b = &tokens[j];
                 if b.text == "(" { depth += 1; }
                 else if b.text == ")" { depth -= 1; }
-                else if is_word(b, "WHERE") || is_word(b, "TOP") {
+                // Only a predicate on the CTE's own SELECT bounds it. A WHERE
+                // inside a nested subquery bounds that subquery, not this.
+                else if depth == 1 && (is_word(b, "WHERE") || is_word(b, "TOP")) {
                     return true;
                 }
                 j += 1;
             }
             return false;
+        }
+    }
+    false
+}
+
+
+/// Does this UPDATE/DELETE token spell a keyword that is not a DML statement?
+///
+///   * `... REFERENCES dbo.U (y) ON DELETE CASCADE` — a referential action.
+///   * `CREATE TRIGGER t ON dbo.T INSTEAD OF DELETE AS ...`, `AFTER UPDATE`,
+///     `FOR DELETE` — a trigger's event list.
+///   * `IF UPDATE([Col])` — the trigger function that tests whether a column was
+///     part of the statement that fired the trigger.
+fn is_not_dml_use(tokens: &[Token<'_>], i: usize) -> bool {
+    // `UPDATE(` is the trigger predicate function, never a statement.
+    if tokens
+        .get(i + 1)
+        .map(|n| n.kind == TokKind::Punct && n.text == "(")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let Some(p) = prev_significant(tokens, i) else { return false };
+    let prev = &tokens[p];
+    // `ON DELETE CASCADE` / `ON UPDATE NO ACTION` — a referential action is
+    // identified by what FOLLOWS it, never by the bare `ON`. Treating any
+    // preceding `ON` as proof silenced the only critical rule after
+    // `SET NOCOUNT ON`, which is how almost every production script opens.
+    if is_word(prev, "ON") {
+        let Some(n) = next_significant(tokens, i) else { return false };
+        let action = is_word(&tokens[n], "CASCADE")
+            || (is_word(&tokens[n], "NO")
+                && next_significant(tokens, n)
+                    .map(|m| is_word(&tokens[m], "ACTION"))
+                    .unwrap_or(false))
+            || (is_word(&tokens[n], "SET")
+                && next_significant(tokens, n)
+                    .map(|m| is_word(&tokens[m], "NULL") || is_word(&tokens[m], "DEFAULT"))
+                    .unwrap_or(false));
+        return action;
+    }
+    // Trigger event lists: AFTER / FOR / OF (from INSTEAD OF), and the comma in
+    // `AFTER INSERT, UPDATE`.
+    if ["AFTER", "FOR", "OF"].iter().any(|kw| is_word(prev, kw)) {
+        return true;
+    }
+    if prev.text == "," {
+        if let Some(q) = prev_significant(tokens, p) {
+            // `AFTER INSERT, UPDATE` — walk back over the event list.
+            let mut k = q;
+            for _ in 0..4 {
+                let t = &tokens[k];
+                if ["AFTER", "FOR", "OF"].iter().any(|kw| is_word(t, kw)) {
+                    return true;
+                }
+                if !(t.text == "," || is_word(t, "INSERT") || is_word(t, "UPDATE") || is_word(t, "DELETE")) {
+                    break;
+                }
+                match prev_significant(tokens, k) {
+                    Some(n) => k = n,
+                    None => break,
+                }
+            }
         }
     }
     false
@@ -382,6 +566,13 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
         let is_update = is_word(t, "UPDATE");
         let is_delete = is_word(t, "DELETE");
         if !(is_update || is_delete) {
+            continue;
+        }
+        // Several very common constructs spell UPDATE or DELETE without being
+        // DML at all. Reporting them as "rewrites every row in the table" at
+        // critical severity fired on the foreign keys and triggers of ordinary
+        // application schemas.
+        if is_not_dml_use(tokens, i) {
             continue;
         }
         // `UPDATE STATISTICS dbo.T` is not DML.
@@ -623,6 +814,22 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             let Some(fname) = fname else { continue };
             let schema = t.text.to_ascii_lowercase();
             if matches!(schema.as_str(), "sys" | "information_schema") { continue; }
+            // `col.value('...')`, `col.nodes(...)`, `xmlcol.query(...)` are XML
+            // *methods* on a column, not schema-qualified scalar UDFs. They have
+            // no schema, no UDF, and nothing to inline — this was the single
+            // largest false-positive class on a real application schema.
+            let fname_lc = fname.text.to_ascii_lowercase();
+            if matches!(
+                fname_lc.as_str(),
+                "value" | "nodes" | "query" | "exist" | "modify"
+            ) {
+                continue;
+            }
+            // A three-part chain (`a.b.c(`) means the middle part is not a
+            // schema — `[ContactInfo].ref.value(...)` is column.ref.method().
+            if i > 0 && tokens[i - 1].text == "." {
+                continue;
+            }
             if !seen.insert((t.start, t.text)) { continue; }
             out.push(finding(
                 "hygiene.scalar_udf_in_select",

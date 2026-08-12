@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "joins.comma_cross_join"
+  ],
+  "category": "deprecated",
+  "must_fire": [
+    "deprecated.outer_join_star_equal"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

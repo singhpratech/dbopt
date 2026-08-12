@@ -17,11 +17,22 @@ mkdir -p "$OUT"
 fetch() { # url filename
   [ -s "$OUT/$2" ] || curl -fsSL --max-time 60 "$1" -o "$OUT/$2"
 }
+# Two distributions, deliberately. DBA tooling and application schemas fail in
+# different ways: the tooling exercises dynamic SQL, DMV queries and table
+# variables; the schemas exercise triggers, foreign keys, quoted identifiers and
+# view definitions. Testing only one hides the other's false positives.
 FRK=https://raw.githubusercontent.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/main
+MSS=https://raw.githubusercontent.com/microsoft/sql-server-samples/master/samples/databases
+# --- DBA tooling ---
 fetch https://raw.githubusercontent.com/olahallengren/sql-server-maintenance-solution/master/MaintenanceSolution.sql ola_maintenance.sql
 fetch "$FRK/sp_Blitz.sql"       sp_blitz.sql
 fetch "$FRK/sp_BlitzIndex.sql"  sp_blitzindex.sql
 fetch "$FRK/sp_BlitzCache.sql"  sp_blitzcache.sql
+# --- application schemas + business logic ---
+fetch "$MSS/northwind-pubs/instnwnd.sql" northwind.sql
+fetch "$MSS/northwind-pubs/instpubs.sql" pubs.sql
+fetch "$MSS/adventure-works/oltp-install-script/instawdb.sql" adventureworks.sql
+fetch https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_SqlServer.sql chinook.sql
 
 echo "corpus: $(cat "$OUT"/*.sql | wc -l) lines across $(ls "$OUT"/*.sql | wc -l) files"
 "$BIN" lint "$OUT" --format json > "$OUT/findings.json" || true

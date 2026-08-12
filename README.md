@@ -152,11 +152,11 @@ the `bedrock` feature — it is not in the prebuilt downloads.)*
 
 ## Quality bar
 
-- **282 eval scenarios** · precision = recall = **F1 = 1.000**. CI fails if *any* scenario fails, and separately if F1 drops below 0.95 — an aggregate alone would let a localized regression through. The harness is
+- **304 eval scenarios** · precision = recall = **F1 = 1.000**. CI fails if *any* scenario fails, and separately if F1 drops below 0.95 — an aggregate alone would let a localized regression through. The harness is
   **self-graded** — the scenarios are hand-authored, so this proves *no regression on the cases we wrote*,
   not a measured real-world false-positive rate. That is what the held-out corpus below is for.
 - **Every one of the 104 rule ids** has a scenario — a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 13 scenarios cover the 12 plan-XML and DMV checks.
-- **Held-out validation.** The self-graded F1 above cannot measure a real false-positive rate — the same people write the rules and the tests. So the analyzer is also run over **37,738 lines of third-party production T-SQL we did not write** (Ola Hallengren's Maintenance Solution; sp_Blitz, sp_BlitzIndex, sp_BlitzCache from the First Responder Kit), and every finding at error severity or above is hand-classified. Current result: **152 high-severity findings, 0 false positives**. This corpus is not vendored here — it is fetched from its upstream repositories.
+- **Held-out validation.** The self-graded F1 above cannot measure a real false-positive rate — the same people write the rules and the tests. So the analyzer is also run over **71,758 lines of third-party production T-SQL we did not write** across two deliberately different distributions — DBA tooling (Ola Hallengren's Maintenance Solution; sp_Blitz, sp_BlitzIndex, sp_BlitzCache) and application schemas (AdventureWorks, Northwind, Pubs, Chinook), which fail in different ways, and every finding at error severity or above is hand-classified. Current result: **161 high-severity findings, 0 false positives**. This corpus is not vendored here — it is fetched from its upstream repositories.
 - Rust unit + HTTP integration tests, and a Playwright UI suite.
 
 ```bash

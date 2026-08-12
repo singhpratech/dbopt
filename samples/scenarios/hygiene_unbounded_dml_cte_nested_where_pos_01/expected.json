@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "antipattern.correlated_scalar_subquery_in_select"
+  ],
+  "category": "hygiene",
+  "must_fire": [
+    "hygiene.unbounded_dml"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}
