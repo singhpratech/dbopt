@@ -85,6 +85,29 @@ fn main() -> Result<()> {
     }
 
     if bless {
+        // Blessing records *false positives* as accepted, so running it to make
+        // a red build green is exactly the wrong move. A missing `must_fire` is
+        // an unambiguous regression that blessing cannot fix anyway — refuse
+        // outright rather than let someone bless around a broken rule.
+        let broken: Vec<&Scenario> = scenarios
+            .iter()
+            .filter(|sc| grade(sc).map(|o| !o.fn_.is_empty()).unwrap_or(false))
+            .collect();
+        if !broken.is_empty() {
+            eprintln!(
+                "{}",
+                "refusing to bless: some scenarios are missing findings they require".red().bold()
+            );
+            for sc in &broken {
+                eprintln!("  {}", sc.id);
+            }
+            eprintln!();
+            eprintln!("A missing `must_fire` means a rule stopped firing. Fix the rule (or the");
+            eprintln!("scenario) first — `--bless` only records extra findings and will not");
+            eprintln!("silence this.");
+            std::process::exit(2);
+        }
+
         let mut touched = 0usize;
         let mut added_total = 0usize;
         for sc in &scenarios {
@@ -117,6 +140,14 @@ fn main() -> Result<()> {
         println!(
             "  {touched} scenario(s) updated, {added_total} previously-unmeasured finding(s) recorded"
         );
+        if added_total > 0 {
+            println!();
+            println!(
+                "{}",
+                "  Read the diff: every line added is a finding you have just accepted as correct."
+                    .yellow()
+            );
+        }
         return Ok(());
     }
 

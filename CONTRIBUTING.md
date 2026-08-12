@@ -88,6 +88,10 @@ critical-severity rule.
 - `cargo run -p eval -- --bless` records every currently-unexpected finding into
   the relevant `also_fires`. Run it, then **read the diff** — every added line is
   a finding you are choosing to accept.
+- Blessing records *false positives* as accepted, so reaching for it to turn a
+  red build green is exactly backwards. It refuses to run at all while any
+  scenario is missing a `must_fire` finding, because that means a rule stopped
+  firing and blessing cannot fix it.
 
 ### Pin the statement, not just the rule
 
