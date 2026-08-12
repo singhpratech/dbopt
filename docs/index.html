@@ -311,7 +311,7 @@ footer{border-top:1px solid var(--line);padding:44px 0;background:var(--paper-2)
         <span class="az-title">The analyzer</span>
         <div class="chips">
           <span class="chip" id="c-status">loading analyzer…</span>
-          <span class="chip" id="c-rules">102 rules</span>
+          <span class="chip" id="c-rules">103 rules</span>
           <span class="chip live" id="c-time">—</span>
         </div>
       </div>
@@ -396,7 +396,7 @@ ORDER BY o.Total DESC;</textarea>
       <div class="col">
         <div class="tag">01 · Static — <em>mature</em></div>
         <h3>Shift-left analysis</h3>
-        <p>102 rules across sargability, index design, plan shape, hygiene, modern rewrites, locking,
+        <p>103 rules across sargability, index design, plan shape, hygiene, modern rewrites, locking,
            tempdb, transactions, security and datatypes. Runs in your browser or as a CLI, with no
            connection at all.</p>
       </div>
@@ -495,15 +495,15 @@ ORDER BY o.Total DESC;</textarea>
     <p class="sub">A tagged scenario corpus checks that covered rules fire when they should — and stay
       silent when they shouldn't.</p>
     <div class="stats">
-      <div class="stat"><b>102</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>180</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>103</b><span>Analyzer rules</span></div>
+      <div class="stat"><b>184</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
     <p class="caveat">
       <b>What that F1 does and doesn't prove.</b> The corpus is hand-authored, so the harness is
       self-graded: it proves no regression on the cases we wrote, not a measured real-world false-positive
-      rate. <b>63 of the 102 token rules</b> have a scenario, plus 12 covering the plan-XML and DMV
+      rate. <b>64 of the 103 token rules</b> have a scenario, plus 12 covering the plan-XML and DMV
       analyzers; the rest are still being backfilled, and a held-out third-party corpus is on the roadmap. Reproduce it yourself with
       <code>cargo run -p eval -- --html</code>.
     </p>
@@ -519,7 +519,7 @@ ORDER BY o.Total DESC;</textarea>
       shipping. Ask for an engine whose rules haven't landed and you get an empty report, never a guess.</p>
     <div class="engines">
       <div class="engine on"><span class="nm">SQL Server</span>
-        <span class="meta">2014 → 2025 · all 102 rules</span><span class="st">Live</span></div>
+        <span class="meta">2014 → 2025 · all 103 rules</span><span class="st">Live</span></div>
       <div class="engine"><span class="nm">PostgreSQL</span>
         <span class="meta">engine seam wired · rules coming</span><span class="st">Next</span></div>
       <div class="engine"><span class="nm">MySQL</span>

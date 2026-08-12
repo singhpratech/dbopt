@@ -34,7 +34,7 @@ execution, no locks, no load on production**.
 
 > **One tool, every database.** dbopt is engine-agnostic from the core out: every rule declares which
 > database it applies to, so engines are added without destabilizing each other. **SQL Server (2014 → 2025)
-> is live today** with all 102 rules; **PostgreSQL and MySQL are next.** Ask for an engine whose rules
+> is live today** with all 103 rules; **PostgreSQL and MySQL are next.** Ask for an engine whose rules
 > haven't landed and you get an empty report — the analyzer would rather say nothing than guess.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
@@ -79,7 +79,7 @@ Linux has no prompt. Signing is on the roadmap.
 
 ## Lint your SQL in CI — offline, no connection
 
-`dbopt lint` walks your `.sql` files, applies all 102 rules and emits machine-readable output, so a bad
+`dbopt lint` walks your `.sql` files, applies all 103 rules and emits machine-readable output, so a bad
 query fails the build *before* it ships.
 
 ```bash
@@ -114,7 +114,7 @@ commit on error-level findings.
 
 |   | Lens | What it does |
 |---|------|--------------|
-| **01** | **Static** | A token-level analyzer — **102 rules** across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, statistics, transactions, security and datatypes. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
+| **01** | **Static** | A token-level analyzer — **103 rules** across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, statistics, transactions, security and datatypes. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
 | **02** | **Plan** | Fetches the *estimated* plan (compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, spill and lookup risk. |
 | **03** | **Live** | Reads index usage, missing indexes and sizes on demand; the **sentinel** daemon samples query history, waits, deadlocks and vitals into a local SQLite time-series, with thresholds and webhook alerts. |
 
@@ -152,10 +152,10 @@ the `bedrock` feature — it is not in the prebuilt downloads.)*
 
 ## Quality bar
 
-- **180 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
+- **184 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
   **self-graded** — the scenarios are hand-authored, so this proves *no regression on the cases we wrote*,
   not a measured real-world false-positive rate. A held-out third-party corpus is on the roadmap.
-- **63 of the 102 token rules** have a scenario, each with a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers. The remaining rules are being backfilled.
+- **64 of the 103 token rules** have a scenario, each with a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers. The remaining rules are being backfilled.
 - Rust unit + HTTP integration tests, and a Playwright UI suite.
 
 ```bash
@@ -166,7 +166,7 @@ cargo run -p eval -- --html   # → target/eval-report.html
 
 | Engine | Status | Notes |
 |---|---|---|
-| **SQL Server** | **Live** | 2014 → 2025 · all 102 rules |
+| **SQL Server** | **Live** | 2014 → 2025 · all 103 rules |
 | PostgreSQL | Next | engine seam wired · rules coming |
 | MySQL | Next | engine seam wired · rules coming |
 

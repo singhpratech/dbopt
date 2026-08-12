@@ -810,3 +810,186 @@ mod sargability_deep_tests {
         );
     }
 }
+
+// ===========================================================================
+// Implicit conversion from a parameter/variable type mismatch
+// ===========================================================================
+
+/// The two string-type families SQL Server converts between, plus everything we
+/// do not reason about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StrFamily {
+    /// `char` / `varchar` / `text` — one byte per character, no `N` prefix.
+    Ansi,
+    /// `nchar` / `nvarchar` / `ntext` — Unicode.
+    Unicode,
+}
+
+fn str_family(type_name: &str) -> Option<StrFamily> {
+    match type_name.to_ascii_lowercase().as_str() {
+        "char" | "varchar" | "text" => Some(StrFamily::Ansi),
+        "nchar" | "nvarchar" | "ntext" => Some(StrFamily::Unicode),
+        _ => None,
+    }
+}
+
+/// Column string-types declared by `CREATE TABLE` / `ALTER TABLE ... ADD` in
+/// this same file, keyed by lowercased column name.
+///
+/// A column name that is declared more than once with *different* families is
+/// recorded as ambiguous and never reported: without a live catalog we cannot
+/// tell which table a bare column reference belongs to, and guessing is how a
+/// rule like this becomes noise.
+fn declared_column_families(tokens: &[Token<'_>]) -> std::collections::HashMap<String, Option<StrFamily>> {
+    let mut out: std::collections::HashMap<String, Option<StrFamily>> = std::collections::HashMap::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let opens_table = (is_word(&tokens[i], "TABLE")
+            && i > 0
+            && (is_word(&tokens[i - 1], "CREATE") || is_word(&tokens[i - 1], "DECLARE")))
+            || (is_word(&tokens[i], "ADD")
+                && i > 1
+                && is_word(&tokens[i - 2], "ALTER")
+                && is_word(&tokens[i - 1], "TABLE"));
+        if !opens_table {
+            i += 1;
+            continue;
+        }
+        // Walk to the column list and read `<name> <type>` pairs at depth 1.
+        let mut j = i + 1;
+        let mut depth = 0i32;
+        let mut expect_name = true;
+        while j < tokens.len() {
+            let t = &tokens[j];
+            if t.text == "(" {
+                depth += 1;
+                if depth == 1 {
+                    expect_name = true;
+                }
+                j += 1;
+                continue;
+            }
+            if t.text == ")" {
+                depth -= 1;
+                if depth <= 0 {
+                    break;
+                }
+                j += 1;
+                continue;
+            }
+            if depth == 1 && t.text == "," {
+                expect_name = true;
+                j += 1;
+                continue;
+            }
+            if depth == 1 && expect_name && t.kind == TokKind::Word {
+                let name = t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+                if let Some(ty) = tokens.get(j + 1) {
+                    if let Some(fam) = str_family(ty.text.trim_matches(|c| c == '[' || c == ']')) {
+                        out.entry(name)
+                            .and_modify(|e| {
+                                if *e != Some(fam) {
+                                    *e = None; // declared inconsistently — ambiguous
+                                }
+                            })
+                            .or_insert(Some(fam));
+                    }
+                }
+                expect_name = false;
+            }
+            j += 1;
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// String-typed `@variables` and procedure parameters declared in this file.
+fn declared_variable_families(tokens: &[Token<'_>]) -> std::collections::HashMap<String, StrFamily> {
+    let mut out = std::collections::HashMap::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind != TokKind::Word || !t.text.starts_with('@') {
+            continue;
+        }
+        // `@p nvarchar(…)` or `DECLARE @p AS nvarchar(…)`
+        let mut k = i + 1;
+        if tokens.get(k).map(|n| is_word(n, "AS")).unwrap_or(false) {
+            k += 1;
+        }
+        let Some(ty) = tokens.get(k) else { continue };
+        if let Some(fam) = str_family(ty.text.trim_matches(|c| c == '[' || c == ']')) {
+            out.insert(t.text.to_ascii_lowercase(), fam);
+        }
+    }
+    out
+}
+
+/// A `varchar` column compared against an `nvarchar` parameter — the single
+/// most common cause of a silently-lost index seek in production T-SQL.
+///
+/// Direction matters, and only one direction is harmful. SQL Server's data-type
+/// precedence puts `nvarchar` above `varchar`, so the side that converts is the
+/// *lower*-precedence one: comparing a `varchar` column to an `nvarchar`
+/// parameter converts **the column**, on every row, which destroys the seek.
+/// The reverse — an `nvarchar` column against a `varchar` parameter — converts
+/// the parameter once and the seek survives, so it is deliberately not flagged.
+///
+/// Only fires when both types are declared in the file being analyzed. Without
+/// a live catalog there is no honest way to know a column's type, and a rule
+/// that guesses at it would fire on half of every codebase.
+pub fn implicit_conversion_param_type_mismatch(ctx: &RuleCtx) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let tokens = ctx.tokens;
+    let cols = declared_column_families(tokens);
+    let vars = declared_variable_families(tokens);
+    if cols.is_empty() || vars.is_empty() {
+        return out;
+    }
+
+    for (i, t) in tokens.iter().enumerate() {
+        if !(t.kind == TokKind::Punct && t.text == "=") {
+            continue;
+        }
+        // Not the tail of <=, >= or !=.
+        if i > 0 && matches!(tokens[i - 1].text, "<" | ">" | "!") {
+            continue;
+        }
+        let Some(l) = i.checked_sub(1).and_then(|k| tokens.get(k)) else { continue };
+        let Some(r) = tokens.get(i + 1) else { continue };
+
+        // Identify which side is the variable and which the column.
+        let (var_tok, col_tok) = if l.text.starts_with('@') {
+            (l, r)
+        } else if r.text.starts_with('@') {
+            (r, l)
+        } else {
+            continue;
+        };
+        if col_tok.kind != TokKind::Word || col_tok.text.starts_with('@') {
+            continue;
+        }
+        let Some(var_fam) = vars.get(&var_tok.text.to_ascii_lowercase()) else { continue };
+        let col_name = col_tok
+            .text
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_ascii_lowercase();
+        let Some(Some(col_fam)) = cols.get(&col_name) else { continue };
+
+        if *col_fam == StrFamily::Ansi && *var_fam == StrFamily::Unicode {
+            out.push(finding(
+                "sarg.implicit_conversion_param_type",
+                Severity::Error,
+                format!(
+                    "`{}` is declared as an ANSI string column but is compared to the Unicode parameter `{}`. SQL Server converts the lower-precedence side, so the column is converted on every row and any index on it cannot be seeked.",
+                    col_tok.text, var_tok.text
+                ),
+                Some(make_loc(col_tok)),
+                Some(format!(
+                    "Declare {} as varchar/char to match the column, or change the column to nvarchar to match the caller. Whichever you pick, make both sides the same family — this is the most common cause of a plan that scans a table you know is indexed. (The reverse direction is harmless: an nvarchar column compared to a varchar parameter converts the parameter once, and the seek survives.)",
+                    var_tok.text
+                )),
+            ));
+        }
+    }
+    out
+}

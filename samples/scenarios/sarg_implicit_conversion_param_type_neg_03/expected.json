@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "hygiene.heap_table",
+    "index.missing_index_from_predicate"
+  ],
+  "category": "sargability",
+  "must_fire": [],
+  "must_not_fire": [
+    "sarg.implicit_conversion_param_type"
+  ],
+  "server_version": 2022
+}

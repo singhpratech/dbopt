@@ -6,6 +6,7 @@
 //! SQLite store read-only via `Storage::open` so they keep working even when
 //! the daemon is stopped.
 
+use crate::routes::ApiJson;
 use axum::{
     extract::{Json, Query},
     http::{header, StatusCode},
@@ -208,7 +209,7 @@ fn sort_from_query(q: &ReportQuery) -> String {
 
 // ---------- handlers -------------------------------------------------------
 
-pub async fn start(Json(req): Json<StartReq>) -> impl IntoResponse {
+pub async fn start(ApiJson(req): ApiJson<StartReq>) -> impl IntoResponse {
     let slot = daemon_slot().await;
     let mut guard = slot.lock().await;
     if guard.is_some() {
@@ -286,7 +287,7 @@ pub async fn status() -> impl IntoResponse {
         StatusCode::OK,
         Json(serde_json::json!({
             "running": running,
-            "db_path": db_path.display().to_string(),
+            "db_path": tilde_path(&db_path),
             "instances": instances,
         })),
     )
@@ -298,6 +299,24 @@ pub async fn status() -> impl IntoResponse {
 /// Seconds of captured telemetry currently held (None if the sentinel store
 /// doesn't exist yet or is empty). Lets the Health front-door distinguish a
 /// just-started / freshly-reset monitor from a long, genuinely-clean history.
+/// Collapse the user's home directory to `~` before sending a path to the UI.
+///
+/// The status endpoint is how a user finds their own database file, so the path
+/// is genuinely useful — but the absolute form carries the OS account name, and
+/// this response is readable by anything that can reach the port.
+fn tilde_path(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = home.to_string_lossy().to_string();
+        if !home.is_empty() {
+            if let Some(rest) = s.strip_prefix(&home) {
+                return format!("~{rest}");
+            }
+        }
+    }
+    s
+}
+
 pub fn monitoring_age_secs() -> Option<i64> {
     let path = SentinelConfig::default_db_path();
     Storage::open(&path).ok().and_then(|s| s.monitoring_age_secs())
@@ -504,7 +523,7 @@ pub async fn get_alert_config() -> impl IntoResponse {
 /// new config is persisted to `sentinel-config.json` AND, if the daemon is
 /// running, it is restarted with the new config so the change takes effect
 /// without the user having to stop/start manually.
-pub async fn set_alert_config(Json(alerting): Json<AlertConfig>) -> impl IntoResponse {
+pub async fn set_alert_config(ApiJson(alerting): ApiJson<AlertConfig>) -> impl IntoResponse {
     // Preserve the existing instances + autostart flag; only the alerting block
     // changes here.
     let prior = read_persisted();

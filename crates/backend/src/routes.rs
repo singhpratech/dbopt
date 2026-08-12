@@ -9,6 +9,43 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 
+/// A `Json<T>` whose rejection is an `{"error": …}` body like every other API
+/// failure, instead of axum's default plain-text
+/// `Failed to deserialize the JSON body into the target type: missing field \`server\``.
+///
+/// Two reasons: the UI parses `error` and rendered that raw string at the user,
+/// and the default message narrates internal field names back to any caller.
+pub struct ApiJson<T>(pub T);
+
+#[axum::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for ApiJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(ApiJson(value)),
+            Err(rejection) => {
+                tracing::debug!(target: "backend::api", "request body rejected: {rejection}");
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "the request body was not in the expected format"
+                    })),
+                )
+                    .into_response())
+            }
+        }
+    }
+}
+
+
 use crate::{health, logs, ollama, providers, scan, sentinel_api, sqlserver};
 
 pub fn router() -> Router {
@@ -127,14 +164,14 @@ pub struct ConnectReq {
 #[derive(Debug, Serialize)]
 pub struct ConnectResp { pub ok: bool, pub server_version: Option<String>, pub error: Option<String> }
 
-async fn connect(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn connect(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::ping(&req).await {
         Ok(v) => (StatusCode::OK, Json(ConnectResp { ok: true, server_version: Some(v), error: None })),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(ConnectResp { ok: false, server_version: None, error: Some(e.to_string()) })),
     }
 }
 
-async fn dmv(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn dmv(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_dmv_bundle(&req).await {
         // `Json` serializes on the fly and returns a 500 on the (practically
         // impossible) serialization failure — never a handler panic.
@@ -146,7 +183,7 @@ async fn dmv(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 /// POST /api/monitor/live — one real-time snapshot of server vitals (CPU,
 /// waits, batch/sec, IO, live sessions). The UI polls this on an interval and
 /// renders scrolling line charts (Activity-Monitor style). DMV-only; no rows.
-async fn monitor_live(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn monitor_live(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_live_metrics(&req).await {
         Ok(m) => (StatusCode::OK, Json(m)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -162,11 +199,11 @@ async fn monitor_live(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 /// touches the live server. If the store doesn't exist yet, or the server has
 /// never been monitored, it returns 200 with `has_data: false` (an honest empty
 /// state, NOT an error) so the UI can prompt the user to start the monitor.
-async fn monitor_vitals(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn monitor_vitals(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(sentinel_api::deep_vitals(&req.server))).into_response()
 }
 
-async fn databases(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn databases(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::list_databases(&req).await {
         Ok(dbs) => (StatusCode::OK, Json(serde_json::json!({ "databases": dbs }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -175,7 +212,7 @@ async fn databases(Json(req): Json<ConnectReq>) -> impl IntoResponse {
 
 /// Connect, pull the live DMV bundle, and return ranked prescriptive
 /// recommendations (the advisor) plus the bundle's findings/charts in one call.
-async fn advise(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_dmv_bundle(&req).await {
         Ok(bundle) => {
             let recommendations = analyzer_core::dmv::advise(&bundle);
@@ -214,7 +251,7 @@ pub struct HealthReq {
 /// Aggregated, engine-neutral database health front-door. Dispatches to the
 /// per-engine `HealthProvider`; unknown engines → 400, unimplemented → 501,
 /// provider failures (e.g. connection) → 502.
-async fn health_db(Json(req): Json<HealthReq>) -> impl IntoResponse {
+async fn health_db(ApiJson(req): ApiJson<HealthReq>) -> impl IntoResponse {
     let engine = req.engine.as_deref().unwrap_or("sqlserver");
     match health::run(engine, &req.conn).await {
         Ok(report) => (StatusCode::OK, Json(report)).into_response(),
@@ -229,7 +266,7 @@ pub struct ExplainReq {
     pub sql: String,
 }
 
-async fn explain(Json(req): Json<ExplainReq>) -> impl IntoResponse {
+async fn explain(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     match sqlserver::estimated_plan(&req.conn, &req.sql).await {
         Ok(plan) => (StatusCode::OK, Json(serde_json::json!({ "plan_xml": plan }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -239,7 +276,7 @@ async fn explain(Json(req): Json<ExplainReq>) -> impl IntoResponse {
 /// POST /api/plan/actual — execute the batch with the ACTUAL plan captured,
 /// inside a transaction that is ALWAYS rolled back (DML leaves no trace).
 /// Destructive / DDL / EXEC batches are refused server-side. Returns { plan_xml }.
-async fn plan_actual(Json(req): Json<ExplainReq>) -> impl IntoResponse {
+async fn plan_actual(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     match sqlserver::actual_plan(&req.conn, &req.sql).await {
         Ok(plan) => (StatusCode::OK, Json(serde_json::json!({ "plan_xml": plan }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -250,7 +287,7 @@ async fn plan_actual(Json(req): Json<ExplainReq>) -> impl IntoResponse {
 /// engine (SET PARSEONLY ON). Returns `{ ok, diagnostics: [{number,line,message}] }`.
 /// `ok:true` with empty diagnostics = clean parse. A connection/transport
 /// failure (not a syntax verdict) returns 502.
-async fn validate(Json(req): Json<ExplainReq>) -> impl IntoResponse {
+async fn validate(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     match sqlserver::parse_check(&req.conn, &req.sql).await {
         Ok(diags) => (
             StatusCode::OK,
@@ -262,7 +299,7 @@ async fn validate(Json(req): Json<ExplainReq>) -> impl IntoResponse {
 }
 
 /// POST /api/qstore/status — Query Store config for the connected database.
-async fn qstore_status(Json(req): Json<ConnectReq>) -> impl IntoResponse {
+async fn qstore_status(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::query_store_status(&req).await {
         Ok(s) => (StatusCode::OK, Json(s)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -280,7 +317,7 @@ pub struct QStoreTopReq {
     pub limit: Option<u32>,
 }
 
-async fn qstore_top(Json(req): Json<QStoreTopReq>) -> impl IntoResponse {
+async fn qstore_top(ApiJson(req): ApiJson<QStoreTopReq>) -> impl IntoResponse {
     match sqlserver::query_store_top_queries(&req.conn, req.limit.unwrap_or(20)).await {
         Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "queries": rows }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -305,7 +342,7 @@ pub struct QStoreCaptureReq {
 /// POST /api/qstore/capture — set the connected DB's Query Store capture mode.
 /// This runs DDL; the UI must preview the statement and get explicit user
 /// confirmation first (Safe-Apply). Mode is allowlisted in `set_query_store_capture`.
-async fn qstore_capture(Json(req): Json<QStoreCaptureReq>) -> impl IntoResponse {
+async fn qstore_capture(ApiJson(req): ApiJson<QStoreCaptureReq>) -> impl IntoResponse {
     if !req.confirmed {
         return (
             StatusCode::BAD_REQUEST,
@@ -335,7 +372,7 @@ pub struct ChatReq {
     pub options: Option<serde_json::Value>,
 }
 
-async fn llm_chat(Json(req): Json<ChatReq>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn llm_chat(ApiJson(req): ApiJson<ChatReq>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let model = req.model.unwrap_or_else(|| "gemma4:e4b".into());
     let stream = ollama::stream_chat(model, req.messages, req.options);
     Sse::new(stream).keep_alive(Default::default())
@@ -349,7 +386,7 @@ pub struct CloudChatReq {
 
 async fn llm_cloud(
     Path(provider): Path<String>,
-    Json(req): Json<CloudChatReq>,
+    ApiJson(req): ApiJson<CloudChatReq>,
 ) -> axum::response::Response {
     use providers::{anthropic, bedrock, openai_compat};
     fn bad(e: impl ToString) -> axum::response::Response {
@@ -392,7 +429,7 @@ fn discover_err(e: providers::discover::DiscoverError) -> axum::response::Respon
 }
 
 /// List a cloud provider's available models (proxied to dodge browser CORS).
-async fn llm_cloud_models(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> axum::response::Response {
+async fn llm_cloud_models(Path(provider): Path<String>, ApiJson(req): ApiJson<DiscoverReq>) -> axum::response::Response {
     match providers::discover::list_models(&provider, &req.config).await {
         Ok(models) => (StatusCode::OK, Json(serde_json::json!({ "models": models }))).into_response(),
         Err(e) => discover_err(e),
@@ -400,7 +437,7 @@ async fn llm_cloud_models(Path(provider): Path<String>, Json(req): Json<Discover
 }
 
 /// Validate a cloud provider API key (and, for OpenRouter, report credits).
-async fn llm_cloud_test(Path(provider): Path<String>, Json(req): Json<DiscoverReq>) -> axum::response::Response {
+async fn llm_cloud_test(Path(provider): Path<String>, ApiJson(req): ApiJson<DiscoverReq>) -> axum::response::Response {
     match providers::discover::test_key(&provider, &req.config).await {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err(e) => discover_err(e),
@@ -415,7 +452,7 @@ pub struct AnalyzeReq {
     pub server_version: Option<u16>,
 }
 
-async fn analyze(Json(req): Json<AnalyzeReq>) -> impl IntoResponse {
+async fn analyze(ApiJson(req): ApiJson<AnalyzeReq>) -> impl IntoResponse {
     let input = analyzer_core::AnalyzeInput {
         sql: req.sql,
         plan_xml: req.plan_xml,

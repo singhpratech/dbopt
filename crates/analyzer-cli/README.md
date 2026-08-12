@@ -82,7 +82,7 @@ $ cat query.sql | dbopt --stdin
 
 ## What it looks at
 
-**102 rules**. Version-specific advice is gated against your target, so a 2022+ rewrite
+**103 rules**. Version-specific advice is gated against your target, so a 2022+ rewrite
 is never suggested for a 2019 server:
 
 | | |
@@ -101,14 +101,14 @@ engine-level reasoning behind it.
 
 ## Quality
 
-180 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
+184 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is
 hand-authored, so that number proves *no regression on the cases we wrote* — not a
-measured real-world false-positive rate. 63 of the 102 token rules have a scenario,
+measured real-world false-positive rate. 64 of the 103 token rules have a scenario,
 plus 12 covering the plan-XML and DMV analyzers; the rest are being backfilled.
 
 ## Which databases
 
-**SQL Server (2014 → 2025) is live**, with all 102 rules. The analyzer is engine-agnostic by
+**SQL Server (2014 → 2025) is live**, with all 103 rules. The analyzer is engine-agnostic by
 construction — every rule declares which database it applies to — and **PostgreSQL and MySQL
 are next.** Until their rules land, asking for them returns an empty report rather than a guess.
 

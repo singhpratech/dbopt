@@ -70,6 +70,7 @@ pub const REGISTRY: &[Rule] = &[
     ss(sargability::function_on_indexed_column),
     ss(sargability::leading_wildcard_like),
     ss(sargability::implicit_convert_unicode),
+    ss(sargability::implicit_conversion_param_type_mismatch),
     ss(sargability::not_in_subquery),
     ss(sargability::or_chain_predicate),
     ss(sargability::scalar_udf_in_where),

@@ -66,7 +66,7 @@ the `exports` map; Node gets a synchronous CommonJS build, browsers get ESM.
 
 | Input | Gives you |
 |---|---|
-| `sql` | 102 rules across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, transactions, security and datatypes |
+| `sql` | 103 rules across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, transactions, security and datatypes |
 | `plan_xml` | execution-plan breakdown — operator cost, scans vs seeks, spill and lookup risk |
 | `dmv_bundle` | index-usage and sizing analysis with ranked `CREATE`/`DROP INDEX` scripts |
 | `server_version` | version gating, so a 2022+ rewrite is never suggested for a 2019 target |
@@ -82,7 +82,7 @@ analyze(sql, { server_version: 2025 }).findings; // modern.greatest_least_replac
 
 ## Which databases
 
-**SQL Server (2014 → 2025) is the engine with rules today**, and 100% of the 102 rules
+**SQL Server (2014 → 2025) is the engine with rules today**, and 100% of the 103 rules
 are written for it. The core is engine-agnostic by construction: every rule declares
 which databases it applies to, and `engine` selects the target. **PostgreSQL and MySQL
 are next.** Until their rules land, asking for them returns an empty report rather than
@@ -90,9 +90,9 @@ guesses — the analyzer would rather say nothing than say something wrong.
 
 ## Quality
 
-180 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
+184 tagged scenarios, precision = recall = **F1 = 1.000**. The corpus is hand-authored,
 so that proves *no regression on the cases we wrote*, not a measured real-world
-false-positive rate. 63 of the 102 token rules have a scenario, plus 12 scenarios for
+false-positive rate. 64 of the 103 token rules have a scenario, plus 12 scenarios for
 the plan-XML and DMV analyzers; the rest are being backfilled.
 
 ## The rest of dbopt

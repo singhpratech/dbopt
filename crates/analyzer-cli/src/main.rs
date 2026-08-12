@@ -54,9 +54,16 @@ fn main() -> ExitCode {
     }
 
     match args.first().map(|s| s.as_str()) {
-        Some("--help") | Some("-h") | Some("help") | None => {
+        Some("--help") | Some("-h") | Some("help") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
+        }
+        // No arguments at all is a usage error, not a request for help: usage
+        // goes to stderr and the exit code is 2, matching `dbopt lint` with no
+        // paths. Exiting 0 here meant a CI step that lost its argument passed.
+        None => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
         }
         Some("--version") | Some("-V") | Some("version") => {
             println!("dbopt {}", env!("CARGO_PKG_VERSION"));

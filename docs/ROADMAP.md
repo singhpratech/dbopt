@@ -1,13 +1,13 @@
 # dbopt roadmap
 
 dbopt is a local-first database performance optimizer built as one product for many
-databases. SQL Server (2014 → 2025) is live today with all 102 rules; PostgreSQL and
+databases. SQL Server (2014 → 2025) is live today with all 103 rules; PostgreSQL and
 MySQL are next. The engine seam is already wired end to end, so each database plugs in
 behind the same API, UI and report without disturbing the ones already shipping.
 
 ## v0.1 — SQL Server (shipped)
 
-- 102 token-level T-SQL rules (hygiene, sargability, deprecated, modern, plan-shape,
+- 103 token-level T-SQL rules (hygiene, sargability, deprecated, modern, plan-shape,
   locking, tempdb, statistics, transactions, security, datatypes, index design),
   version-gated 2014 → 2025.
 - Estimated-plan analysis (`SET SHOWPLAN_XML`, compile-only — no execution, no locks).
@@ -15,7 +15,7 @@ behind the same API, UI and report without disturbing the ones already shipping.
 - Sentinel: 6 DMV pollers → SQLite time-series → weekly pain report, with autostart-from-disk.
 - AI assistant (local Ollama + cloud providers, fanout) grounded on the static findings.
 - Web "observatory" UI; durable AI + analysis logs.
-- Quality: 180 eval scenarios, self-graded F1 = 1.000 (covering 63 of the 102 token
+- Quality: 184 eval scenarios, self-graded F1 = 1.000 (covering 64 of the 103 token
   rules plus 12 plan-XML/DMV checks; the rest still being backfilled); Rust unit +
   HTTP integration tests; Playwright UI e2e.
 
@@ -65,7 +65,7 @@ Mapping per engine:
 | Catalog        | `sys.objects`/`sys.sql_modules`    | `information_schema`/`pg_proc`      | `information_schema`               |
 
 ### 2. Per-rule engine tags
-Audit the 102 rules: many sargability/hygiene *concepts* are universal (leading
+Audit the 103 rules: many sargability/hygiene *concepts* are universal (leading
 wildcard, function-on-column, SELECT *), even if the trigger syntax differs;
 plan-shape/locking/tempdb rules are largely SQL-Server-specific. Tag accordingly
 and add Postgres/MySQL rule families. Extend the eval corpus with an engine

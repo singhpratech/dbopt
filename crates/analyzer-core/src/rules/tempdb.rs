@@ -29,6 +29,11 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         let mut order_by_at: Option<usize> = None;
         let mut has_top_paren = false;
         let mut has_offset = false;
+        // A sort over a #temp table or @table variable is bounded by whatever
+        // just populated it, and it is already in tempdb — warning that it
+        // "can spill to tempdb" is advice with nowhere to go.
+        let mut reads_only_temp = false;
+        let mut saw_from = false;
         let mut j = i + 1;
         while j < tokens.len() {
             let tk = &tokens[j];
@@ -48,6 +53,16 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
                             has_top_paren = true;
                         }
                     }
+                } else if is_word(tk, "FROM") || is_word(tk, "JOIN") {
+                    if let Some(n) = tokens.get(j + 1) {
+                        let temp = n.text.starts_with('#') || n.text.starts_with('@');
+                        if !saw_from {
+                            reads_only_temp = temp;
+                            saw_from = true;
+                        } else if !temp {
+                            reads_only_temp = false;
+                        }
+                    }
                 } else if is_word(tk, "OFFSET") {
                     has_offset = true;
                 } else if is_word(tk, "ORDER") && order_by_at.is_none() {
@@ -62,7 +77,7 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         }
 
         if let Some(loc_idx) = order_by_at {
-            if !has_top_paren && !has_offset {
+            if !has_top_paren && !has_offset && !reads_only_temp {
                 out.push(finding(
                     "tempdb.spill_risk_large_sort",
                     sev,

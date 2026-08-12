@@ -50,7 +50,7 @@ non-SARGable — the optimizer cannot seek the index and must scan.
 
 | Field on `AnalyzeInput` | What it unlocks |
 |---|---|
-| `sql` | 102 token-level rules across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, transactions, security and datatypes |
+| `sql` | 103 token-level rules across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, transactions, security and datatypes |
 | `plan_xml` | execution-plan breakdown — operator cost treemap, scans vs seeks, spill and lookup warnings |
 | `dmv_bundle` | index-usage heatmap, size treemap and ranked `CREATE`/`DROP` index recommendations with copy-paste T-SQL |
 | `server_version` | version gating — a 2022+ rewrite is never suggested against a 2019 target |
@@ -69,7 +69,7 @@ non-SARGable — the optimizer cannot seek the index and must scan.
   rewrite is never suggested against a 2019 target. The rest describe patterns that are
   wrong on every supported version and are not gated.
 - **Engine-agnostic from the core out.** Rules declare the databases they apply to and
-  `engine` picks the target. SQL Server is live with all 102 rules; PostgreSQL and MySQL
+  `engine` picks the target. SQL Server is live with all 103 rules; PostgreSQL and MySQL
   are next, and an engine without rules yields an empty report rather than a guess.
 
 ## Extending it
@@ -78,8 +78,8 @@ Rules are `fn(&RuleCtx) -> Vec<Finding>` registered in a single `REGISTRY` table
 declaring the engines it applies to. See
 [CONTRIBUTING.md](https://github.com/singhpratech/dbopt/blob/main/CONTRIBUTING.md) —
 new rules ship with a positive and a negative scenario in the eval corpus
-(180 scenarios, F1 = 1.000, self-graded). That is the standard going forward, not a
-description of the whole registry: 63 of the 102 rules have scenarios today and the
+(184 scenarios, F1 = 1.000, self-graded). That is the standard going forward, not a
+description of the whole registry: 64 of the 103 rules have scenarios today and the
 remainder are being backfilled.
 
 ## See also

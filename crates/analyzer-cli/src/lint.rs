@@ -667,5 +667,24 @@ fn print_sarif(all: &[FileFinding], read_errors: &[(String, String)]) -> anyhow:
 
 /// SARIF artifactLocation.uri should use forward slashes and relative paths.
 fn uri_for(path: &str) -> String {
-    path.replace('\\', "/")
+    let norm = path.replace('\\', "/");
+    // `<stdin>` is not a location; leave it as the literal SARIF consumers see.
+    if norm.starts_with('<') {
+        return norm;
+    }
+    // Prefer a repo-relative path: that is what GitHub code scanning matches
+    // against the checkout, and an absolute path from a build machine matches
+    // nothing. Fall back to a proper file:// URI rather than a bare absolute
+    // path, which is not a valid URI.
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy().replace('\\', "/");
+        if let Some(rel) = norm.strip_prefix(&format!("{cwd}/")) {
+            return rel.to_string();
+        }
+    }
+    if norm.starts_with('/') {
+        format!("file://{norm}")
+    } else {
+        norm
+    }
 }
