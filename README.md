@@ -66,6 +66,10 @@ irm https://dbopt.org/install.ps1 | iex
 Each is a **single self-contained binary** with the web UI embedded — run it, then open
 `http://127.0.0.1:3690`. Checksums are on the [releases page](https://github.com/singhpratech/dbopt/releases).
 
+Each archive contains **two binaries**: `dbopt` (the linter — `dbopt lint ./db`, offline, no
+connection needed) and `dbopt-backend` (the local app — run it and open <http://127.0.0.1:3690>).
+A `WHICH-BINARY.txt` in the archive says the same thing.
+
 **Developers** can skip the installer entirely:
 
 ```bash

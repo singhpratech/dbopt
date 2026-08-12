@@ -73,14 +73,31 @@ jobs:
         uses: actions/download-artifact@v4
         with: { name: web-dist, path: web/dist }
       - name: build backend
-        run: cargo build --release --target ${{ matrix.target }} -p backend
+        # Both shipped binaries. Only the backend was built here, so the
+        # release archives contained no linter at all — `dbopt lint` on a
+        # downloaded build started the web server instead, while the README
+        # documents `dbopt lint` as the CI entry point.
+        run: cargo build --release --target ${{ matrix.target }} -p backend -p dbopt
       - name: stage artifact
         shell: bash
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/dbopt-backend${{ matrix.binsuffix }} staging/dbopt${{ matrix.binsuffix }}
+          # Names match the documentation and `cargo install dbopt`:
+          #   dbopt          -> the CLI / linter
+          #   dbopt-backend  -> the local app (API + embedded UI on :3690)
+          cp target/${{ matrix.target }}/release/dbopt${{ matrix.binsuffix }} staging/dbopt${{ matrix.binsuffix }}
+          cp target/${{ matrix.target }}/release/dbopt-backend${{ matrix.binsuffix }} staging/dbopt-backend${{ matrix.binsuffix }}
           cp README.md staging/ 2>/dev/null || true
           cp samples/bad.sql staging/sample.sql 2>/dev/null || true
+          {
+            echo "dbopt          the linter. Analyses .sql files offline, no database needed:"
+            echo "                 dbopt lint ./db --format sarif --fail-on warning"
+            echo "               Run 'dbopt --help' for everything else."
+            echo ""
+            echo "dbopt-backend  the local app. Run it, then open http://127.0.0.1:3690 for the"
+            echo "               UI, live server metrics and the AI assistant."
+            echo "               Set DBOPT_NO_OPEN=1 to stop it opening a browser."
+          } > staging/WHICH-BINARY.txt
       - name: archive
         shell: bash
         run: |
@@ -178,7 +195,7 @@ jobs:
           xcrun stapler validate "dbopt-${{ matrix.label }}.dmg"
           # Also refresh the .tar.gz so the bare binary inside it is signed too.
           rm -f "dbopt-${{ matrix.label }}.tar.gz"
-          cp "$APP/Contents/MacOS/dbopt" staging/dbopt
+          cp "$APP/Contents/MacOS/dbopt" staging/dbopt-backend
           (cd staging && tar czf "../dbopt-${{ matrix.label }}.tar.gz" ./*)
           security delete-keychain "$KEYCHAIN" || true
           echo "Notarized + stapled: dbopt-${{ matrix.label }}.dmg"
@@ -331,11 +348,12 @@ jobs:
           echo "/tmp/zig-linux-x86_64-0.13.0" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild
       - name: build static musl binary
-        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p backend
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p backend -p dbopt
       - name: archive
         run: |
           mkdir -p staging
-          cp target/x86_64-unknown-linux-musl/release/dbopt-backend staging/dbopt
+          cp target/x86_64-unknown-linux-musl/release/dbopt staging/dbopt
+          cp target/x86_64-unknown-linux-musl/release/dbopt-backend staging/dbopt-backend
           cp README.md staging/ 2>/dev/null || true
           cp samples/bad.sql staging/sample.sql 2>/dev/null || true
           (cd staging && tar czf ../dbopt-linux-x86_64-musl.tar.gz ./*)

@@ -1,6 +1,6 @@
 {
   "name": "dbopt-core",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Find and fix slow SQL before it reaches production. A local-first database performance analyzer compiled from Rust to WebAssembly \u2014 runs in Node and the browser and sends nothing anywhere. SQL Server rules today; engine-agnostic by design.",
   "license": "Apache-2.0",
   "homepage": "https://dbopt.org",

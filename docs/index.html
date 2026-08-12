@@ -538,7 +538,7 @@ ORDER BY o.Total DESC;</textarea>
 <section class="band alt" id="install">
   <div class="wrap">
     <div class="eyebrow">Install</div>
-    <h2>One self-contained binary. Run it, open the port.</h2>
+    <h2>Two binaries, no dependencies: the linter and the app.</h2>
     <div class="dl">
       <a href="https://github.com/singhpratech/dbopt/releases/latest/download/dbopt-windows-x86_64.msi">
         <span class="os">Windows</span><span class="ext">.msi · x64 installer</span></a>
@@ -555,8 +555,12 @@ curl -fsSL https://dbopt.org/install.sh | sh
 <b># Windows (PowerShell)</b>
 irm https://dbopt.org/install.ps1 | iex
 
+<b># what you get</b>
+dbopt lint ./db         <span style="color:var(--ink-3)"># the linter — offline, no connection</span>
+dbopt-backend           <span style="color:var(--ink-3)"># the app — then open :3690</span>
+
 <b># developers</b>
-cargo install dbopt     <span style="color:var(--ink-3)"># the CLI + linter, then: dbopt lint ./db</span>
+cargo install dbopt     <span style="color:var(--ink-3)"># just the CLI + linter</span>
 npm i dbopt-core        <span style="color:var(--ink-3)"># the analyzer in Node or the browser</span></pre>
     </div>
     <p class="note">

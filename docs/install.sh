@@ -36,10 +36,19 @@ curl -fsSL "$url" -o "$tmp/pkg.tar.gz"
 tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 
 mkdir -p "$DEST"
+# The archive carries both shipped binaries: `dbopt` is the linter and `dbopt-backend`
+# is the local app. Older archives contained only the app, named `dbopt` — fall back
+# to that so this installer keeps working against an older release.
 mv "$tmp/dbopt" "$DEST/$BIN"
 chmod +x "$DEST/$BIN"
-
-echo "dbopt: installed to $DEST/$BIN"
+if [ -f "$tmp/dbopt-backend" ]; then
+  mv "$tmp/dbopt-backend" "$DEST/dbopt-backend"
+  chmod +x "$DEST/dbopt-backend"
+  echo "dbopt: installed to $DEST/$BIN (linter) and $DEST/dbopt-backend (app)"
+  echo "dbopt: try  dbopt lint ./db   ·  or run dbopt-backend and open http://127.0.0.1:3690"
+else
+  echo "dbopt: installed to $DEST/$BIN"
+fi
 
 # Desktop integration on Linux so dbopt is launchable from the apps menu
 # (not just a terminal). macOS uses the .app/.dmg instead, so skip it there.
