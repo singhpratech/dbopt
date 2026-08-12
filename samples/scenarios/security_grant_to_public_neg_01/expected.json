@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["security.grant_to_public"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "security"
+}

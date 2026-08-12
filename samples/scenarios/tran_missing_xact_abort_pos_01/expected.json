@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "tran.begin_without_try_catch"
+  ],
+  "category": "transactions",
+  "must_fire": [
+    "tran.missing_xact_abort"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

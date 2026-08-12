@@ -152,10 +152,10 @@ the `bedrock` feature — it is not in the prebuilt downloads.)*
 
 ## Quality bar
 
-- **184 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
+- **264 eval scenarios** · precision = recall = **F1 = 1.000** (CI gate ≥ 0.95). The harness is
   **self-graded** — the scenarios are hand-authored, so this proves *no regression on the cases we wrote*,
   not a measured real-world false-positive rate. A held-out third-party corpus is on the roadmap.
-- **64 of the 103 token rules** have a scenario, each with a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers. The remaining rules are being backfilled.
+- **Every one of the 104 rule ids** has a scenario — a positive case (proves it fires) and a negative case (proves it stays quiet on similar-looking benign SQL). A further 12 scenarios cover the plan-XML and DMV analyzers.
 - Rust unit + HTTP integration tests, and a Playwright UI suite.
 
 ```bash

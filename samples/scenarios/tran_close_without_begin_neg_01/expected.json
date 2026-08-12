@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["tran.close_without_begin"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "transactions"
+}

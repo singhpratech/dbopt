@@ -1,0 +1,1 @@
+GRANT CONTROL ON DATABASE::Payroll TO AppUser;

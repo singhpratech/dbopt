@@ -1,0 +1,7 @@
+{
+  "must_fire": ["datatype.implicit_string_length_cast"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "datatypes"
+}

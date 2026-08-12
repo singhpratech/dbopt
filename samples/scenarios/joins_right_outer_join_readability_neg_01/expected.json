@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["joins.right_outer_join_readability"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "joins"
+}

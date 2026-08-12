@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.select_star"
+  ],
+  "category": "security",
+  "must_fire": [],
+  "must_not_fire": [
+    "security.openrowset_inline_credentials"
+  ],
+  "server_version": 2022
+}

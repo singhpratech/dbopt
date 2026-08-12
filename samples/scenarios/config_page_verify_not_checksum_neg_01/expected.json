@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["config.page_verify_not_checksum"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "config"
+}

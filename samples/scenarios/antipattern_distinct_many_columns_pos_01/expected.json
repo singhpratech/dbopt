@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "joins.distinct_with_join_fanout"
+  ],
+  "category": "antipattern",
+  "must_fire": [
+    "antipattern.distinct_many_columns"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

@@ -1,0 +1,7 @@
+{
+  "must_fire": ["config.maxdop_zero"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "config"
+}

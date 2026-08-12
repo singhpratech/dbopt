@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.heap_table"
+  ],
+  "category": "sargability",
+  "must_fire": [
+    "sarg.charindex_search_predicate"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

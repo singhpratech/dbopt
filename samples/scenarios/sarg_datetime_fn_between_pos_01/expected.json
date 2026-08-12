@@ -1,0 +1,7 @@
+{
+  "must_fire": ["sarg.datetime_fn_between"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "sargability"
+}

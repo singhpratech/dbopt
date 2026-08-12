@@ -1,0 +1,1 @@
+SELECT OrderId FROM dbo.Orders WHERE DATEADD(day, 30, PlacedAt) < SYSUTCDATETIME();

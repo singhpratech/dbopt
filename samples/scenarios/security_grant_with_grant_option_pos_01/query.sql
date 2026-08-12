@@ -1,0 +1,1 @@
+GRANT SELECT ON dbo.Employees TO AppUser WITH GRANT OPTION;

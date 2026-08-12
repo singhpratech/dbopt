@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "hygiene.heap_table",
+    "tran.begin_without_try_catch"
+  ],
+  "category": "transactions",
+  "must_fire": [],
+  "must_not_fire": [
+    "tran.ddl_inside_explicit_tran"
+  ],
+  "server_version": 2022
+}

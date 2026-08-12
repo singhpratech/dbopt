@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["joins.distinct_with_join_fanout"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "joins"
+}

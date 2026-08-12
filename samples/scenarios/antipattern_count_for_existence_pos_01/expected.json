@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "antipattern",
+  "must_fire": [
+    "antipattern.count_for_existence"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

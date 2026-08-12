@@ -331,19 +331,54 @@ pub fn add_to_privileged_role(ctx: &RuleCtx) -> Vec<Finding> {
             if j < tokens.len() && tokens[j].text == "(" {
                 j = skip_comments(tokens, j + 1);
             }
-            // Skip `@param =` named-argument prefix.
-            if j + 1 < tokens.len()
-                && tokens[j].kind == TokKind::Word
-                && tokens[j].text.starts_with('@')
-                && skip_comments(tokens, j + 1) < tokens.len()
-                && tokens[skip_comments(tokens, j + 1)].text == "="
-            {
-                j = skip_comments(tokens, skip_comments(tokens, j + 1) + 1);
+            // Named arguments may appear in any order, so `@loginame = 'x',
+            // @rolename = 'sysadmin'` is legal and puts the login first.
+            // Reading "the first string literal" as the role missed it entirely
+            // — a silent miss on the highest-severity security rule we have.
+            // Look for an explicit `@rolename`/`@srvrolename` first; fall back
+            // to positional only when the call uses no named arguments.
+            let mut role_tok: Option<usize> = None;
+            let mut k = j;
+            let mut depth = 0i32;
+            while k < tokens.len() {
+                let tk = &tokens[k];
+                if tk.text == "(" { depth += 1; }
+                else if tk.text == ")" { depth -= 1; if depth < 0 { break; } }
+                else if depth <= 0 && (tk.text == ";" || is_word(tk, "GO")) { break; }
+                else if tk.kind == TokKind::Word
+                    && (tk.text.eq_ignore_ascii_case("@rolename")
+                        || tk.text.eq_ignore_ascii_case("@srvrolename"))
+                {
+                    let eq = skip_comments(tokens, k + 1);
+                    if eq < tokens.len() && tokens[eq].text == "=" {
+                        let v = skip_comments(tokens, eq + 1);
+                        if v < tokens.len() && tokens[v].kind == TokKind::String {
+                            role_tok = Some(v);
+                            break;
+                        }
+                    }
+                }
+                k += 1;
             }
-            if j < tokens.len() && tokens[j].kind == TokKind::String {
-                let role = string_inner(&tokens[j]);
+            if role_tok.is_none() {
+                // Positional form: skip a single `@param =` prefix, then read
+                // the first string argument.
+                if j + 1 < tokens.len()
+                    && tokens[j].kind == TokKind::Word
+                    && tokens[j].text.starts_with('@')
+                    && skip_comments(tokens, j + 1) < tokens.len()
+                    && tokens[skip_comments(tokens, j + 1)].text == "="
+                {
+                    j = skip_comments(tokens, skip_comments(tokens, j + 1) + 1);
+                }
+                if j < tokens.len() && tokens[j].kind == TokKind::String {
+                    role_tok = Some(j);
+                }
+            }
+            if let Some(v) = role_tok {
+                let role = string_inner(&tokens[v]);
                 if let Some((sev, scope)) = role_sev(&role) {
-                    push(&mut out, &role, scope, sev, &tokens[j]);
+                    push(&mut out, &role, scope, sev, &tokens[v]);
                 }
             }
         }

@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "sarg.function_on_column"
+  ],
+  "category": "joins",
+  "must_fire": [
+    "joins.function_on_join_column"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

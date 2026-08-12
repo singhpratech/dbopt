@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "index.missing_index_from_predicate",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "index",
+  "must_fire": [],
+  "must_not_fire": [
+    "index.order_by_forces_sort"
+  ],
+  "server_version": 2022
+}

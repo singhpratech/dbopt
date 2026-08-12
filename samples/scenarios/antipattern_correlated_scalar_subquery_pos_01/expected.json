@@ -1,0 +1,7 @@
+{
+  "must_fire": ["antipattern.correlated_scalar_subquery_in_select"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "antipattern"
+}

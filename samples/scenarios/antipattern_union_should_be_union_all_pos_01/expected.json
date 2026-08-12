@@ -1,0 +1,7 @@
+{
+  "must_fire": ["antipattern.union_should_be_union_all"],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "antipattern"
+}

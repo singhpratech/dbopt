@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.heap_table"
+  ],
+  "category": "datatypes",
+  "must_fire": [
+    "datatype.implicit_string_length"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

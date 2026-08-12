@@ -1,0 +1,3 @@
+BEGIN TRANSACTION;
+CREATE TABLE dbo.StagingRows (Id int NOT NULL, Payload nvarchar(400) NOT NULL);
+COMMIT TRANSACTION;
