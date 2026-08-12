@@ -291,7 +291,7 @@ footer{border-top:1px solid var(--line);padding:44px 0;background:var(--paper-2)
             <i>Pulls every column. Read amplification, and it breaks covering-index plans.</i>
             <b>hygiene.select_star</b>
           </div>
-          <div class="mk-line"><span class="mk-n">5</span><span>FROM Orders o WITH (NOLOCK)</span></div>
+          <div class="mk-line"><span class="mk-n">5</span><span>FROM dbo.Orders o WITH (NOLOCK)</span></div>
           <div class="mk-note" data-s="error">
             <i>Dirty reads: duplicated rows, missed rows, and rows from rolled-back transactions.</i>
             <b>hygiene.nolock</b>
