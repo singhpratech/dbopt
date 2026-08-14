@@ -404,7 +404,8 @@ ORDER BY o.Total DESC;</textarea>
         <div class="tag">02 · Plan — <em>mature</em></div>
         <h3>Execution-plan breakdown</h3>
         <p>Fetches the estimated plan — compile-only, the query never runs — and breaks down operator
-           cost, scans versus seeks, spill and lookup risk.</p>
+           cost, scans versus seeks, spill and lookup risk. A saved <code>.sqlplan</code> reads the same
+           way with no server at all: <code>dbopt lint plan.sqlplan</code>.</p>
       </div>
       <div class="col">
         <div class="tag">03 · Live — <em>on-demand</em></div>
@@ -472,7 +473,10 @@ ORDER BY o.Total DESC;</textarea>
           <p>Every query dbopt runs hits catalog views, dynamic management views or query history —
              metadata, never table data.</p></li>
         <li><h3>Read-only and reversible</h3>
-          <p>Estimated plans are compile-only. DDL is preview-only — Safe-Apply never runs a change for you.</p></li>
+          <p>Estimated plans are compile-only. DDL is preview-only — Safe-Apply never runs a change for you.
+             The one path that does execute — capturing an <em>actual</em> plan — runs inside a transaction
+             that is always rolled back, and tells you what the batch is estimated to cost before it starts,
+             so a heavy query on a busy server is your decision rather than a surprise.</p></li>
         <li><h3>One binary, no services</h3>
           <p>Linux, macOS, Windows. SQLite for storage, the web UI embedded inside. Nothing else to install.</p></li>
         <li><h3>Two things leave the app, both your choice</h3>
