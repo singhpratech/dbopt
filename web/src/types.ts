@@ -7,12 +7,25 @@ export interface Location {
   col: number;
 }
 
+/** The database object a finding is about. Absent when the rule matched text
+ *  rather than an object (most token rules) — never inferred from the message.
+ *  `row_count` / `reserved_kb` are present only when measured. */
+export interface ObjectRef {
+  schema: string;
+  table: string;
+  index?: string;
+  row_count?: number;
+  reserved_kb?: number;
+}
+
 export interface Finding {
   rule: string;
   severity: Severity;
   message: string;
   location: Location | null;
   recommendation: string | null;
+  /** Optional: omitted by the backend when the rule has no object identity. */
+  object?: ObjectRef;
 }
 
 export interface TreemapNode {

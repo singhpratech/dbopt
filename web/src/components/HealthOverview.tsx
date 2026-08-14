@@ -351,7 +351,11 @@ export function HealthOverview({
           <IssueSection
             tone="opportunity"
             heading="OPPORTUNITIES — performance & cost wins"
-            emptyLine="Fully optimized — no opportunities found."
+            emptyLine={
+              hasRuntimeData
+                ? "No opportunities found in the observed workload."
+                : "No workload observed yet — this is not a clean bill of health. Opportunities are found by watching real query activity; run the monitor (or let the baseline finish) and scan again."
+            }
             issues={report.issues.filter((i) => i.lane === "opportunity")}
             conn={conn}
             ui={ui}

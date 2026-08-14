@@ -10,7 +10,7 @@
 //! `RecKind`/`Severity`/sentinel DTO shapes never leak past this file.
 
 use analyzer_core::dmv::{self, RecKind, Recommendation};
-use analyzer_core::Severity;
+use analyzer_core::{ObjectRef, Severity};
 use chrono::Utc;
 use sentinel::storage::TimeRange;
 
@@ -82,7 +82,13 @@ impl HealthProvider for SqlServerHealthProvider {
                 .chars()
                 .take(90)
                 .collect();
-            let affected_object = format!("rule:{}", f.rule.0);
+            // Name the real table when the rule knows it. `rule:<id>` is the
+            // honest fallback for a token rule that matched TEXT and has no
+            // object identity — we never regex a table name out of a message.
+            let affected_object = match &f.object {
+                Some(o) => o.display(),
+                None => format!("rule:{}", f.rule.0),
+            };
             issues.push(Issue {
                 id: format!("static:finding:{}:{}", f.rule.0, obj_key),
                 source: "static".to_string(),
@@ -91,7 +97,7 @@ impl HealthProvider for SqlServerHealthProvider {
                 lane: lane.to_string(),
                 // A finding's own message IS the plain-English consequence.
                 consequence: f.message.clone(),
-                impact_rank: static_impact(f.severity),
+                impact_rank: size_weighted_impact(f.severity, f.object.as_ref()),
                 title: f.message.clone(),
                 affected_object,
                 rationale: f
@@ -102,12 +108,20 @@ impl HealthProvider for SqlServerHealthProvider {
                 fix_action: "review".to_string(),
                 // A static finding has no DMV counter behind it — the one honest
                 // signal is its severity, which IS measured from the rule match.
-                metrics: vec![Metric {
-                    label: "Severity".to_string(),
-                    value: severity.to_string(),
-                    // Provenance of a static finding is the rule that matched.
-                    source: Some(format!("rule:{}", f.rule.0)),
-                }],
+                metrics: {
+                    let mut m = vec![Metric {
+                        label: "Severity".to_string(),
+                        value: severity.to_string(),
+                        // Provenance of a static finding is the rule that matched.
+                        source: Some(format!("rule:{}", f.rule.0)),
+                    }];
+                    // Measured size is the evidence behind the ranking — show
+                    // the DBA the number the order was computed from.
+                    if let Some(sm) = f.object.as_ref().and_then(size_metric) {
+                        m.push(sm);
+                    }
+                    m
+                },
                 confidence: "observed".to_string(),
             });
         }
@@ -287,7 +301,14 @@ impl HealthProvider for SqlServerHealthProvider {
         // nothing — never a fabricated finding. Each check carries its MEASURED
         // value and a copy-paste fix the operator reviews before running.
         if let Ok(facts) = ss::pull_operational(req).await {
-            let db = req.database.clone().unwrap_or_default();
+            // Prefer the name the facts were actually measured against; the
+            // request's `database` is None on a server-level connect, which is
+            // what used to render the literal "[YourDatabase]" in issue titles.
+            let db = if !facts.database_name.is_empty() {
+                facts.database_name.clone()
+            } else {
+                req.database.clone().unwrap_or_default()
+            };
             for c in super::operational::evaluate(&facts, &db) {
                 let impact_rank = match c.severity {
                     "critical" => 9000,
@@ -596,6 +617,85 @@ fn static_impact(s: Severity) -> u32 {
     }
 }
 
+/// Cost weighting — rank a static finding by how big the object it names is.
+///
+/// Severity alone cannot order two findings of the SAME rule: "this table is a
+/// heap" is equally true of a 900-row lookup table and a 262M-row fact table,
+/// and only one of them is worth a maintenance window. When the finding carries
+/// an [`ObjectRef`] with a size measured from `sys.dm_db_partition_stats`, we
+/// widen its rank within its severity band by that size.
+///
+/// Two properties this must hold, and the reasons they matter:
+///   * **Bands never overlap.** The bonus is capped at 999 and the bands are
+///     3000 apart, so a huge-table *warning* can never outrank a genuine
+///     *error*. Size breaks ties inside a severity, it does not override it.
+///   * **Unknown size is not zero.** A finding with no measured size keeps the
+///     band's base rank. Treating "we didn't measure it" as "it's empty" would
+///     silently bury findings on objects that simply weren't in the scan.
+///
+/// Weight is logarithmic in both rows and reserved space, and takes whichever
+/// is larger: a narrow billion-row table and a wide LOB table are both
+/// expensive, for different reasons.
+fn size_weighted_impact(s: Severity, object: Option<&ObjectRef>) -> u32 {
+    let base = static_impact(s);
+    let Some(o) = object else { return base };
+    let mut w: f64 = 0.0;
+    if let Some(rows) = o.row_count {
+        // 1 row -> 0.0, 1e9 rows -> 1.0.
+        w = w.max((rows.max(1) as f64).log10() / 9.0);
+    }
+    if let Some(kb) = o.reserved_kb {
+        // 1 MB -> 0.0, 1 TB -> 1.0.
+        let mb = (kb / 1024).max(1) as f64;
+        w = w.max(mb.log10() / 6.0);
+    }
+    base + (w.clamp(0.0, 1.0) * 999.0).round() as u32
+}
+
+/// Human size chip for the evidence strip — only rendered when MEASURED.
+fn size_metric(o: &ObjectRef) -> Option<Metric> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(rows) = o.row_count {
+        parts.push(format!("{} rows", thousands(rows)));
+    }
+    if let Some(kb) = o.reserved_kb {
+        parts.push(human_kb(kb));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(Metric {
+        label: "Object size".to_string(),
+        value: parts.join(" · "),
+        source: Some("sys.dm_db_partition_stats".to_string()),
+    })
+}
+
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn human_kb(kb: u64) -> String {
+    const MB: f64 = 1024.0;
+    const GB: f64 = 1024.0 * 1024.0;
+    let k = kb as f64;
+    if k >= GB {
+        format!("{:.1} GB", k / GB)
+    } else if k >= MB {
+        format!("{:.1} MB", k / MB)
+    } else {
+        format!("{kb} KB")
+    }
+}
+
 /// Allowlist of waits a DBA can actually act on. We only raise a reliability
 /// issue for these — every other (idle/background/scheduler) wait is noise and
 /// is never surfaced, so the grade reflects real, fixable pain.
@@ -616,4 +716,77 @@ fn is_actionable_wait(w: &str) -> bool {
         "MEMORY_ALLOCATION_EXT",
     ];
     PREFIXES.iter().any(|p| w.starts_with(p)) || EXACT.contains(&w)
+}
+
+#[cfg(test)]
+mod cost_weighting_tests {
+    use super::*;
+
+    fn obj(rows: Option<u64>, kb: Option<u64>) -> ObjectRef {
+        ObjectRef { schema: "dbo".into(), table: "t".into(), index: None, row_count: rows, reserved_kb: kb }
+    }
+
+    #[test]
+    fn size_breaks_ties_inside_a_severity() {
+        // Same rule, same severity, different table size — the big one must win.
+        let small = size_weighted_impact(Severity::Warning, Some(&obj(Some(1_200), Some(64))));
+        let big = size_weighted_impact(Severity::Warning, Some(&obj(Some(262_000_000), Some(41_000_000))));
+        assert!(big > small, "big={big} small={small}");
+    }
+
+    #[test]
+    fn size_never_lets_a_warning_outrank_an_error() {
+        // The whole point of the cap: cost weighting orders WITHIN a severity,
+        // it must never promote an efficiency warning above active harm.
+        let hugest = size_weighted_impact(Severity::Warning, Some(&obj(Some(u64::MAX), Some(u64::MAX))));
+        let smallest_error = size_weighted_impact(Severity::Error, None);
+        assert!(hugest < smallest_error, "warning={hugest} error={smallest_error}");
+        assert!(hugest <= static_impact(Severity::Warning) + 999);
+    }
+
+    #[test]
+    fn unknown_size_keeps_the_base_rank_it_is_not_treated_as_empty() {
+        let base = static_impact(Severity::Error);
+        assert_eq!(size_weighted_impact(Severity::Error, None), base);
+        // An ObjectRef with a table but no measurement is equally un-ranked.
+        assert_eq!(size_weighted_impact(Severity::Error, Some(&obj(None, None))), base);
+        // ...and must NOT rank below a genuinely tiny measured table.
+        let tiny = size_weighted_impact(Severity::Error, Some(&obj(Some(1), Some(8))));
+        assert!(size_weighted_impact(Severity::Error, None) >= tiny);
+    }
+
+    #[test]
+    fn a_wide_table_ranks_on_space_even_when_row_count_is_modest() {
+        // 50k rows of LOB data occupying 80 GB is expensive for a reason rows
+        // alone cannot see, so the weight takes whichever signal is larger.
+        let narrow_many = size_weighted_impact(Severity::Warning, Some(&obj(Some(50_000), Some(4_096))));
+        let wide_few = size_weighted_impact(Severity::Warning, Some(&obj(Some(50_000), Some(80 * 1024 * 1024))));
+        assert!(wide_few > narrow_many, "wide={wide_few} narrow={narrow_many}");
+    }
+
+    #[test]
+    fn empty_and_one_row_tables_do_not_underflow() {
+        let base = static_impact(Severity::Info);
+        assert_eq!(size_weighted_impact(Severity::Info, Some(&obj(Some(0), Some(0)))), base);
+        assert_eq!(size_weighted_impact(Severity::Info, Some(&obj(Some(1), Some(1)))), base);
+    }
+
+    #[test]
+    fn size_chip_is_measured_or_absent_never_zero() {
+        assert!(size_metric(&obj(None, None)).is_none(), "no measurement -> no chip");
+        let m = size_metric(&obj(Some(262_000_000), Some(41_000_000))).unwrap();
+        assert_eq!(m.value, "262,000,000 rows \u{b7} 39.1 GB");
+        assert_eq!(m.source.as_deref(), Some("sys.dm_db_partition_stats"));
+    }
+
+    #[test]
+    fn human_numbers_read_the_way_a_dba_writes_them() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(262_000_000), "262,000,000");
+        assert_eq!(human_kb(512), "512 KB");
+        assert_eq!(human_kb(2_048), "2.0 MB");
+        assert_eq!(human_kb(5 * 1024 * 1024), "5.0 GB");
+    }
 }

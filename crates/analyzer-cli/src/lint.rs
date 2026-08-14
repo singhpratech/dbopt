@@ -37,6 +37,10 @@ struct Options {
     ignore: Vec<String>,
     /// Read one SQL document from stdin instead of walking paths.
     stdin: bool,
+    /// Show at most N findings per rule, with a rollup line for the remainder.
+    /// `None` = the format default (capped for human, unlimited for the machine
+    /// formats); `Some(0)` = explicitly unlimited.
+    max_per_rule: Option<usize>,
 }
 
 pub const LINT_USAGE: &str = "\
@@ -57,6 +61,9 @@ OPTIONS:
     --ignore <rules>              Suppress rules. Repeatable and comma-separated.
                                   Accepts an exact id (hygiene.nolock), a family
                                   (hygiene), or a glob (hygiene.*).
+    --max-per-rule <N>            Show at most N findings per rule and roll the
+                                  rest into a count. 0 = unlimited. Default: 3
+                                  for human output, unlimited for json/sarif.
     --stdin                       Read SQL from stdin, reported as <stdin>
     -h, --help                    Show this help
 
@@ -184,8 +191,20 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     });
 
     match opts.format {
-        Format::Human => print_human(&all, analyzed, &read_errors, suppressed, &notes),
-        Format::Json => print_json(&all, analyzed, &read_errors, suppressed)?,
+        Format::Human => print_human(
+            &all,
+            analyzed,
+            &read_errors,
+            suppressed,
+            &notes,
+            // Human output is read by a person in a terminal: cap by default so
+            // a single chatty hygiene rule cannot bury everything else. The
+            // machine formats stay complete unless the cap is asked for.
+            opts.max_per_rule.unwrap_or(DEFAULT_HUMAN_MAX_PER_RULE),
+        ),
+        Format::Json => print_json(
+            &all, analyzed, &read_errors, suppressed, opts.max_per_rule.unwrap_or(0),
+        )?,
         Format::Sarif => print_sarif(&all, &read_errors)?,
     }
 
@@ -223,6 +242,7 @@ fn synthetic(rule: &str, severity: Severity, message: &str, fix: &str) -> Findin
             col: 1,
         }),
         recommendation: Some(fix.to_string()),
+        object: None,
     }
 }
 
@@ -233,6 +253,7 @@ fn parse_args(args: &[String]) -> anyhow::Result<Options> {
     let mut server_version = None;
     let mut ignore: Vec<String> = Vec::new();
     let mut stdin = false;
+    let mut max_per_rule: Option<usize> = None;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -242,6 +263,15 @@ fn parse_args(args: &[String]) -> anyhow::Result<Options> {
                 std::process::exit(0);
             }
             "--stdin" => stdin = true,
+            "--max-per-rule" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--max-per-rule requires a number"))?;
+                max_per_rule = Some(
+                    v.parse::<usize>()
+                        .map_err(|_| anyhow::anyhow!("--max-per-rule expects a non-negative number, got '{v}'"))?,
+                );
+            }
             "--ignore" => {
                 let v = it
                     .next()
@@ -291,6 +321,7 @@ fn parse_args(args: &[String]) -> anyhow::Result<Options> {
         server_version,
         ignore,
         stdin,
+        max_per_rule,
     })
 }
 
@@ -415,19 +446,54 @@ fn severity_label(s: Severity) -> &'static str {
 // human output
 // ---------------------------------------------------------------------------
 
+/// Default per-rule cap for human output. A production trial on a 137 KB legacy
+/// script produced 585 findings of which 422 (72%) were a single info-level
+/// hygiene rule — technically true every time, and collectively unreadable.
+/// Capping the repeats and rolling the remainder into a count keeps the long
+/// tail of *distinct* problems visible, which is the whole point of the report.
+const DEFAULT_HUMAN_MAX_PER_RULE: usize = 3;
+
+/// Split findings into "show these" and "rolled up as counts", capping each rule
+/// at `max` occurrences. `max == 0` disables the cap entirely.
+///
+/// Order is preserved, so the kept findings are still the first (most severe,
+/// earliest) occurrences of their rule under the caller's sort.
+fn cap_per_rule<'a>(
+    all: &'a [FileFinding],
+    max: usize,
+) -> (Vec<&'a FileFinding>, BTreeMap<&'a str, usize>) {
+    let mut kept: Vec<&FileFinding> = Vec::new();
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut hidden: BTreeMap<&str, usize> = BTreeMap::new();
+    for ff in all {
+        let rule = ff.finding.rule.0.as_str();
+        let n = seen.entry(rule).or_insert(0);
+        *n += 1;
+        if max == 0 || *n <= max {
+            kept.push(ff);
+        } else {
+            *hidden.entry(rule).or_insert(0) += 1;
+        }
+    }
+    (kept, hidden)
+}
+
 fn print_human(
     all: &[FileFinding],
     analyzed: usize,
     read_errors: &[(String, String)],
     suppressed: usize,
     notes: &[(String, String)],
+    max_per_rule: usize,
 ) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut w = stdout.lock();
 
+    let (kept, hidden) = cap_per_rule(all, max_per_rule);
+
     let mut current_file = "";
-    for ff in all {
+    for ff in kept {
         if ff.path != current_file {
             let _ = writeln!(w, "\n{}", ff.path);
             current_file = &ff.path;
@@ -448,6 +514,19 @@ fn print_human(
         if let Some(rec) = &ff.finding.recommendation {
             let _ = writeln!(w, "           fix: {rec}");
         }
+    }
+
+    // Rolled-up repeats. Named explicitly so the count is never a silent
+    // truncation — the user can see exactly what was collapsed and re-run with
+    // --max-per-rule 0 to get all of it.
+    if !hidden.is_empty() {
+        let mut rows: Vec<(&&str, &usize)> = hidden.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let _ = writeln!(w, "\nrolled up (showing {max_per_rule} per rule):");
+        for (rule, n) in rows {
+            let _ = writeln!(w, "  {rule}  +{n} more");
+        }
+        let _ = writeln!(w, "  re-run with --max-per-rule 0 to list every occurrence");
     }
 
     for (path, note) in notes {
@@ -501,8 +580,10 @@ fn print_json(
     analyzed: usize,
     read_errors: &[(String, String)],
     suppressed: usize,
+    max_per_rule: usize,
 ) -> anyhow::Result<()> {
-    let findings: Vec<serde_json::Value> = all
+    let (kept, _hidden) = cap_per_rule(all, max_per_rule);
+    let findings: Vec<serde_json::Value> = kept
         .iter()
         .map(|ff| {
             let loc = ff.finding.location.as_ref();
@@ -530,11 +611,24 @@ fn print_json(
         *by_sev.entry(severity_label(ff.finding.severity)).or_insert(0) += 1;
     }
 
+    // Per-rule totals, ALWAYS the full counts even when `findings` is capped.
+    // This is the rollup a consumer needs to see the shape of a report at a
+    // glance ("one rule is 72% of this") without walking every finding.
+    let mut by_rule: BTreeMap<&str, usize> = BTreeMap::new();
+    for ff in all {
+        *by_rule.entry(ff.finding.rule.0.as_str()).or_insert(0) += 1;
+    }
+
     let out = serde_json::json!({
         "filesAnalyzed": analyzed,
+        // The true total, independent of any cap.
         "findingCount": all.len(),
+        // How many are actually present in `findings` below.
+        "findingsShown": findings.len(),
+        "maxPerRule": max_per_rule,
         "suppressedCount": suppressed,
         "countsBySeverity": by_sev,
+        "countsByRule": by_rule,
         "findings": findings,
         "readErrors": errors,
     });

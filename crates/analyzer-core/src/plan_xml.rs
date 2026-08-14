@@ -1,4 +1,4 @@
-use crate::findings::{Finding, Severity, RuleId, Location};
+use crate::findings::{Finding, Severity, RuleId, Location, ObjectRef};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
@@ -124,12 +124,117 @@ fn bracket(s: &str) -> String {
 
 /// Read an attribute value off a start/empty element by key (UTF-8, unescaped).
 fn attr_val(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
+    let mut fallback = None;
     for attr in e.attributes().with_checks(false).flatten() {
-        if std::str::from_utf8(attr.key.as_ref()).unwrap_or("") == key {
+        let name = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+        if name == key {
             return Some(attr.unescape_value().unwrap_or_default().to_string());
         }
+        // Case-insensitive fallback. Showplan attribute names are unique
+        // case-insensitively, so this can never pick a *different* attribute —
+        // it only rescues a writer that varies the casing.
+        if fallback.is_none() && name.eq_ignore_ascii_case(key) {
+            fallback = Some(attr.unescape_value().unwrap_or_default().to_string());
+        }
     }
-    None
+    fallback
+}
+
+/// True iff the innermost open RelOp on the stack is a Key/RID Lookup.
+fn top_is_lookup(stack: &[PlanNode]) -> bool {
+    stack.last().map(|n| {
+        n.physical_op.eq_ignore_ascii_case("Key Lookup")
+            || n.physical_op.eq_ignore_ascii_case("RID Lookup")
+    }).unwrap_or(false)
+}
+
+/// Operators whose `<Object>`/seek columns we capture so a sibling lookup can
+/// identify the nonclustered seek that feeds it: lookups themselves AND the
+/// Index Seek / Scan operators that may be its partner.
+fn top_capture_object(stack: &[PlanNode]) -> bool {
+    stack.last().map(|n| {
+        let op = n.physical_op.to_ascii_lowercase();
+        // "clustered index scan"/"columnstore index scan" match the "index scan"
+        // substring; "table scan" (a heap) does not, and it is exactly the case
+        // cost weighting cares most about, so name it explicitly.
+        op.contains("lookup")
+            || op.contains("index seek")
+            || op.contains("index scan")
+            || op.contains("table scan")
+    }).unwrap_or(false)
+}
+
+/// Handle a `<Column>` / `<ColumnReference>` element.
+///
+/// Called from BOTH the `Start` and `Empty` event arms. That is the whole point:
+/// SQL Server normally writes these self-closing (`Empty`), but a plan that has
+/// been round-tripped through another XML writer can emit the `<Column …></Column>`
+/// pair form instead. Handling only `Empty` silently dropped every missing-index
+/// column on such plans and shipped a `CREATE INDEX` with no key columns — a
+/// bug found in a production trial, not by the fixtures, because every fixture
+/// was hand-written in the self-closing form.
+#[allow(clippy::too_many_arguments)]
+fn handle_column_el(
+    e: &quick_xml::events::BytesStart,
+    stack: &mut Vec<PlanNode>,
+    in_defined_values: bool,
+    in_seek_predicates: bool,
+    in_no_stats: bool,
+    cur_missing: &mut Option<MissingIndexInfo>,
+    cur_usage: &Option<String>,
+) {
+    let col = unbracket(&attr_val(e, "Column")
+        .or_else(|| attr_val(e, "Name"))
+        .unwrap_or_default());
+    // Lookup output columns (DefinedValues, lookup only) and seek key columns
+    // (SeekPredicates, lookups + seeks) feed the covering DDL. Scoped to the
+    // relevant child element.
+    if !col.is_empty() {
+        let table = unbracket(&attr_val(e, "Table").unwrap_or_default());
+        if in_defined_values && top_is_lookup(stack) {
+            if let Some(top) = stack.last_mut() {
+                let cr = ColumnRef { table, column: col.clone() };
+                if !top.output_columns.iter().any(|c| c.column == cr.column) {
+                    top.output_columns.push(cr);
+                }
+            }
+        } else if in_seek_predicates && top_capture_object(stack) {
+            if let Some(top) = stack.last_mut() {
+                // Only the indexed object's own columns are seek KEYS; a
+                // ColumnReference naming a different table (or none) is the
+                // comparand (value side) and must not be treated as a key
+                // column of this index.
+                let same_table = top.object_table.is_empty()
+                    || table.is_empty()
+                    || table.eq_ignore_ascii_case(&top.object_table);
+                let cr = ColumnRef { table, column: col.clone() };
+                if same_table && !top.seek_columns.iter().any(|c| c.column == cr.column) {
+                    top.seek_columns.push(cr);
+                }
+            }
+        }
+    }
+    if in_no_stats {
+        let table = unbracket(&attr_val(e, "Table").unwrap_or_default());
+        if !col.is_empty() {
+            if let Some(top) = stack.last_mut() {
+                top.no_stats_columns.push(ColumnRef { table, column: col });
+            }
+        }
+    } else if let (Some(mi), Some(usage)) = (cur_missing.as_mut(), cur_usage.as_ref()) {
+        if !col.is_empty() {
+            // Case-insensitive: the showplan XSD says these are uppercase, but a
+            // rewriter that normalises attribute values must not be able to
+            // silently empty the recommendation.
+            let u = usage.trim().to_ascii_uppercase();
+            match u.as_str() {
+                "EQUALITY" => mi.equality.push(col),
+                "INEQUALITY" => mi.inequality.push(col),
+                "INCLUDE" => mi.included.push(col),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Populate the core estimate attributes shared by Start and Empty `RelOp`s.
@@ -185,22 +290,6 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     // ColumnReference elements (scalar trees, joins, other operators) out.
     let mut in_defined_values = false;
     let mut in_seek_predicates = false;
-    // True iff the innermost open RelOp on the stack is a Key/RID Lookup.
-    let top_is_lookup = |stack: &Vec<PlanNode>| -> bool {
-        stack.last().map(|n| {
-            n.physical_op.eq_ignore_ascii_case("Key Lookup")
-                || n.physical_op.eq_ignore_ascii_case("RID Lookup")
-        }).unwrap_or(false)
-    };
-    // Operators whose <Object>/seek columns we capture so a sibling lookup can
-    // identify the nonclustered seek that feeds it: lookups themselves AND the
-    // Index Seek / Scan operators that may be its partner.
-    let top_capture_object = |stack: &Vec<PlanNode>| -> bool {
-        stack.last().map(|n| {
-            let op = n.physical_op.to_ascii_lowercase();
-            op.contains("lookup") || op.contains("index seek") || op.contains("index scan")
-        }).unwrap_or(false)
-    };
 
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| PlanError::Xml(e.to_string()))? {
@@ -232,6 +321,14 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                         }
                         "ColumnGroup" => {
                             cur_usage = attr_val(&e, "Usage");
+                        }
+                        // Non-self-closing `<Column …></Column>` / `<ColumnReference …></ColumnReference>`.
+                        // Same handler as the Empty form — see handle_column_el.
+                        "Column" | "ColumnReference" => {
+                            handle_column_el(
+                                &e, &mut stack, in_defined_values, in_seek_predicates,
+                                in_no_stats, &mut cur_missing, &cur_usage,
+                            );
                         }
                         "ColumnsWithNoStatistics" => {
                             in_no_stats = true;
@@ -328,55 +425,10 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             }
                         }
                         "Column" | "ColumnReference" => {
-                            let col = unbracket(&attr_val(&e, "Column")
-                                .or_else(|| attr_val(&e, "Name"))
-                                .unwrap_or_default());
-                            // Lookup output columns (DefinedValues, lookup only) and
-                            // seek key columns (SeekPredicates, lookups + seeks) feed
-                            // the covering DDL. Scoped to the relevant child element.
-                            if !col.is_empty() {
-                                let table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
-                                if in_defined_values && top_is_lookup(&stack) {
-                                    if let Some(top) = stack.last_mut() {
-                                        let cr = ColumnRef { table, column: col.clone() };
-                                        if !top.output_columns.iter().any(|c| c.column == cr.column) {
-                                            top.output_columns.push(cr);
-                                        }
-                                    }
-                                } else if in_seek_predicates && top_capture_object(&stack) {
-                                    if let Some(top) = stack.last_mut() {
-                                        // Only the indexed object's own columns are
-                                        // seek KEYS; a ColumnReference naming a
-                                        // different table (or none) is the comparand
-                                        // (value side) and must not be treated as a
-                                        // key column of this index.
-                                        let same_table = top.object_table.is_empty()
-                                            || table.is_empty()
-                                            || table.eq_ignore_ascii_case(&top.object_table);
-                                        let cr = ColumnRef { table, column: col.clone() };
-                                        if same_table && !top.seek_columns.iter().any(|c| c.column == cr.column) {
-                                            top.seek_columns.push(cr);
-                                        }
-                                    }
-                                }
-                            }
-                            if in_no_stats {
-                                let table = unbracket(&attr_val(&e, "Table").unwrap_or_default());
-                                if !col.is_empty() {
-                                    if let Some(top) = stack.last_mut() {
-                                        top.no_stats_columns.push(ColumnRef { table, column: col });
-                                    }
-                                }
-                            } else if let (Some(mi), Some(usage)) = (cur_missing.as_mut(), cur_usage.as_ref()) {
-                                if !col.is_empty() {
-                                    match usage.as_str() {
-                                        "EQUALITY" => mi.equality.push(col),
-                                        "INEQUALITY" => mi.inequality.push(col),
-                                        "INCLUDE" => mi.included.push(col),
-                                        _ => {}
-                                    }
-                                }
-                            }
+                            handle_column_el(
+                                &e, &mut stack, in_defined_values, in_seek_predicates,
+                                in_no_stats, &mut cur_missing, &cur_usage,
+                            );
                         }
                         "RunTimeCountersPerThread" => {
                             if let Some(top) = stack.last_mut() {
@@ -576,6 +628,7 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
             message: format!("Table Scan in plan (NodeId={}, cost={:.4}). Heap table or no usable index.", node.node_id, node.estimated_total_subtree_cost),
             location: loc,
             recommendation: Some("Add a clustered index, or a covering nonclustered index on the predicate + included columns the query needs.".into()),
+            object: node_object(node),
         });
     }
 
@@ -601,6 +654,7 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
             recommendation: Some(
                 "Create (or extend) a nonclustered index whose leading key columns match the residual predicate so the access becomes an Index Seek. Example: CREATE NONCLUSTERED INDEX IX_<table>_<cols> ON <schema>.<table> (<predicate columns>) INCLUDE (<columns the query outputs>);".into()
             ),
+            object: node_object(node),
         });
     }
 
@@ -638,6 +692,7 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                 "Make the seeking index covering by adding the columns the lookup fetches as INCLUDE columns, then verify the plan picks it and the extra write cost is acceptable before shipping:\n{}",
                 ddl
             )),
+            object: node_object(node),
         });
 
         // Wide-covering-request caveat: a very wide INCLUDE list (many columns)
@@ -658,6 +713,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                 recommendation: Some(
                     "Add INCLUDE columns deliberately, not reflexively. Prefer covering only the columns this query actually returns, drop wide/LOB columns from INCLUDE if the lookup is rare, or accept the lookup when the table is write-heavy. Measure read benefit against the added write + storage cost before shipping.".into()
                 ),
+
+                object: None,
             });
         }
     }
@@ -685,6 +742,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                     message: msg,
                     location: loc,
                     recommendation: Some("Make the predicate's types match the column exactly (parameter/literal type, collation). Fix the type — not the index. e.g. declare @p the same type as the column, or cast the *parameter* side, never the column.".into()),
+
+                    object: None,
                 }
             }
             "NoJoinPredicate" => Finding {
@@ -693,6 +752,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                 message: format!("Missing join predicate at NodeId={} (NoJoinPredicate): two inputs are joined with no ON/WHERE relating them — a Cartesian product. Row counts multiply and the query explodes.", node.node_id),
                 location: loc,
                 recommendation: Some("Add the join condition (ON a.key = b.key). If a cross join is genuinely intended, write CROSS JOIN explicitly so the intent is unmistakable.".into()),
+
+                object: None,
             },
             "SpillToTempDb" => Finding {
                 rule: RuleId("plan.spill".into()),
@@ -700,6 +761,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                 message: format!("Operator spills to tempdb at NodeId={} (SpillToTempDb): the memory grant was too small for the sort/hash, so it spilled to disk — slow IO and tempdb pressure under load.", node.node_id),
                 location: loc,
                 recommendation: Some("Reduce the rowset reached by the sort/hash (filter earlier, paginate), add a supporting index to avoid the sort, or fix the cardinality estimate (stats) that under-sized the grant.".into()),
+
+                object: None,
             },
             "ColumnsWithNoStatistics" => {
                 let cols: Vec<String> = node.no_stats_columns.iter()
@@ -723,6 +786,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                     message: msg,
                     location: loc,
                     recommendation: Some(rec),
+
+                    object: None,
                 }
             }
             other => Finding {
@@ -731,6 +796,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                 message: format!("Plan warning at NodeId={}: {}", node.node_id, other),
                 location: loc,
                 recommendation: None,
+
+                object: None,
             },
         };
         out.push(f);
@@ -758,6 +825,8 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
                     recommendation: Some(
                         "Find the source of the bad estimate: stale/missing statistics (UPDATE STATISTICS or CREATE STATISTICS), a non-sargable or implicitly-converted predicate, a multi-statement table-valued or scalar UDF (fixed-guess cardinality), or a local variable the optimizer can't sniff (try OPTION (RECOMPILE) to confirm). Fix the estimate and the plan shape, grant, and joins follow.".into()
                     ),
+
+                    object: None,
                 });
             }
         }
@@ -766,6 +835,24 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
     for c in &node.children {
         walk(c, Some(node), out);
     }
+}
+
+/// The base table an operator reads, when the plan named it in `<Object>`.
+///
+/// `None` for operators that touch no table (joins, sorts, compute scalars) —
+/// those findings stay un-weighted rather than being attributed to a guess.
+fn node_object(node: &PlanNode) -> Option<ObjectRef> {
+    if node.object_table.is_empty() {
+        return None;
+    }
+    let schema = if node.object_schema.is_empty() { "dbo" } else { &node.object_schema };
+    let mut o = ObjectRef::new(schema, &node.object_table);
+    if !node.object_index.is_empty() {
+        o.index = Some(node.object_index.clone());
+    }
+    // The optimizer's row ESTIMATE is not the table's row count; leave
+    // row_count None so the health layer joins real partition stats instead.
+    Some(o)
 }
 
 /// Build the `CREATE NONCLUSTERED INDEX` that satisfies a `<MissingIndex>` node,
@@ -791,30 +878,48 @@ fn missing_index_finding(node: &PlanNode, mi: &MissingIndexInfo) -> Finding {
         format!("IX_{}_{}", sanitize_ident(&table), name_part)
     };
 
-    let key_sql = if key_cols.is_empty() { "/* no key columns reported */".to_string() } else { key_cols.join(", ") };
+    let impact_txt = if mi.impact > 0.0 { format!(" estimated impact {:.0}%", mi.impact) } else { String::new() };
+    let message = format!(
+        "The plan reports a missing index on [{}].[{}] (NodeId={},{}). The optimizer would prefer a covering index here.",
+        schema, table, node.node_id, impact_txt
+    );
+
+    // No key columns → we must NOT emit DDL. A `CREATE INDEX … ( )` with a
+    // comment where the columns belong is not a fix; it is an uncompilable
+    // statement that looks like one. Say what we know and what we don't.
+    if key_cols.is_empty() {
+        return Finding {
+            rule: RuleId("plan.missing_index".into()),
+            severity: Severity::Warning,
+            message,
+            location: None,
+            recommendation: Some(format!(
+                "The optimizer flagged this table but the plan XML carried no key-column detail, so no CREATE INDEX can be generated from it. Re-capture the plan (the ColumnGroup elements may have been lost in export), or read the recommendation directly from sys.dm_db_missing_index_details for [{}].[{}].",
+                schema, table
+            )),
+            object: Some(ObjectRef::new(&schema, &table)),
+        };
+    }
+
     let mut ddl = format!(
         "CREATE NONCLUSTERED INDEX [{}]\n  ON [{}].[{}] ({})",
-        idx_name, schema, table, key_sql
+        idx_name, schema, table, key_cols.join(", ")
     );
     if !include_cols.is_empty() {
         ddl.push_str(&format!("\n  INCLUDE ({})", include_cols.join(", ")));
     }
     ddl.push(';');
 
-    let impact_txt = if mi.impact > 0.0 { format!(" estimated impact {:.0}%", mi.impact) } else { String::new() };
-
     Finding {
         rule: RuleId("plan.missing_index".into()),
         severity: Severity::Warning,
-        message: format!(
-            "The plan reports a missing index on [{}].[{}] (NodeId={},{}). The optimizer would prefer a covering index here.",
-            schema, table, node.node_id, impact_txt
-        ),
+        message,
         location: None,
         recommendation: Some(format!(
             "Create the index the optimizer asked for, then re-check the plan (verify it is actually picked and the write cost is acceptable before shipping):\n{}",
             ddl
         )),
+        object: Some(ObjectRef::new(&schema, &table)),
     }
 }
 
@@ -898,6 +1003,82 @@ mod tests {
         assert!(key_pos_cust < key_pos_date, "equality before inequality");
         assert!(rec.contains("INCLUDE ([Total], [Status])"), "include cols: {rec}");
         assert!(f[0].message.contains("93%"), "impact surfaced: {}", f[0].message);
+    }
+
+    /// The production-trial regression: a plan whose `<Column>` elements are the
+    /// non-self-closing pair form. This shipped a `CREATE INDEX` with no key
+    /// columns because only the `Empty` event arm handled columns.
+    #[test]
+    fn missing_index_columns_survive_paired_column_elements() {
+        let paired = MISSING_INDEX_PLAN
+            .replace("\" />", "\"></Column>")
+            .replace("<ScalarOperator ScalarString=\"x\"></Column>", "<ScalarOperator ScalarString=\"x\" />");
+        let plan = parse(&paired).expect("parse");
+        let f = fired(&plan, "plan.missing_index");
+        assert_eq!(f.len(), 1);
+        let rec = f[0].recommendation.as_ref().expect("rec");
+        assert!(rec.contains("([CustomerId], [OrderDate])"), "key cols kept: {rec}");
+        assert!(rec.contains("INCLUDE ([Total], [Status])"), "include kept: {rec}");
+    }
+
+    /// A finding must be able to say WHICH table it is about, or the health
+    /// layer cannot rank it against anything (it has no size to join to).
+    #[test]
+    fn plan_findings_carry_the_object_they_are_about() {
+        let plan = parse(MISSING_INDEX_PLAN).expect("parse");
+        let mi = &fired(&plan, "plan.missing_index")[0];
+        let o = mi.object.as_ref().expect("missing-index finding names its table");
+        assert_eq!(o.schema, "dbo");
+        assert_eq!(o.table, "Orders");
+        assert_eq!(o.key(), "dbo.orders", "join key is bracket-free + lowercased");
+        assert_eq!(o.display(), "[dbo].[Orders]");
+        // The optimizer's row ESTIMATE is not the table's size — the plan alone
+        // must not claim a measured row count.
+        assert_eq!(o.row_count, None);
+    }
+
+    /// Usage values are uppercase per the XSD, but a rewriter that normalises
+    /// attribute case must not be able to silently empty the recommendation.
+    #[test]
+    fn missing_index_usage_match_is_case_insensitive() {
+        let mixed = MISSING_INDEX_PLAN
+            .replace("Usage=\"EQUALITY\"", "Usage=\"Equality\"")
+            .replace("Usage=\"INEQUALITY\"", "Usage=\"Inequality\"")
+            .replace("Usage=\"INCLUDE\"", "Usage=\"Include\"");
+        let plan = parse(&mixed).expect("parse");
+        let f = fired(&plan, "plan.missing_index");
+        let rec = f[0].recommendation.as_ref().expect("rec");
+        assert!(rec.contains("([CustomerId], [OrderDate])"), "key cols kept: {rec}");
+        assert!(rec.contains("INCLUDE ([Total], [Status])"), "include kept: {rec}");
+    }
+
+    /// When the plan genuinely carries no column detail we must emit NO DDL —
+    /// an uncompilable `CREATE INDEX ( )` is worse than an honest explanation.
+    #[test]
+    fn missing_index_without_columns_emits_no_ddl() {
+        let stripped = regex_lite_strip_column_groups(MISSING_INDEX_PLAN);
+        let plan = parse(&stripped).expect("parse");
+        let f = fired(&plan, "plan.missing_index");
+        assert_eq!(f.len(), 1, "still reports the table");
+        let rec = f[0].recommendation.as_ref().expect("rec");
+        assert!(!rec.contains("CREATE NONCLUSTERED INDEX"), "no fake DDL: {rec}");
+        assert!(!rec.contains("no key columns reported"), "no placeholder DDL: {rec}");
+        assert!(rec.contains("sys.dm_db_missing_index_details"), "points somewhere real: {rec}");
+    }
+
+    /// Drop every `<ColumnGroup>…</ColumnGroup>` block without pulling in a regex dep.
+    fn regex_lite_strip_column_groups(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(start) = rest.find("<ColumnGroup") {
+            out.push_str(&rest[..start]);
+            match rest[start..].find("</ColumnGroup>") {
+                Some(end) => rest = &rest[start + end + "</ColumnGroup>".len()..],
+                None => { rest = ""; break; }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     #[test]

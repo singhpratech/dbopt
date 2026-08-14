@@ -20,13 +20,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// a fixed string the user can act on.
 fn safe_connect_err(e: &tiberius::error::Error) -> anyhow::Error {
     let raw = e.to_string().to_ascii_lowercase();
-    let msg = if raw.contains("login failed")
+    // ORDER MATTERS. SQL Server reports an inaccessible database as:
+    //   Cannot open database "X" requested by the login. The login failed.
+    //   Login failed for user 'Y'.
+    // That text contains "login failed", so testing the auth patterns first
+    // diagnosed a dropped/renamed database as a wrong password and sent the
+    // user to reset a credential that was never broken. The database case is
+    // strictly more specific, so it has to be tested first.
+    let msg = if raw.contains("cannot open database") {
+        "could not open the requested database — it may not exist, may be offline, or the login may not have access to it. The credentials themselves were accepted."
+    } else if raw.contains("login failed")
         || raw.contains("password")
         || raw.contains("authentication")
         || raw.contains("user")
     {
         "authentication failed — check the username and password"
-    } else if raw.contains("cannot open database") || raw.contains("database") {
+    } else if raw.contains("database") {
         "could not open the requested database — check the database name and that the login has access"
     } else if raw.contains("certificate") || raw.contains("tls") || raw.contains("ssl") {
         "TLS/certificate error — enable \"trust server certificate\" or install a trusted certificate"
@@ -39,12 +48,30 @@ fn safe_connect_err(e: &tiberius::error::Error) -> anyhow::Error {
 async fn open(req: &ConnectReq) -> anyhow::Result<Client<tokio_util::compat::Compat<TcpStream>>> {
     let mut config = Config::new();
     let parts: Vec<&str> = req.server.splitn(2, ',').collect();
-    config.host(parts[0]);
-    if let Some(port) = parts.get(1).and_then(|p| p.parse::<u16>().ok()) {
-        config.port(port);
-    } else {
-        config.port(1433);
-    }
+    let host_part = parts[0].trim();
+    let port = parts.get(1).and_then(|p| p.trim().parse::<u16>().ok());
+
+    // Named instances (`HOST\INSTANCE`). Resolving one requires asking the SQL
+    // Browser service over UDP 1434, which we do not do. Two cases:
+    //   * a port was also given (`HOST\INSTANCE,1433`) — the port wins, so we
+    //     simply drop the instance name and connect;
+    //   * no port — we cannot resolve it. Say exactly that. This used to fall
+    //     through to a TCP connect against a hostname containing a backslash
+    //     and report "check the server address and port", which sent people
+    //     hunting for a firewall problem that was never there.
+    let host = match host_part.split_once('\\') {
+        Some((h, inst)) => {
+            if port.is_none() {
+                return Err(anyhow::anyhow!(
+                    "named instances aren't supported directly — dbopt doesn't query the SQL Browser service. Use `{h},<port>` instead (find the port for instance `{inst}` in SQL Server Configuration Manager → TCP/IP → IP Addresses → TCP Port, or run `SELECT local_tcp_port FROM sys.dm_exec_connections WHERE session_id = @@SPID` on that instance)."
+                ));
+            }
+            h
+        }
+        None => host_part,
+    };
+    config.host(host);
+    config.port(port.unwrap_or(1433));
     if let Some(db) = req.database.as_deref() { config.database(db); }
     apply_auth(&mut config, req)?;
     if req.trust_cert.unwrap_or(false) {
@@ -678,6 +705,9 @@ pub async fn parse_check(req: &ConnectReq, sql: &str) -> anyhow::Result<Vec<Pars
 /// isn't exposed). A missing fact simply yields no check, never an error.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OperationalFacts {
+    /// `DB_NAME()` at collection time — the database the per-database facts
+    /// below actually describe. Empty only when the probe itself failed.
+    pub database_name: String,
     pub cpu_count: Option<i64>,
     pub maxdop: Option<i64>,
     pub cost_threshold: Option<i64>,
@@ -787,6 +817,11 @@ pub struct FailedJobFact {
 pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFacts> {
     let mut client = open(req).await?;
     let mut f = OperationalFacts::default();
+    // The database these per-database facts (backups, CHECKDB, VLFs, recovery
+    // model) actually describe. Taken from the live connection rather than the
+    // request, because a server-level connect carries no database and the
+    // connection silently resolves to the login's default.
+    f.database_name = current_database(&mut client).await;
 
     // Server scheduler count (for MAXDOP advice). int -> bigint.
     if let Ok(s) = client.simple_query("SELECT CAST(cpu_count AS BIGINT) FROM sys.dm_os_sys_info").await {
@@ -995,10 +1030,35 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     Ok(f)
 }
 
+/// System databases. A DMV scan that lands in one of these has almost certainly
+/// landed there by accident (no database selected on a server-level connection),
+/// not because the user wanted to tune `master`.
+pub const SYSTEM_DATABASES: &[&str] = &["master", "tempdb", "model", "msdb"];
+
+/// `DB_NAME()` for the current connection — the database the queries on this
+/// connection will actually resolve against. Returns an empty string if the
+/// probe fails; callers treat that as "unknown", never as a name.
+async fn current_database(
+    client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
+) -> String {
+    match client.simple_query("SELECT DB_NAME()").await {
+        Ok(stream) => stream
+            .into_first_result()
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().next().and_then(|r| r.get::<&str, _>(0).map(|s| s.to_string())))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
 pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
     let mut client = open(req).await?;
 
     let mut bundle = DmvBundle::default();
+    // Record the scope BEFORE collecting, so an empty bundle can still say
+    // which database it looked in.
+    bundle.scanned_database = current_database(&mut client).await;
 
     // Index usage stats
     let q_usage = r#"

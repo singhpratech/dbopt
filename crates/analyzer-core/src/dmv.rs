@@ -1,4 +1,4 @@
-use crate::findings::{Finding, RuleId, Severity};
+use crate::findings::{Finding, ObjectRef, RuleId, Severity};
 use crate::report::{HeatmapCell, SizeNode, ChartData};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +19,14 @@ pub struct DmvBundle {
     /// DMV's own seek counts when this is absent.
     #[serde(default)]
     pub workload: Vec<crate::advisor_workload::QueryWorkloadStat>,
+    /// The database these DMV rows were actually read from (`DB_NAME()` at
+    /// collection time). A server-level connection with no database selected
+    /// lands in the login's default database — usually `master` — where
+    /// `is_ms_shipped = 0` filters everything out and the scan looks "clean"
+    /// when it simply looked in the wrong place. Recording the scope is what
+    /// lets the caller say so out loud instead of reporting a silent blank.
+    #[serde(default)]
+    pub scanned_database: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +86,35 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
     let mut index_heatmap = Vec::new();
     let mut size_treemap = Vec::new();
 
+    // schema.table (lowercased) -> (rows, reserved KB) from partition stats, so
+    // every finding below can carry the SIZE of the object it is about. This is
+    // what makes findings rankable against each other: severity alone says a
+    // heap is a heap, it does not say whether it holds 900 rows or 262 million.
+    // Rows = MAX across partitions/indexes of the table (each index reports the
+    // same row set); reserved = SUM (total space the table occupies).
+    let mut size_by_table: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for p in &bundle.partition_stats {
+        let e = size_by_table
+            .entry(format!("{}.{}", p.schema_name, p.table_name).to_ascii_lowercase())
+            .or_insert((0, 0));
+        e.0 = e.0.max(p.row_count);
+        e.1 += p.reserved_kb;
+    }
+    // Build an ObjectRef, attaching measured size when we have it. Never
+    // invents a size: an object missing from partition stats stays `None`,
+    // which the ranking layer treats as "unknown", not as "empty".
+    let obj = |schema: &str, table: &str| -> Option<ObjectRef> {
+        if table.is_empty() {
+            return None;
+        }
+        let mut o = ObjectRef::new(schema, table);
+        if let Some((rows, kb)) = size_by_table.get(&o.key()) {
+            o.row_count = Some(*rows);
+            o.reserved_kb = Some(*kb);
+        }
+        Some(o)
+    };
+
     // Heatmap: (table, index) → seek/scan/lookup totals
     for u in &bundle.index_usage {
         let table = format!("{}.{}", u.schema_name, u.table_name);
@@ -102,6 +139,10 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 ),
                 location: None,
                 recommendation: Some("Verify the index is unused across a representative period (a server restart resets DMV counters). If confirmed, DROP it — writes amplify into every nonclustered index.".into()),
+                object: obj(&u.schema_name, &u.table_name).map(|mut o| {
+                    o.index = Some(u.index_name.clone());
+                    o
+                }),
             });
         }
     }
@@ -132,6 +173,7 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                         ),
                         location: None,
                         recommendation: Some("Compare INCLUDE columns and uniqueness. Keep the unique/PK one, merge needed includes into a single covering index, drop the rest.".into()),
+                        object: obj(schema, table),
                     });
                 }
             }
@@ -151,6 +193,7 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
             ),
             location: None,
             recommendation: Some("DMV suggestions are heuristics, not commands. Validate against your actual workload, consolidate with existing indexes, and order key columns by selectivity (most selective first).".into()),
+            object: obj(&m.schema_name, &m.table_name),
         });
     }
 
@@ -191,6 +234,7 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 message: format!("{schema}.{table} is a heap (no clustered index) holding {rows} rows."),
                 location: None,
                 recommendation: Some("Heaps fragment over time, can't be range-seeked, and accumulate forward pointers on UPDATE that slow every read. Add a clustered index — usually the primary key, or a narrow ever-increasing surrogate. Deliberate staging / bulk-load heaps are fine, but document them.".into()),
+                object: obj(schema, table),
             });
         }
         // Substantial tables with no primary key.
@@ -204,6 +248,7 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 message: format!("{schema}.{table} has no primary key ({rows} rows)."),
                 location: None,
                 recommendation: Some("A primary key gives every row a stable identity and is required for reliable updates, replication, and most tooling. Add one — `ALTER TABLE [schema].[table] ADD CONSTRAINT PK_table PRIMARY KEY (...);` — a narrow surrogate key is fine if no natural key fits.".into()),
+                object: obj(schema, table),
             });
         }
         // Over-wide clustered / primary key inflates every nonclustered index.
@@ -218,6 +263,7 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                     ),
                     location: None,
                     recommendation: Some("Keep the clustered key narrow, static, and ever-increasing — often a surrogate INT/BIGINT IDENTITY. Enforce the wide natural key with a separate UNIQUE constraint if you still need it.".into()),
+                    object: obj(&ix.schema_name, &ix.table_name),
                 });
             }
         }
@@ -1103,5 +1149,89 @@ mod dedup_tests {
         let ci = recs.iter().find(|r| r.kind == RecKind::CreateIndex).unwrap();
         assert!(!ci.metrics.iter().any(|(k, _)| k == "Query runs"), "no runs chip without workload: {:#?}", ci.metrics);
         assert!(!ci.rationale.contains("runs ~"), "no per-day phrase without workload: {}", ci.rationale);
+    }
+
+    // ---- (f) cost weighting: findings carry the object + its measured size --
+
+    fn ps(schema: &str, table: &str, index: Option<&str>, rows: u64, reserved_kb: u64) -> PartitionStats {
+        PartitionStats {
+            schema_name: schema.to_string(),
+            table_name: table.to_string(),
+            index_name: index.map(|s| s.to_string()),
+            row_count: rows,
+            reserved_kb,
+            used_kb: reserved_kb,
+            data_kb: reserved_kb,
+        }
+    }
+
+    #[test]
+    fn structural_findings_carry_object_with_measured_size() {
+        // Two heaps of wildly different size. Severity alone cannot tell them
+        // apart below the 1M threshold — the ObjectRef is what makes them
+        // rankable, so it must carry the real row count and reserved space.
+        let bundle = DmvBundle {
+            partition_stats: vec![
+                ps("dbo", "tiny_heap", None, 1_200, 64),
+                ps("dbo", "fact_events", None, 262_000_000, 41_000_000),
+            ],
+            ..Default::default()
+        };
+        let findings = analyze(&bundle).findings;
+        let heaps: Vec<_> = findings.iter().filter(|f| f.rule.0 == "structure.heap_table").collect();
+        assert_eq!(heaps.len(), 2, "{findings:#?}");
+
+        let big = heaps.iter().find(|f| f.object.as_ref().unwrap().table == "fact_events").unwrap();
+        let o = big.object.as_ref().unwrap();
+        assert_eq!(o.schema, "dbo");
+        assert_eq!(o.row_count, Some(262_000_000));
+        assert_eq!(o.reserved_kb, Some(41_000_000));
+        assert_eq!(o.key(), "dbo.fact_events");
+
+        let small = heaps.iter().find(|f| f.object.as_ref().unwrap().table == "tiny_heap").unwrap();
+        assert_eq!(small.object.as_ref().unwrap().row_count, Some(1_200));
+    }
+
+    #[test]
+    fn reserved_kb_sums_across_indexes_rows_take_the_max() {
+        // Each index of a table reports the SAME row set, so rows must be MAX
+        // (not a 3x-inflated sum) while space must be SUM (each index really
+        // does occupy its own pages).
+        let bundle = DmvBundle {
+            partition_stats: vec![
+                ps("dbo", "orders", None, 500_000, 1_000),
+                ps("dbo", "orders", Some("IX_a"), 500_000, 400),
+                ps("dbo", "orders", Some("IX_b"), 500_000, 600),
+            ],
+            ..Default::default()
+        };
+        let f = analyze(&bundle)
+            .findings
+            .into_iter()
+            .find(|f| f.rule.0 == "structure.heap_table")
+            .expect("heap finding");
+        let o = f.object.unwrap();
+        assert_eq!(o.row_count, Some(500_000), "rows must not be summed across indexes");
+        assert_eq!(o.reserved_kb, Some(2_000), "reserved space must be summed");
+    }
+
+    #[test]
+    fn object_size_is_none_when_the_scan_never_measured_it() {
+        // A missing-index DMV row for a table with no partition-stats entry.
+        // Unknown size must stay None — reporting 0 rows would rank a real
+        // table as if it were empty.
+        let bundle = DmvBundle {
+            missing_indexes: vec![mi("Unscanned", &["CustomerId"], &[], &[], 80.0, 40, 3.0)],
+            ..Default::default()
+        };
+        let f = analyze(&bundle)
+            .findings
+            .into_iter()
+            .find(|f| f.rule.0 == "dmv.missing_index")
+            .expect("missing-index finding");
+        let o = f.object.expect("table identity is known even when size is not");
+        assert_eq!(o.table, "Unscanned");
+        assert_eq!(o.row_count, None);
+        assert_eq!(o.reserved_kb, None);
     }
 }

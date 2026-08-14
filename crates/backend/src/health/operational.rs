@@ -51,7 +51,17 @@ const HIGH_RISK_TRACE_FLAGS: &[i64] =
 /// it's unit-tested below. `db_name` is only used to build copy-paste DDL.
 pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
     let mut out = Vec::new();
+    // Two different needs. `db` is for copy-paste DDL, where an obvious
+    // edit-me placeholder is legitimate. `db_label` is for TITLES, where a
+    // placeholder is a bug — a user reading "DBCC CHECKDB has never run on
+    // [YourDatabase]" cannot tell whether we mean their database or failed to
+    // resolve it. When the name is unknown we say so in words instead.
     let db = if db_name.is_empty() { "YourDatabase" } else { db_name };
+    let db_label = if db_name.is_empty() {
+        "the connected database".to_string()
+    } else {
+        format!("[{db_name}]")
+    };
 
     // --- Parallelism --------------------------------------------------------
     if let (Some(maxdop), Some(cpu)) = (f.maxdop, f.cpu_count) {
@@ -195,7 +205,7 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
                 id: "backup.no_full_backup",
                 severity: "error",
                 kind: "backup",
-                title: format!("No full backup found for [{db}]"),
+                title: format!("No full backup found for {db_label}"),
                 consequence: "Without a full backup the database is unrecoverable after a failure.".into(),
                 recommendation: "Take a full backup and establish a regular backup schedule.".into(),
                 metric_label: "Last full backup".into(),
@@ -223,7 +233,7 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
                     id: "backup.no_log_backup",
                     severity: "warning",
                     kind: "backup",
-                    title: format!("[{db}] is in {} recovery but has no log backup", f.recovery_model.as_deref().unwrap_or("FULL")),
+                    title: format!("{db_label} is in {} recovery but has no log backup", f.recovery_model.as_deref().unwrap_or("FULL")),
                     consequence: "The transaction log will grow without bound and point-in-time recovery isn't possible.".into(),
                     recommendation: "Schedule regular log backups, or switch to SIMPLE recovery if point-in-time restore isn't required.".into(),
                     metric_label: "Last log backup".into(),
@@ -256,7 +266,7 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
                 id: "integrity.checkdb_never",
                 severity: "critical",
                 kind: "integrity",
-                title: format!("DBCC CHECKDB has never run on [{db}]"),
+                title: format!("DBCC CHECKDB has never run on {db_label}"),
                 consequence: "Storage-level corruption could be silently accumulating with no integrity check to catch it before it causes data loss.".into(),
                 recommendation: "Run DBCC CHECKDB off-peak (or against a restored copy if I/O-sensitive), then schedule a weekly integrity-check job. 'Never run' is higher severity than merely stale.".into(),
                 metric_label: "Last good CHECKDB".into(),
@@ -267,7 +277,7 @@ pub fn evaluate(f: &OperationalFacts, db_name: &str) -> Vec<OperationalCheck> {
                 id: "integrity.checkdb_stale",
                 severity: "critical",
                 kind: "integrity",
-                title: format!("Last successful DBCC CHECKDB on [{db}] is {days} day(s) old"),
+                title: format!("Last successful DBCC CHECKDB on {db_label} is {days} day(s) old"),
                 consequence: "Corruption introduced since the last check would go undetected, widening the window in which a backup could itself be carrying corrupt pages.".into(),
                 recommendation: "Run DBCC CHECKDB off-peak (or against a restored copy if I/O-sensitive), then verify the weekly integrity-check job is actually running.".into(),
                 metric_label: "Last good CHECKDB (days ago)".into(),

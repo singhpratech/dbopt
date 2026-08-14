@@ -274,5 +274,6 @@ pub(crate) fn finding(rule: &str, sev: Severity, msg: impl Into<String>, loc: Op
         message: msg.into(),
         location: loc,
         recommendation: rec.into(),
+        object: None,
     }
 }

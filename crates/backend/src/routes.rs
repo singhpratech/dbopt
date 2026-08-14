@@ -171,11 +171,40 @@ async fn connect(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     }
 }
 
+/// A DMV scan that ran in a system database almost certainly ran there by
+/// accident: a server-level connection with no database selected resolves to
+/// the login's default (normally `master`), where `is_ms_shipped = 0` filters
+/// out every user object. The result is an empty bundle that looks like a clean
+/// bill of health. Returns the sentence to show the user, or `None` when the
+/// scope is fine.
+fn scope_warning(bundle: &analyzer_core::dmv::DmvBundle) -> Option<String> {
+    let db = bundle.scanned_database.trim();
+    if db.is_empty() {
+        return None;
+    }
+    let is_system = sqlserver::SYSTEM_DATABASES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(db));
+    if is_system && bundle.indexes.is_empty() && bundle.index_usage.is_empty() {
+        return Some(format!(
+            "This scan ran in [{db}], a system database, and found no user tables — so \"no findings\" here does NOT mean your database is clean. Select the database you want to analyze and scan again."
+        ));
+    }
+    None
+}
+
 async fn dmv(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_dmv_bundle(&req).await {
         // `Json` serializes on the fly and returns a 500 on the (practically
         // impossible) serialization failure — never a handler panic.
-        Ok(bundle) => (StatusCode::OK, Json(bundle)).into_response(),
+        Ok(bundle) => {
+            let warning = scope_warning(&bundle);
+            let mut body = serde_json::to_value(&bundle).unwrap_or_else(|_| serde_json::json!({}));
+            if let (Some(obj), Some(w)) = (body.as_object_mut(), warning) {
+                obj.insert("scope_warning".into(), serde_json::Value::String(w));
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -231,6 +260,8 @@ async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
                     "size_treemap": advice.size_treemap,
                     "workload_tables": bundle.workload.len(),
                     "workload_window_hours": workload_window_hours,
+                    "scanned_database": bundle.scanned_database,
+                    "scope_warning": scope_warning(&bundle),
                 })),
             )
                 .into_response()

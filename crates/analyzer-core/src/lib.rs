@@ -9,7 +9,7 @@ pub mod report;
 #[cfg(test)]
 mod tests;
 
-pub use findings::{Finding, Severity, RuleId, Location};
+pub use findings::{Finding, Severity, RuleId, Location, ObjectRef};
 pub use report::{AnalysisReport, ChartData};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub fn analyze(input: &AnalyzeInput) -> AnalysisReport {
                 message: format!("Could not parse execution plan XML: {e}"),
                 location: None,
                 recommendation: None,
+
+                object: None,
             }),
         }
     }
