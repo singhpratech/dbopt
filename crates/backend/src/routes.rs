@@ -295,7 +295,21 @@ pub struct ExplainReq {
     #[serde(flatten)]
     pub conn: ConnectReq,
     pub sql: String,
+    /// ACTUAL-plan only: the caller has seen the cost estimate and still wants
+    /// to run it. Absent/false makes an expensive batch return a 409 preflight
+    /// instead of executing. Ignored by the estimated-plan path, which runs
+    /// nothing.
+    #[serde(default)]
+    pub confirm_heavy: bool,
 }
+
+/// Estimated subtree cost above which an ACTUAL-plan run is treated as heavy
+/// enough to confirm. SQL Server's cost unit is abstract, but the threshold is
+/// calibrated against the same plans this tool already flags: a trivial lookup
+/// is well under 1, and a scan-and-hash-join over millions of rows runs into
+/// the hundreds. 100 sits above everyday interactive queries and below the
+/// multi-minute stage builds a rollback-wrapped run would actually stall.
+const HEAVY_PLAN_COST: f64 = 100.0;
 
 async fn explain(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     match sqlserver::estimated_plan(&req.conn, &req.sql).await {
@@ -308,6 +322,37 @@ async fn explain(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
 /// inside a transaction that is ALWAYS rolled back (DML leaves no trace).
 /// Destructive / DDL / EXEC batches are refused server-side. Returns { plan_xml }.
 async fn plan_actual(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
+    // Cost preflight. The batch is about to really execute — rolled back, but
+    // the reads, the CPU and the tempdb are all real, and on a production box a
+    // heavy stage is a multi-minute load event. Compiling the estimated plan
+    // first costs nothing (SET SHOWPLAN_XML executes no statement) and tells us
+    // what we are about to ask for, so the warning is a MEASURED estimate
+    // rather than a generic "may take real time".
+    //
+    // A failure to preflight is never a reason to block: if we cannot compile
+    // the estimate we fall through and let the actual run report the real error.
+    if !req.confirm_heavy {
+        if let Ok(plan_xml) = sqlserver::estimated_plan(&req.conn, &req.sql).await {
+            if let Ok(plan) = analyzer_core::plan_xml::parse(&plan_xml) {
+                let cost = plan.estimated_total_subtree_cost;
+                let rows = plan.estimated_rows;
+                if cost >= HEAVY_PLAN_COST {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "This batch is expensive to run: the optimizer estimates a cost of {cost:.0} over ~{rows:.0} rows. The actual-plan capture executes it for real (inside a transaction that is always rolled back), so on a busy server this is a genuine load event that may run for minutes. Re-send with confirm_heavy to run it anyway, or read the ESTIMATED plan, which executes nothing."
+                            ),
+                            "needs_confirmation": true,
+                            "estimated_cost": cost,
+                            "estimated_rows": rows,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     match sqlserver::actual_plan(&req.conn, &req.sql).await {
         Ok(plan) => (StatusCode::OK, Json(serde_json::json!({ "plan_xml": plan }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),

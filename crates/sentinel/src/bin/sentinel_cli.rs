@@ -56,6 +56,19 @@ async fn main() -> anyhow::Result<()> {
 
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "poll-once".into());
+    // Answered before the data directory is touched: asking a binary its
+    // version must not create files or open a database.
+    match mode.as_str() {
+        "-V" | "--version" | "version" => {
+            println!("dbopt-sentinel {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        "-h" | "--help" | "help" => {
+            println!("usage: dbopt-sentinel <poll-once | run | report> [days]");
+            return Ok(());
+        }
+        _ => {}
+    }
     let db_path = SentinelConfig::default_db_path();
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {

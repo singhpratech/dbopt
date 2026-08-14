@@ -35,7 +35,18 @@ pub struct HealthReport {
     pub window_from: DateTime<Utc>,
     pub window_to: DateTime<Utc>,
     pub connected: ConnectedInfo,
-    /// Back-compat headline = the RELIABILITY values ("are users hurting").
+    /// Composite headline: the WORSE of the two lanes.
+    ///
+    /// This used to mirror reliability alone, which meant a database with a
+    /// perfect reliability lane and a failing efficiency lane served
+    /// `{"score":100,"grade":"A","status":"excellent"}` at the top level while
+    /// carrying hundreds of error-severity findings. The UI never showed that —
+    /// it renders both pillars side by side — but an alert rule or dashboard
+    /// reading the obvious top-level fields got a clean bill on a sick database.
+    ///
+    /// Taking the worse lane means the headline can never be better than the
+    /// report it summarizes. Per-lane values remain exact and unchanged; read
+    /// `reliability_*` when you specifically mean "are users hurting".
     pub score: u8,
     pub grade: char,
     pub status: String,
@@ -386,6 +397,24 @@ pub fn score_report(
     }
 }
 
+/// The composite headline for [`HealthReport::score`]/`grade`/`status`: the
+/// worse of the two lanes, so a summary can never read better than its parts.
+///
+/// "learning" is preserved verbatim — a provisional grade must keep saying it
+/// is provisional rather than being restated as a confident verdict.
+pub fn composite_headline(scores: &LaneScores) -> (u8, char, String) {
+    if scores.is_learning {
+        return (
+            scores.reliability_score.min(scores.efficiency_score),
+            scores.reliability_grade.max(scores.efficiency_grade),
+            scores.status.clone(),
+        );
+    }
+    let score = scores.reliability_score.min(scores.efficiency_score);
+    let (grade, status) = band(score);
+    (score, grade, status.to_string())
+}
+
 /// One prioritized, plain-English to-do for the top of the report. This is a
 /// re-presentation of a real ranked [`Issue`] — never invented.
 #[derive(Debug, Clone, Serialize)]
@@ -448,4 +477,59 @@ pub fn count_severities(issues: &[Issue]) -> SeverityCounts {
         }
     }
     c
+}
+
+#[cfg(test)]
+mod headline_tests {
+    use super::*;
+
+    fn lanes(rel: u8, eff: u8, learning: bool) -> LaneScores {
+        LaneScores {
+            reliability_score: rel,
+            reliability_grade: band(rel).0,
+            status: if learning { "learning".into() } else { band(rel).1.to_string() },
+            efficiency_score: eff,
+            efficiency_grade: band(eff).0,
+            operational_score: 100,
+            operational_grade: 'A',
+            is_learning: learning,
+        }
+    }
+
+    #[test]
+    fn headline_cannot_read_better_than_the_report_it_summarizes() {
+        // The exact shape an evaluator caught: reliability A/100, efficiency
+        // F/40, hundreds of error-severity findings — and the top-level fields
+        // an alert rule reads said "excellent".
+        let (score, grade, status) = composite_headline(&lanes(100, 40, false));
+        assert_eq!(score, 40);
+        assert_eq!(grade, 'F');
+        assert_ne!(status, "excellent");
+        assert_eq!(status, "critical");
+    }
+
+    #[test]
+    fn a_genuinely_healthy_database_still_reads_healthy() {
+        let (score, grade, status) = composite_headline(&lanes(98, 96, false));
+        assert_eq!(score, 96);
+        assert_eq!(grade, 'A');
+        assert_eq!(status, "excellent");
+    }
+
+    #[test]
+    fn the_worse_lane_wins_in_either_direction() {
+        // Failing reliability with a clean efficiency lane must also surface.
+        let (score, grade, _) = composite_headline(&lanes(35, 100, false));
+        assert_eq!(score, 35);
+        assert_eq!(grade, 'F');
+    }
+
+    #[test]
+    fn learning_stays_learning_and_is_never_restated_as_a_verdict() {
+        // A provisional grade must keep saying it is provisional — collapsing it
+        // to a confident band word is how "we haven't watched long enough"
+        // becomes "excellent".
+        let (_, _, status) = composite_headline(&lanes(95, 95, true));
+        assert_eq!(status, "learning");
+    }
 }

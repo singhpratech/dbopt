@@ -508,7 +508,23 @@ export function App() {
         password: conn.auth_mode === "sql" ? conn.password : undefined,
         trust_cert: conn.trust_cert,
       };
-      const planXml = await backend.actualPlan(payload as any, ui.draft_sql);
+      let planXml: string;
+      try {
+        planXml = await backend.actualPlan(payload as any, ui.draft_sql);
+      } catch (e: any) {
+        // The backend compiled the ESTIMATED plan first and found this batch
+        // expensive. Nothing has run yet — ask before spending the server's
+        // time, and say what it will cost rather than a vague "may be slow".
+        if (e instanceof backend.HeavyPlanError) {
+          const go = window.confirm(
+            `${e.message}\n\nRun it anyway?`,
+          );
+          if (!go) return;
+          planXml = await backend.actualPlan(payload as any, ui.draft_sql, true);
+        } else {
+          throw e;
+        }
+      }
       setUi({ ...ui, draft_plan: planXml });
     } catch (e: any) {
       setExplainErr(e.message ?? String(e));

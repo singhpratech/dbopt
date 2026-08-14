@@ -50,6 +50,11 @@ USAGE:
     dbopt lint <paths...> [OPTIONS]
     dbopt lint --stdin [OPTIONS]
 
+INPUTS:
+    Directories are walked for *.sql. A file named directly is always read,
+    including a saved .sqlplan — showplan XML is detected and analyzed as a
+    plan (missing indexes, scans, lookups), never mistaken for T-SQL source.
+
 OPTIONS:
     --format <human|json|sarif>   Output format (default: human)
     --fail-on <info|warning|error|critical>
@@ -157,6 +162,22 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
             );
             continue;
         }
+        // A showplan file is not T-SQL, but it IS analyzable — and the keyword
+        // sniff below would wave it through as SQL (a .sqlplan carries
+        // StatementText="SELECT …"), find nothing lintable in XML, and report a
+        // clean bill on a file full of findings. Route it to the plan analyzer
+        // so `dbopt lint` and `dbopt <file>` cannot disagree about the same input.
+        if source::looks_like_plan_xml(&src.text) {
+            let input = AnalyzeInput {
+                plan_xml: Some(src.text),
+                server_version,
+                ..Default::default()
+            };
+            for finding in analyze(&input).findings {
+                push(finding, &mut all, &mut suppressed);
+            }
+            continue;
+        }
         if !source::looks_like_sql(&src.text) {
             push(
                 synthetic(
@@ -205,7 +226,7 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
         Format::Json => print_json(
             &all, analyzed, &read_errors, suppressed, opts.max_per_rule.unwrap_or(0),
         )?,
-        Format::Sarif => print_sarif(&all, &read_errors)?,
+        Format::Sarif => print_sarif(&all, &read_errors, opts.max_per_rule.unwrap_or(0))?,
     }
 
     // An input we could not read is an I/O failure, not a finding. Exiting 1
@@ -498,15 +519,17 @@ fn print_human(
             let _ = writeln!(w, "\n{}", ff.path);
             current_file = &ff.path;
         }
-        let (line, col) = match &ff.finding.location {
-            Some(l) => (l.line, l.col),
-            None => (0, 0),
+        // A plan finding has no source position — it describes an operator, not
+        // a span of text. Printing "0:0" invites someone to go looking for line
+        // zero; a dash says plainly that there is no line to go to.
+        let pos = match &ff.finding.location {
+            Some(l) => format!("{}:{}", l.line, l.col),
+            None => "-".to_string(),
         };
         let _ = writeln!(
             w,
-            "  {}:{}  {:<8}  {}  {}",
-            line,
-            col,
+            "  {}  {:<8}  {}  {}",
+            pos,
             severity_label(ff.finding.severity),
             ff.finding.rule.0,
             ff.finding.message
@@ -662,7 +685,19 @@ fn sarif_security_severity(s: Severity) -> &'static str {
     }
 }
 
-fn print_sarif(all: &[FileFinding], read_errors: &[(String, String)]) -> anyhow::Result<()> {
+fn print_sarif(
+    all: &[FileFinding],
+    read_errors: &[(String, String)],
+    max_per_rule: usize,
+) -> anyhow::Result<()> {
+    // SARIF is complete by default (0 = no cap): a code-scanning dashboard is
+    // meant to hold every result. But one chatty hygiene rule can be 70%+ of a
+    // run, so `--max-per-rule` is honoured here too when it is asked for —
+    // previously the flag was silently ignored by this format. The rule
+    // CATALOG is still built from the uncapped set, so a rule never disappears
+    // from rules[] just because its results were trimmed.
+    let (kept, hidden) = cap_per_rule(all, max_per_rule);
+    let _ = hidden;
     // Build the rules[] catalog: one descriptor per distinct rule id we emitted,
     // carrying the most severe sample message/severity for that rule.
     let mut rule_index: BTreeMap<String, usize> = BTreeMap::new();
@@ -692,7 +727,7 @@ fn print_sarif(all: &[FileFinding], read_errors: &[(String, String)]) -> anyhow:
         }));
     }
 
-    let results: Vec<serde_json::Value> = all
+    let results: Vec<serde_json::Value> = kept
         .iter()
         .map(|ff| {
             let id = ff.finding.rule.0.clone();

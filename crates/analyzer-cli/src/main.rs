@@ -14,6 +14,17 @@ USAGE:
     dbopt <file.sql | file.sqlplan | bundle.json>   Analyze one input (JSON report)
     dbopt --stdin                        Analyze SQL piped on stdin (JSON report)
 
+EXECUTION PLANS, OFFLINE:
+    Both commands read a saved .sqlplan — the same plan analysis the app runs,
+    with no server and no connection. `lint` reports it like any other file;
+    the bare form prints the full JSON report.
+
+    dbopt lint plan.sqlplan              missing indexes, scans, lookups
+    dbopt plan.sqlplan                   the same findings as JSON
+
+    Save one from the app (ESTIMATED PLAN), or from any tool that exports
+    ShowPlanXML.
+
 OPTIONS:
     -h, --help                           Show this help
     -V, --version                        Print the version and exit

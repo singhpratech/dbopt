@@ -10,14 +10,14 @@ mod health;
 
 use axum::{
     extract::Request,
-    http::{HeaderValue, Method, StatusCode},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
 use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 /// Is this an `Origin` we are willing to accept a state-changing request from?
 /// dbopt binds to loopback, so the only legitimate origins are the embedded UI
@@ -69,8 +69,61 @@ async fn block_cross_origin_writes(req: Request, next: Next) -> Response {
 
 const PREFERRED_PORT: u16 = 3690;
 
+/// Usage/version handling, before anything is bound or connected.
+///
+/// This binary had no `--version`: every flag fell through to "start the
+/// server", so `dbopt-backend --version` silently launched a daemon (and, with
+/// an autostart config present, started polling a database) instead of printing
+/// a number. A flag that reads like a query must never have an effect.
+///
+/// Returns true when the process has done its job and should exit.
+fn handle_cli_flags() -> bool {
+    const USAGE: &str = "\
+dbopt-backend - the local dbopt app (API + embedded UI)
+
+USAGE:
+    dbopt-backend [OPTIONS]
+
+    Starts an HTTP server on 127.0.0.1 and opens the UI in your browser.
+    For the offline linter, use the `dbopt` binary instead.
+
+OPTIONS:
+    -h, --help       Show this help
+    -V, --version    Print the version and exit
+
+ENVIRONMENT:
+    PORT             Port to bind (default: 3690, then the next free port)
+    DBOPT_NO_OPEN    Set to any value to skip opening the browser
+    DBOPT_DATA_DIR   Override ~/.dbopt for the local database";
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-V" | "--version" | "version" => {
+                println!("dbopt-backend {}", env!("CARGO_PKG_VERSION"));
+                return true;
+            }
+            "-h" | "--help" | "help" => {
+                println!("{USAGE}");
+                return true;
+            }
+            // An unrecognized flag must not be swallowed into "start the
+            // server" — that is the same class of bug as --version starting a
+            // daemon. Bare words are ignored for backward compatibility.
+            other if other.starts_with('-') => {
+                eprintln!("dbopt-backend: unrecognized option `{other}`\n\n{USAGE}");
+                std::process::exit(2);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if handle_cli_flags() {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info,backend=info".into()))
@@ -86,9 +139,15 @@ async fn main() -> anyhow::Result<()> {
     // unaffected; this exists for the Vite dev server on :5173. Note that CORS
     // governs who may *read* a response — `block_cross_origin_writes` below is
     // what stops a foreign page from causing an effect it never needs to read.
+    //
+    // Methods and headers are enumerated rather than `Any`. A wildcard preflight
+    // response from a process holding live database credentials advertises more
+    // than this API can do; listing the three verbs the router actually serves
+    // (GET, POST, DELETE — see routes::router) and the one header the UI sends
+    // keeps the answer to a probe accurate.
     let cors = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE])
         .allow_origin(tower_http::cors::AllowOrigin::predicate(
             |origin: &HeaderValue, _req| is_loopback_origin(origin),
         ));

@@ -878,7 +878,15 @@ fn missing_index_finding(node: &PlanNode, mi: &MissingIndexInfo) -> Finding {
         format!("IX_{}_{}", sanitize_ident(&table), name_part)
     };
 
-    let impact_txt = if mi.impact > 0.0 { format!(" estimated impact {:.0}%", mi.impact) } else { String::new() };
+    // "~N%" and the word "estimate": this number is the OPTIMIZER's compile-time
+    // projection, not a measurement, and it genuinely moves between compiles of
+    // the same statement (56% then 54% on consecutive fetches). Printing a bare
+    // "54%" invites someone to treat a re-run wobble as a real change.
+    let impact_txt = if mi.impact > 0.0 {
+        format!(" optimizer's estimate: ~{:.0}% of this statement's cost", mi.impact)
+    } else {
+        String::new()
+    };
     let message = format!(
         "The plan reports a missing index on [{}].[{}] (NodeId={},{}). The optimizer would prefer a covering index here.",
         schema, table, node.node_id, impact_txt

@@ -19,7 +19,7 @@ use crate::sentinel_api;
 use crate::sqlserver as ss;
 
 use super::{
-    count_severities, dedup, rank, score_report, ConnectedInfo, HealthProvider, HealthReport,
+    composite_headline, count_severities, dedup, rank, score_report, ConnectedInfo, HealthProvider, HealthReport,
     Issue, Metric, SignalSummary,
 };
 
@@ -373,6 +373,8 @@ impl HealthProvider for SqlServerHealthProvider {
         //    monitor ("learning") from a long, genuinely-clean history.
         let monitoring_secs = sentinel_api::monitoring_age_secs();
         let scores = score_report(&issues, &signals, monitoring_secs);
+        // The top-level headline summarizes BOTH lanes (see HealthReport::score).
+        let (headline_score, headline_grade, headline_status) = composite_headline(&scores);
         let counts = count_severities(&issues);
 
         // "Today vs rolling baseline" trend behind the grade, from the durable
@@ -406,9 +408,9 @@ impl HealthProvider for SqlServerHealthProvider {
                 server: req.server.clone(),
                 database: req.database.clone(),
             },
-            score: scores.reliability_score,
-            grade: scores.reliability_grade,
-            status: scores.status,
+            score: headline_score,
+            grade: headline_grade,
+            status: headline_status,
             reliability_score: scores.reliability_score,
             reliability_grade: scores.reliability_grade,
             efficiency_score: scores.efficiency_score,

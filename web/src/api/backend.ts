@@ -484,13 +484,38 @@ export async function explain(info: ConnectionInfo, sql: string): Promise<string
  * destructive / DDL / EXEC batches. Returns the ShowPlanXML (with real row
  * counts + runtime). Throws with the server's reason on refusal or error.
  */
-export async function actualPlan(info: ConnectionInfo, sql: string): Promise<string> {
+export class HeavyPlanError extends Error {
+  readonly estimatedCost: number;
+  readonly estimatedRows: number;
+  constructor(message: string, estimatedCost: number, estimatedRows: number) {
+    super(message);
+    this.name = "HeavyPlanError";
+    this.estimatedCost = estimatedCost;
+    this.estimatedRows = estimatedRows;
+  }
+}
+
+export async function actualPlan(
+  info: ConnectionInfo,
+  sql: string,
+  /** Set after the user has seen the cost preflight and chosen to run anyway. */
+  confirmHeavy = false,
+): Promise<string> {
   const r = await fetch(`${BASE}/plan/actual`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...info, sql }),
+    body: JSON.stringify({ ...info, sql, confirm_heavy: confirmHeavy }),
   });
   const json = await r.json().catch(() => ({}));
+  // 409 + needs_confirmation = the backend compiled the estimate first and the
+  // batch is expensive. Nothing has executed yet; the caller decides.
+  if (r.status === 409 && (json as any).needs_confirmation) {
+    throw new HeavyPlanError(
+      (json as any).error ?? "This batch is expensive to run.",
+      (json as any).estimated_cost ?? 0,
+      (json as any).estimated_rows ?? 0,
+    );
+  }
   if (!r.ok) throw new Error((json as any).error ?? `actual plan failed (${r.status})`);
   return (json as any).plan_xml as string;
 }

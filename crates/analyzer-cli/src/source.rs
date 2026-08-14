@@ -108,6 +108,27 @@ fn sniff_bomless_utf16(bytes: &[u8]) -> Option<bool> {
     None
 }
 
+/// Is this a SQL Server showplan document rather than T-SQL source?
+///
+/// This check has to run BEFORE [`looks_like_sql`], and that ordering is the
+/// whole point. A `.sqlplan` embeds the query it describes in
+/// `StatementText="SELECT …"`, so the keyword sniff happily calls it SQL, the
+/// token rules find nothing lintable in XML, and the file is reported clean —
+/// a false clean bill on a file that is full of real findings.
+///
+/// Matching is deliberately narrow: the `ShowPlanXML` root element, not merely
+/// "looks like XML". A SQL file that happens to build an XML string must keep
+/// being linted as SQL.
+pub fn looks_like_plan_xml(text: &str) -> bool {
+    // Showplan roots appear at the top of the document; scanning a prefix keeps
+    // this O(1) on a large file and avoids matching the word inside a comment
+    // halfway down a migration script.
+    // Sliced by CHARS, not bytes: a byte slice can land mid-codepoint and panic
+    // on a UTF-8/UTF-16-decoded file, and this runs on arbitrary user input.
+    let head: String = text.chars().take(4096).collect::<String>().to_ascii_lowercase();
+    head.contains("<showplanxml") || head.contains(":showplanxml")
+}
+
 /// Does this text contain anything that reads like a T-SQL statement?
 ///
 /// A linter that reports "clean" on a truncated migration or a file of random
@@ -256,5 +277,51 @@ mod tests {
     fn keyword_match_is_word_bounded() {
         // "SELECTOR" must not count as SELECT.
         assert!(!looks_like_sql("SELECTOR ONLY"));
+    }
+
+    // ---- showplan detection ------------------------------------------------
+    //
+    // The bug these pin: a .sqlplan carries StatementText="SELECT …", so the
+    // keyword sniff calls it SQL, the token rules find nothing in XML, and the
+    // file is reported CLEAN. `dbopt lint plan.sqlplan` said 0 findings while
+    // `dbopt plan.sqlplan` said 3, for the same file.
+
+    #[test]
+    fn showplan_is_detected_even_though_it_reads_as_sql() {
+        let plan = r#"<?xml version="1.0"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT * FROM dbo.Orders WHERE Id = 1">
+  </Statements></Batch></BatchSequence></ShowPlanXML>"#;
+        assert!(looks_like_plan_xml(plan));
+        // It really does look like SQL to the keyword sniff — which is exactly
+        // why the plan check has to run first.
+        assert!(looks_like_sql(plan), "guard is only needed because this is true");
+    }
+
+    #[test]
+    fn namespaced_showplan_root_is_detected() {
+        let plan = r#"<sp:ShowPlanXML xmlns:sp="http://schemas.microsoft.com/sqlserver/2004/07/showplan"/>"#;
+        assert!(looks_like_plan_xml(plan));
+    }
+
+    #[test]
+    fn sql_that_merely_mentions_showplan_is_still_sql() {
+        // A migration that builds XML, or turns showplan on, must keep being
+        // linted as T-SQL. We match the ELEMENT, not the word.
+        assert!(!looks_like_plan_xml("SET SHOWPLAN_XML ON;"));
+        assert!(!looks_like_plan_xml(
+            "SELECT 'ShowPlanXML' AS note FROM dbo.T;"
+        ));
+    }
+
+    #[test]
+    fn plan_sniff_does_not_panic_on_multibyte_input() {
+        // The head is sliced by chars, not bytes: a byte slice at 4096 can land
+        // mid-codepoint and panic, and this runs on arbitrary user files.
+        let wide = "é".repeat(8000);
+        assert!(!looks_like_plan_xml(&wide));
+        let padded = format!("{}<ShowPlanXML>", "é".repeat(8000));
+        assert!(!looks_like_plan_xml(&padded), "root element past the head is not a plan");
     }
 }
