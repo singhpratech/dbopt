@@ -13,6 +13,7 @@ export type {
   Engine,
   Location,
   Finding,
+  ObjectRef,
   Recommendation,
   AnalysisReport,
   AnalyzeOptions,

@@ -25,6 +25,25 @@ export interface Location {
   col: number;
 }
 
+/**
+ * The database object a finding is about.
+ *
+ * Present only when the rule genuinely knows the object — a plan's `<Object>`
+ * or a DMV row. Absent for token rules, which match *text*: a rule that saw
+ * `SELECT *` has no table identity, and one is never inferred from the message.
+ *
+ * `row_count` / `reserved_kb` appear only when they were measured (from
+ * `sys.dm_db_partition_stats`). Absent means unknown — never read it as zero.
+ */
+export interface ObjectRef {
+  schema: string;
+  table: string;
+  /** Set when the finding is about one index rather than the whole table. */
+  index?: string;
+  row_count?: number;
+  reserved_kb?: number;
+}
+
 export interface Finding {
   /** Stable rule id, e.g. `"sarg.function_on_column"`. Safe to match on. */
   rule: string;
@@ -35,6 +54,8 @@ export interface Finding {
   location: Location | null;
   /** The concrete fix, usually copy-paste ready T-SQL. */
   recommendation: string | null;
+  /** The object this finding concerns, when the rule knows it. */
+  object?: ObjectRef;
 }
 
 export interface Recommendation {
