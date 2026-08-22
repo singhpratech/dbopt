@@ -1850,18 +1850,19 @@ kbd {
 .health-head-row2 .health-actions { flex-shrink: 0; margin-left: auto; }
 .health-header.scanning .health-grades { animation: pulse 1.2s infinite; }
 
-/* ── Dual-grade header: two side-by-side grade cells ──────── */
+/* ── Three-lane header: three side-by-side grade cells ───── */
 .health-grades {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 10px;
 }
-/* When the baseline-trend badge is present, give it its own slim third column.
-   It is the last child; the two grades keep equal width and it sizes to fit. */
+/* When the baseline-trend badge is present, give it its own slim fourth column.
+   It is the last child; the three grades keep equal width and it sizes to fit. */
 .health-grades:has(.health-baseline) {
-  grid-template-columns: 1fr 1fr minmax(150px, 0.7fr);
+  grid-template-columns: 1fr 1fr 1fr minmax(150px, 0.7fr);
 }
-@media (max-width: 760px) {
+@media (max-width: 900px) {
+  .health-grades,
   .health-grades:has(.health-baseline) { grid-template-columns: 1fr 1fr; }
   .health-grades:has(.health-baseline) .health-baseline { grid-column: 1 / -1; }
 }
@@ -1880,6 +1881,9 @@ kbd {
   display: flex; align-items: baseline; gap: 8px;
 }
 .health-baseline-val.forming { font-size: 14px; color: var(--text-dim); }
+/* Stale: the baseline predates the window — neutral, never green. */
+.health-baseline.stale { border-style: dashed; }
+.health-baseline-val.stale { font-size: 14px; color: var(--text-dim); }
 .health-baseline-band {
   font: 9.5px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600;
 }
@@ -2149,6 +2153,7 @@ kbd {
 .section-dot { font-size: 9px; line-height: 1; color: var(--text-dim); }
 .health-section-reliability .section-dot { color: var(--crit); }
 .health-section-opportunity .section-dot { color: var(--signal); }
+.health-section-operational .section-dot { color: var(--warn); }
 .section-title {
   font: 12px var(--f-tech);
   letter-spacing: 0.12em;
@@ -3505,6 +3510,7 @@ kbd {
 }
 .start-here-chip.lane-rel { border-left: 2px solid var(--crit); }
 .start-here-chip.lane-opp { border-left: 2px solid var(--signal); }
+.start-here-chip.lane-ops { border-left: 2px solid var(--warn); }
 .start-here-dot { font-size: 8px; line-height: 1; }
 .start-here-dot.crit { color: var(--crit); }
 .start-here-dot.warn { color: var(--warn); }

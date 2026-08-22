@@ -72,12 +72,12 @@ jobs:
       - name: fetch web bundle
         uses: actions/download-artifact@v4
         with: { name: web-dist, path: web/dist }
-      - name: build backend
-        # Both shipped binaries. Only the backend was built here, so the
-        # release archives contained no linter at all — `dbopt lint` on a
-        # downloaded build started the web server instead, while the README
-        # documents `dbopt lint` as the CI entry point.
-        run: cargo build --release --target ${{ matrix.target }} -p backend -p dbopt
+      - name: build binaries
+        # All three shipped binaries. Only the backend was built here once, so
+        # the release archives contained no linter at all — `dbopt lint` on a
+        # downloaded build started the web server instead — and until 0.4.2
+        # `dbopt-sentinel` was documented (USAGE.md §6) but in no archive.
+        run: cargo build --release --target ${{ matrix.target }} -p backend -p dbopt -p sentinel
       - name: stage artifact
         shell: bash
         run: |
@@ -85,8 +85,10 @@ jobs:
           # Names match the documentation and `cargo install dbopt`:
           #   dbopt          -> the CLI / linter
           #   dbopt-backend  -> the local app (API + embedded UI on :3690)
+          #   dbopt-sentinel -> the standalone poller daemon (env-var configured)
           cp target/${{ matrix.target }}/release/dbopt${{ matrix.binsuffix }} staging/dbopt${{ matrix.binsuffix }}
           cp target/${{ matrix.target }}/release/dbopt-backend${{ matrix.binsuffix }} staging/dbopt-backend${{ matrix.binsuffix }}
+          cp target/${{ matrix.target }}/release/dbopt-sentinel${{ matrix.binsuffix }} staging/dbopt-sentinel${{ matrix.binsuffix }}
           cp README.md staging/ 2>/dev/null || true
           cp samples/bad.sql staging/sample.sql 2>/dev/null || true
           {
@@ -97,6 +99,11 @@ jobs:
             echo "dbopt-backend  the local app. Run it, then open http://127.0.0.1:3690 for the"
             echo "               UI, live server metrics and the AI assistant."
             echo "               Set DBOPT_NO_OPEN=1 to stop it opening a browser."
+            echo ""
+            echo "dbopt-sentinel the standalone poller. The app can start it for you (Watch"
+            echo "               workspace); run it by hand when you want it without the app:"
+            echo "                 DBOPT_SERVER=host,1433 DBOPT_USER=... DBOPT_PASSWORD=... dbopt-sentinel run"
+            echo "               'dbopt-sentinel poll-once' / 'dbopt-sentinel report 7' for one shot."
           } > staging/WHICH-BINARY.txt
       - name: archive
         shell: bash
@@ -115,7 +122,10 @@ jobs:
           VER="${VER:-0.0.0}"     # fall back if somehow empty
           mkdir -p dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS
           mkdir -p dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Resources
-          cp staging/dbopt dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
+          # The .app wraps the APP (dbopt-backend: API + UI), installed under the
+          # brand name. staging/dbopt is the CLI linter since 0.3.9 — wrapping it
+          # here produced a .dmg whose app printed usage and exited.
+          cp staging/dbopt-backend dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
           chmod +x dbopt-${{ matrix.label }}-app/dbopt.app/Contents/MacOS/dbopt
           # Brand icon for the dock / Finder (CFBundleIconFile -> Resources/dbopt.icns).
           cp assets/dbopt.icns dbopt-${{ matrix.label }}-app/dbopt.app/Contents/Resources/dbopt.icns
@@ -193,9 +203,12 @@ jobs:
             --wait
           xcrun stapler staple "dbopt-${{ matrix.label }}.dmg"
           xcrun stapler validate "dbopt-${{ matrix.label }}.dmg"
-          # Also refresh the .tar.gz so the bare binary inside it is signed too.
+          # Also refresh the .tar.gz so every bare binary inside it is signed too.
           rm -f "dbopt-${{ matrix.label }}.tar.gz"
           cp "$APP/Contents/MacOS/dbopt" staging/dbopt-backend
+          for bin in dbopt dbopt-sentinel; do
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" "staging/$bin"
+          done
           (cd staging && tar czf "../dbopt-${{ matrix.label }}.tar.gz" ./*)
           security delete-keychain "$KEYCHAIN" || true
           echo "Notarized + stapled: dbopt-${{ matrix.label }}.dmg"
@@ -265,7 +278,9 @@ jobs:
                       Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "signtool.exe not found in the Windows SDK" }
           $targets = @()
-          if (Test-Path "staging\dbopt.exe") { $targets += "staging\dbopt.exe" }
+          foreach ($exe in "dbopt.exe", "dbopt-backend.exe", "dbopt-sentinel.exe") {
+            if (Test-Path "staging\$exe") { $targets += "staging\$exe" }
+          }
           if (Test-Path "dbopt-windows-x86_64.msi") { $targets += "dbopt-windows-x86_64.msi" }
           foreach ($t in $targets) {
             & $signtool.FullName sign /fd SHA256 /tr $ts /td SHA256 `
@@ -275,7 +290,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signature verify failed for $t (exit $LASTEXITCODE)" }
           }
           Remove-Item $pfx -Force
-          # Re-archive the signed .exe into the .zip so the zip download is signed too.
+          # Re-archive the signed .exes into the .zip so the zip download is signed too.
           if (Test-Path "staging\dbopt.exe") {
             Remove-Item "dbopt-windows-x86_64.zip" -ErrorAction SilentlyContinue
             Push-Location staging
@@ -287,8 +302,12 @@ jobs:
         if: matrix.label == 'linux-x86_64'
         run: |
           mkdir -p dbopt.AppDir/usr/bin
-          cp staging/dbopt dbopt.AppDir/usr/bin/dbopt
-          chmod +x dbopt.AppDir/usr/bin/dbopt
+          # The AppImage launches the APP (dbopt-backend), not the CLI linter —
+          # same 0.3.9 regression as the .dmg. The linter and poller ride along.
+          cp staging/dbopt-backend dbopt.AppDir/usr/bin/dbopt
+          cp staging/dbopt dbopt.AppDir/usr/bin/dbopt-lint
+          cp staging/dbopt-sentinel dbopt.AppDir/usr/bin/dbopt-sentinel
+          chmod +x dbopt.AppDir/usr/bin/*
           cat > dbopt.AppDir/dbopt.desktop <<EOF
           [Desktop Entry]
           Type=Application
@@ -348,12 +367,13 @@ jobs:
           echo "/tmp/zig-linux-x86_64-0.13.0" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild
       - name: build static musl binary
-        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p backend -p dbopt
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p backend -p dbopt -p sentinel
       - name: archive
         run: |
           mkdir -p staging
           cp target/x86_64-unknown-linux-musl/release/dbopt staging/dbopt
           cp target/x86_64-unknown-linux-musl/release/dbopt-backend staging/dbopt-backend
+          cp target/x86_64-unknown-linux-musl/release/dbopt-sentinel staging/dbopt-sentinel
           cp README.md staging/ 2>/dev/null || true
           cp samples/bad.sql staging/sample.sql 2>/dev/null || true
           (cd staging && tar czf ../dbopt-linux-x86_64-musl.tar.gz ./*)

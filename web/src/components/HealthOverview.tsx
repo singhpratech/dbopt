@@ -118,6 +118,7 @@ export function HealthOverview({
   const live = connected && !!report && !err;
   const reliabilityGrade = live ? report!.reliability_grade ?? "?" : "?";
   const efficiencyGrade = live ? report!.efficiency_grade ?? "?" : "?";
+  const operationalGrade = live ? report!.operational_grade ?? "?" : "?";
   // In learning mode the letters are not trustworthy yet — render them as
   // PROVISIONAL (see GradeBlock) instead of a confident full-contrast grade.
   const provisional = live && report!.is_learning === true;
@@ -163,6 +164,14 @@ export function HealthOverview({
             score={live ? report!.efficiency_score : null}
             provisional={provisional}
           />
+          <GradeBlock
+            label="Operational"
+            term="operational_grade"
+            sublabel="Backups, integrity, config"
+            grade={operationalGrade}
+            score={live ? report!.operational_score : null}
+            provisional={provisional}
+          />
           {/* Today vs this instance's OWN rolling baseline — the trend behind the
               grade. "Baseline forming" until a workload accumulates a baseline. */}
           {live && <BaselineTrendBadge trend={report!.baseline_trend} />}
@@ -182,7 +191,7 @@ export function HealthOverview({
             </div>
             <div className="health-window">
               {report && !err
-                ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}`
+                ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}${lastCaptureNote(report)}`
                 : "one-screen snapshot + what to fix first"}
             </div>
           </div>
@@ -357,6 +366,19 @@ export function HealthOverview({
                 : "No workload observed yet — this is not a clean bill of health. Opportunities are found by watching real query activity; run the monitor (or let the baseline finish) and scan again."
             }
             issues={report.issues.filter((i) => i.lane === "opportunity")}
+            conn={conn}
+            ui={ui}
+            setUi={setUi}
+            onOpen={openIssue}
+            onVerify={verifyRescan}
+            verifying={busy}
+          />
+
+          <IssueSection
+            tone="operational"
+            heading="OPERATIONAL — can you recover it?"
+            emptyLine="No operational issues in what could be checked — backups, integrity and config checks only score what was readable."
+            issues={report.issues.filter((i) => i.lane === "operational")}
             conn={conn}
             ui={ui}
             setUi={setUi}
@@ -541,6 +563,21 @@ function BaselineTrendBadge({ trend }: { trend?: BaselineTrend }) {
       </div>
     );
   }
+  if (trend.stale || trend.band === "stale") {
+    // The baseline predates the report window: present it as history, never
+    // as today's trend — a months-old "steady" is what this branch prevents.
+    const when = fmtDate(trend.last_updated);
+    return (
+      <div
+        className="health-baseline stale"
+        title={`The monitor last folded a sample into this database's baseline on ${when} — before this report's window. Its ${trend.tracked_queries} tracked ${trend.tracked_queries === 1 ? "query" : "queries"} say nothing about today. Start the monitor against this database to refresh it.`}
+      >
+        <div className="health-baseline-label">vs baseline</div>
+        <div className="health-baseline-val stale">Baseline stale</div>
+        <div className="health-baseline-sub">last updated {when}</div>
+      </div>
+    );
+  }
   const up = trend.delta_pct >= 0;
   const sign = up ? "+" : "";
   // Band drives the color: steady (in-band), elevated (≥1.5σ), regressed (≥3σ).
@@ -614,7 +651,7 @@ function IssueSection({
   onVerify,
   verifying,
 }: {
-  tone: "reliability" | "opportunity";
+  tone: "reliability" | "opportunity" | "operational";
   heading: string;
   emptyLine: string;
   issues: Issue[];
@@ -696,7 +733,7 @@ function StartHere({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) =
           <button
             key={iss.id}
             type="button"
-            className={`start-here-chip ${iss.lane === "reliability" ? "lane-rel" : "lane-opp"}`}
+            className={`start-here-chip ${laneChipClass(iss.lane)}`}
             onClick={() => onOpen(iss.id)}
             title={iss.consequence || iss.title}
           >
@@ -1267,11 +1304,16 @@ const SEVERITY_ORDER: Record<IssueSeverity, number> = {
   warning: 2,
   info: 3,
 };
+/** Lane precedence for START HERE: users hurting, then recoverability, then wins. */
+const LANE_ORDER: Record<string, number> = { reliability: 0, operational: 1, opportunity: 2 };
+function laneChipClass(lane: string): string {
+  return lane === "reliability" ? "lane-rel" : lane === "operational" ? "lane-ops" : "lane-opp";
+}
 function topIssues(issues: Issue[]): Issue[] {
   return [...issues]
     .sort((a, b) => {
-      // Reliability first.
-      if (a.lane !== b.lane) return a.lane === "reliability" ? -1 : 1;
+      // Reliability first, then operational, then opportunity.
+      if (a.lane !== b.lane) return (LANE_ORDER[a.lane] ?? 3) - (LANE_ORDER[b.lane] ?? 3);
       // Then by severity (critical first).
       const sev = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
       if (sev !== 0) return sev;
@@ -1279,6 +1321,36 @@ function topIssues(issues: Issue[]): Issue[] {
       return b.impact_rank - a.impact_rank;
     })
     .slice(0, 3);
+}
+
+/** "d MMM yyyy" for a wire ISO timestamp; falls back to the raw string. */
+function fmtDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+/** Coarse "3 min" / "5 h" / "86 days" for a seconds-ago value. */
+function fmtAgo(secs: number): string {
+  if (secs < 90) return `${Math.max(0, Math.round(secs))} s`;
+  if (secs < 90 * 60) return `${Math.round(secs / 60)} min`;
+  if (secs < 36 * 3600) return `${Math.round(secs / 3600)} h`;
+  return `${Math.round(secs / 86400)} days`;
+}
+
+/**
+ * Header suffix saying how FRESH the monitor's newest capture is. The window
+ * header alone ("last 7 days") implied live telemetry even when the feed had
+ * been dead for months; this makes the age of the newest sample visible.
+ */
+function lastCaptureNote(report: HealthReport): string {
+  const secs = report.last_capture_secs;
+  if (secs === undefined || secs === null) return " · monitor: no captures yet";
+  const windowSecs = Math.max(0, (new Date(report.window_to).getTime() - new Date(report.window_from).getTime()) / 1000);
+  const stale = secs > windowSecs;
+  return stale
+    ? ` · monitor stale: last capture ${fmtAgo(secs)} ago`
+    : ` · monitor: last capture ${fmtAgo(secs)} ago`;
 }
 
 /** up = score improved, down = regressed, flat = unchanged (drives leg color). */

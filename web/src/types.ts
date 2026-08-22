@@ -98,7 +98,7 @@ export type IssueSeverity = "critical" | "error" | "warning" | "info";
 
 export type FixAction = "execute" | "review" | "investigate";
 
-export type IssueLane = "reliability" | "opportunity";
+export type IssueLane = "reliability" | "opportunity" | "operational";
 
 /**
  * Provenance of an Issue's numbers, so we never imply fake precision:
@@ -175,7 +175,12 @@ export interface BaselineTrend {
   /** Positive = slower than this instance's own normal. */
   delta_pct: number;
   worst_z_score: number;
-  band: "steady" | "elevated" | "regressed";
+  /** "stale" overrides the z-band when the baseline predates the report window. */
+  band: "steady" | "elevated" | "regressed" | "stale";
+  /** ISO timestamp: when the sentinel last folded a sample into any tracked baseline. */
+  last_updated: string;
+  /** True when last_updated is older than the report window — render "baseline stale", never a trend. */
+  stale: boolean;
 }
 
 export interface HealthReport {
@@ -184,7 +189,7 @@ export interface HealthReport {
   window_from: string;
   window_to: string;
   connected: { server: string; database?: string };
-  /** Back-compat headline = the RELIABILITY values ("are users hurting"). */
+  /** Headline = the WORST of the three lanes (reliability / efficiency / operational). */
   score: number;
   grade: string;
   status: "excellent" | "good" | "fair" | "poor" | "critical" | "learning";
@@ -194,7 +199,14 @@ export interface HealthReport {
   /** "Speed & cost to reclaim" — 100 = fully optimized, lower = more wins available. */
   efficiency_score: number;
   efficiency_grade: string;
+  /** "Can you recover it?" — backups, integrity checks, config best-practices. 100 = clean or not checked. */
+  operational_score: number;
+  operational_grade: string;
   is_learning: boolean;
+  /** Seconds of sentinel history backing this window; absent when the newest capture predates the window. */
+  monitoring_age_secs?: number | null;
+  /** Seconds since the NEWEST sentinel capture; absent when nothing was ever captured. */
+  last_capture_secs?: number | null;
   /** "Today vs rolling baseline" trend behind the grade. Absent until a query
    *  has a mature durable baseline ("baseline forming"). */
   baseline_trend?: BaselineTrend;

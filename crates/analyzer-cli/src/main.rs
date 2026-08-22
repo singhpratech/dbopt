@@ -3,6 +3,7 @@ use std::io::Read;
 use std::process::ExitCode;
 
 mod lint;
+mod rule_docs;
 mod source;
 mod suppress;
 

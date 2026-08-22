@@ -267,7 +267,14 @@ pub struct PainSummary {
 
 /// Benign/idle/system wait types — noise, not user-facing pain (Paul Randal /
 /// the well-known ignorable list). Excluded by the wait poller AND the top-wait
-/// pick so the Reliability grade isn't dinged by background scheduler waits.
+/// pick (`pain_summary`) so neither the pain report's headline wait nor the
+/// Reliability grade is a background scheduler wait.
+///
+/// This is the SAME filter Live Pulse applies (`BENIGN_WAITS` in
+/// `crates/backend/src/sqlserver.rs`): every entry of that list is here, plus
+/// the sentinel-side extras. The test `live_pulse_benign_list_is_subset`
+/// below keeps the two from drifting apart — add new entries HERE, and the
+/// live list must stay a subset.
 pub const IGNORABLE_WAITS: &[&str] = &[
     "CLR_AUTO_EVENT","CLR_MANUAL_EVENT","CLR_SEMAPHORE",
     "SLEEP_TASK","SLEEP_SYSTEMTASK","SLEEP_BPOOL_FLUSH","SLEEP_DBSTARTUP",
@@ -296,7 +303,19 @@ pub const IGNORABLE_WAITS: &[&str] = &[
     "VDI_CLIENT_OTHER","DBMIRROR_DBM_EVENT","DBMIRROR_EVENTS_QUEUE",
     "DBMIRRORING_CMD","DBMIRROR_WORKER_QUEUE","SNI_HTTP_ACCEPT",
     "SERVER_IDLE_CHECK","RESOURCE_QUEUE","KSOURCE_WAKEUP","SLEEP_RETRY_VIRTUALALLOC",
+    // Carried over from the Live Pulse list so the report and the live view
+    // agree on what counts as background noise.
+    "LOGMGR_FLUSH","PWAIT_ALL_COMPONENTS_INITIALIZED","WAIT_FOR_RESULTS",
+    "POPULATE_LOCK_ORDINALS","PVS_PREALLOCATE","HADR_NOTIFICATION_WORKER_EXCLUSIVE_ACCESS",
+    "PARALLEL_REDO_LOG_CACHE","PARALLEL_REDO_TRAN_LIST","PARALLEL_REDO_WORKER_SYNC",
+    "UCS_SESSION_REGISTRATION","VDI_CLIENT_COMPLETED","BACKUPTHREAD",
 ];
+
+/// True when `wait_type` is on the shared ignorable list (case-sensitive: DMV
+/// wait names are upper-case constants).
+pub fn is_ignorable_wait(wait_type: &str) -> bool {
+    IGNORABLE_WAITS.contains(&wait_type)
+}
 
 /// `'A','B',...` for embedding in a SQL `NOT IN (...)` clause.
 pub fn ignorable_waits_in_clause() -> String {
@@ -454,6 +473,36 @@ impl Storage {
             .ok()
             .flatten();
         oldest_ms.map(|ms| (Utc::now().timestamp_millis() - ms).max(0) / 1000)
+    }
+
+    /// Seconds since the MOST RECENT capture across every time-series table
+    /// (`now - MAX(captured_at)`), or `None` when nothing was ever captured.
+    /// The complement of [`monitoring_age_secs`]: that one says how LONG we have
+    /// watched, this one says how FRESH the newest sample is — a 7-day span that
+    /// ended 86 days ago is history, not monitoring.
+    pub fn last_capture_secs(&self) -> Option<i64> {
+        let conn = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let newest_ms: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(m) FROM (
+                    SELECT MAX(captured_at) AS m FROM query_store_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM live_request_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM wait_stats_delta
+                    UNION ALL SELECT MAX(captured_at) FROM deadlock_capture
+                    UNION ALL SELECT MAX(captured_at) FROM index_usage_delta
+                    UNION ALL SELECT MAX(captured_at) FROM size_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM cpu_pressure_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM memory_headroom_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM io_latency_delta
+                    UNION ALL SELECT MAX(captured_at) FROM tempdb_contention_snapshot
+                    UNION ALL SELECT MAX(captured_at) FROM plan_cache_snapshot
+                 )",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten();
+        newest_ms.map(|ms| (Utc::now().timestamp_millis() - ms).max(0) / 1000)
     }
 
     // ---------- Instance registry ----------------------------------------
@@ -937,6 +986,23 @@ impl Storage {
         .flatten()
     }
 
+    /// Instance lookup scoped to a DATABASE: the newest `instances` row for
+    /// `server` whose `db` equals `database`. `None` when that server+database
+    /// pair was never monitored — callers must NOT fall back to another
+    /// database's telemetry (a baseline for `sqlopt_test` says nothing about
+    /// `PharmaInsights`).
+    pub fn get_instance_id_for_db(&self, server: &str, database: &str) -> Option<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT id FROM instances WHERE server = ?1 AND db = ?2 ORDER BY id DESC LIMIT 1",
+            params![server, database],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
     /// Read-only instance lookup by its unique NAME (the scheduler's per-instance
     /// label). Never creates a row — `None` when nothing has been captured for
     /// this name yet.
@@ -1189,7 +1255,7 @@ impl Storage {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
         let mut stmt = lock
             .prepare(
-                "SELECT count, mean, m2, last_value_ms
+                "SELECT count, mean, m2, last_value_ms, last_updated_ms
                  FROM query_baseline
                  WHERE instance_id = ?1 AND count >= ?2",
             )
@@ -1201,6 +1267,7 @@ impl Storage {
                     r.get::<_, f64>(1)?,
                     r.get::<_, f64>(2)?,
                     r.get::<_, f64>(3)?,
+                    r.get::<_, i64>(4)?,
                 ))
             })
             .ok()?
@@ -1214,9 +1281,11 @@ impl Storage {
         let mut baseline_sum = 0.0f64;
         let mut current_sum = 0.0f64;
         let mut worst_z = 0.0f64;
-        for (count, mean, m2, last_value_ms) in &rows {
+        let mut last_updated_ms = i64::MIN;
+        for (count, mean, m2, last_value_ms, updated) in &rows {
             baseline_sum += *mean;
             current_sum += *last_value_ms;
+            last_updated_ms = last_updated_ms.max(*updated);
             // Per-query z-score of the latest sample vs its own baseline.
             if *count >= 2 {
                 let var = m2 / (*count as f64 - 1.0);
@@ -1239,6 +1308,7 @@ impl Storage {
             current_mean_ms: current_sum / rows.len() as f64,
             delta_pct,
             worst_z_score: worst_z,
+            last_updated_ms,
         })
     }
 
@@ -2066,6 +2136,10 @@ pub struct HealthBaselineSummary {
     /// Worst single-query z-score of latest-vs-baseline (so one regressing query
     /// isn't averaged away). 0 when nothing exceeds its baseline.
     pub worst_z_score: f64,
+    /// Newest `last_updated_ms` across the tracked baselines (epoch ms): when
+    /// the sentinel last folded a sample into ANY of them. The health layer
+    /// uses it to refuse to present a months-old baseline as today's trend.
+    pub last_updated_ms: i64,
 }
 
 /// One plan-cache-health observation (single-use ad-hoc plans vs total).
@@ -2097,6 +2171,29 @@ pub struct FiredAlertRow {
 
 #[cfg(test)]
 mod tests {
+    /// The pain report's headline wait must apply the same benign filter as
+    /// Live Pulse. The live list lives in the backend crate (a SQL string
+    /// literal); parse it from source so this guard needs no dependency.
+    #[test]
+    fn live_pulse_benign_list_is_subset() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../backend/src/sqlserver.rs");
+        let Ok(src) = std::fs::read_to_string(path) else { return };
+        let start = src.find("const BENIGN_WAITS: &str =").expect("BENIGN_WAITS in backend");
+        let body = &src[start..];
+        let end = body.find("\";").expect("BENIGN_WAITS terminator");
+        let names: Vec<&str> = body[..end]
+            .split('\'')
+            .filter(|w| w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') && !w.is_empty())
+            .collect();
+        assert!(names.len() > 40, "parsed only {} names", names.len());
+        let missing: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| !super::is_ignorable_wait(n))
+            .collect();
+        assert!(missing.is_empty(), "Live Pulse benign waits missing from sentinel IGNORABLE_WAITS: {missing:?}");
+    }
+
     use super::*;
 
     #[test]

@@ -442,7 +442,17 @@ fn parse_where_predicates(tokens: &[Token<'_>], start: usize, end: usize) -> (Ve
     if cstart < end { conj.push((cstart, end)); }
 
     for (cs, ce) in conj {
-        if let Some((col, is_range)) = parse_simple_predicate(tokens, cs, ce) {
+        // Every conjunct on the table must parse. If any one does not (a
+        // function on the LHS, a column-to-column compare, LIKE, IS NULL, an
+        // arithmetic RHS, …) the key we'd build from the survivors is wrong
+        // in a way SQL Server would not tolerate: `ProviderId = (SELECT …)
+        // AND Outstanding > 0` minus the first conjunct yields an index on
+        // (Outstanding) that the optimizer ignores. Bail instead of emitting
+        // a key from a partial predicate set.
+        let Some((col, is_range)) = parse_simple_predicate(tokens, cs, ce) else {
+            return (Vec::new(), Vec::new());
+        };
+        {
             if is_range {
                 if !range.iter().any(|c| name_eq_ci(&c.name, &col.name))
                     && !eq.iter().any(|c| name_eq_ci(&c.name, &col.name))
@@ -561,6 +571,7 @@ fn parse_simple_predicate(tokens: &[Token<'_>], start: usize, end: usize) -> Opt
     if r >= e { return None; }
     let rt = &tokens[r];
     let rhs_ok = matches!(rt.kind, TokKind::Number | TokKind::String)
+        || is_scalar_subquery_at(tokens, r, e)
         || (rt.kind == TokKind::Word && rt.text.starts_with('@'))
         || (rt.kind == TokKind::Word && rt.text.eq_ignore_ascii_case("N")) // N'...'
         || (rt.kind == TokKind::Word && is_known_constant_fn(rt.text));
@@ -587,6 +598,14 @@ fn rhs_value_end(tokens: &[Token<'_>], start: usize, end: usize) -> usize {
     let r = skip_comments(tokens, start);
     if r >= end { return end; }
     let rt = &tokens[r];
+    // `( SELECT … )` scalar subquery: evaluated once, then the optimizer seeks
+    // on the value exactly as for a literal — consume the balanced group.
+    if rt.text == "(" {
+        return match matching_paren(tokens, r, end) {
+            Some(c) => c + 1,
+            None => end,
+        };
+    }
     // N'...': consume the `N` then the adjacent String literal.
     if rt.kind == TokKind::Word && rt.text.eq_ignore_ascii_case("N") {
         let s = skip_comments(tokens, r + 1);
@@ -610,6 +629,29 @@ fn rhs_value_end(tokens: &[Token<'_>], start: usize, end: usize) -> usize {
     }
     // Plain single-token value (Number / String / @param / bare word).
     r + 1
+}
+
+/// Index of the `)` matching the `(` at `open`, bounded by `end`.
+fn matching_paren(tokens: &[Token<'_>], open: usize, end: usize) -> Option<usize> {
+    let mut d = 0i32;
+    let mut m = open;
+    while m < end {
+        if tokens[m].text == "(" { d += 1; }
+        else if tokens[m].text == ")" { d -= 1; if d == 0 { return Some(m); } }
+        m += 1;
+    }
+    None
+}
+
+/// Is the token at `at` the `(` of a `( SELECT … )` scalar subquery? SQL
+/// Server evaluates an uncorrelated scalar subquery once and seeks on the
+/// result, so its own MissingIndex advice lists the LHS column as an EQUALITY
+/// / INEQUALITY key — we mirror that. A correlated subquery is still a seek
+/// per outer row, so the key is equally sound.
+fn is_scalar_subquery_at(tokens: &[Token<'_>], at: usize, end: usize) -> bool {
+    if tokens[at].text != "(" { return false; }
+    let first = skip_comments(tokens, at + 1);
+    first < end && is_word(&tokens[first], "SELECT") && matching_paren(tokens, at, end).is_some()
 }
 
 /// RHS function-ish words we accept as "a constant value" so e.g.
@@ -677,7 +719,7 @@ fn parse_order_by(tokens: &[Token<'_>], order_tok: usize, end: usize) -> Vec<Col
 
 /// Derive a safe identifier fragment for the index name from a column name.
 fn ident_frag(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
 }
 
 /// An index the batch itself declares: `CREATE [UNIQUE] [NON]CLUSTERED INDEX
@@ -1182,6 +1224,36 @@ mod tests {
         assert!(rec.contains("dbo.Orders"), "DDL must name the real table: {rec}");
         // equality columns belong in the key
         assert!(rec.contains("[CustomerId]") && rec.contains("[Status]"), "key cols missing: {rec}");
+    }
+
+    #[test]
+    fn missing_index_scalar_subquery_rhs_keeps_equality_in_key() {
+        // Query Store q473 from the PharmaInsights trial: the ProviderId
+        // equality has a scalar-subquery RHS. SQL Server's own MissingIndex
+        // says EQUALITY [ProviderId], INEQUALITY [Outstanding], INCLUDE
+        // [ClaimId]; dropping ProviderId produced an index the optimizer ignored.
+        let sql = "SELECT ct.ClaimId, ct.Outstanding FROM dbo.claims_transactions ct WHERE ct.ProviderId = (SELECT TOP 1 Id FROM dbo.providers ORDER BY Id) AND ct.Outstanding > 0";
+        let f = fired(sql, "index.missing_index_from_predicate").expect("should fire");
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("([ProviderId], [Outstanding])") && rec.contains("INCLUDE ([ClaimId])"), "wrong key: {rec}");
+    }
+
+    #[test]
+    fn missing_index_bails_when_any_conjunct_is_unparseable() {
+        // `Note LIKE '%x%'` cannot be modelled; emitting a key from the
+        // surviving `ProviderId = 1` alone would be a partial-predicate key.
+        let sql = "SELECT ClaimId FROM dbo.claims_transactions WHERE ProviderId = 1 AND Note LIKE '%x%';";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none());
+        let sql = "SELECT ClaimId FROM dbo.claims_transactions WHERE ProviderId = 1 AND Amount = Outstanding;";
+        assert!(fired(sql, "index.missing_index_from_predicate").is_none());
+    }
+
+    #[test]
+    fn missing_index_name_keeps_non_ascii_letters() {
+        let sql = "SELECT [Имя] FROM dbo.[Клиенты] WHERE [Идентификатор] = 10;";
+        let f = fired(sql, "index.missing_index_from_predicate").expect("should fire");
+        let rec = f.recommendation.unwrap();
+        assert!(rec.contains("[IX_Клиенты_Идентификатор]"), "index name lost its letters: {rec}");
     }
 
     #[test]

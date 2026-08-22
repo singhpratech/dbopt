@@ -27,7 +27,10 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         //  - did we see TOP ( or OFFSET ?
         let mut depth = 0i32;
         let mut order_by_at: Option<usize> = None;
-        let mut has_top_paren = false;
+        // TOP in any of its spellings bounds the sort: `TOP (n)`, `TOP n`,
+        // `TOP @n`, with or without PERCENT / WITH TIES. `TOP 100 PERCENT` is
+        // the one spelling that bounds nothing, so it is excluded.
+        let mut has_top = false;
         let mut has_offset = false;
         // A sort over a #temp table or @table variable is bounded by whatever
         // just populated it, and it is already in tempdb — warning that it
@@ -49,8 +52,14 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
             } else if depth == 0 {
                 if is_word(tk, "TOP") {
                     if let Some(n) = tokens.get(j + 1) {
-                        if n.text == "(" {
-                            has_top_paren = true;
+                        let bounded = n.text == "("
+                            || n.kind == TokKind::Number
+                            || (n.kind == TokKind::Word && n.text.starts_with('@'));
+                        let is_100_percent = n.kind == TokKind::Number
+                            && n.text == "100"
+                            && tokens.get(j + 2).map(|p| is_word(p, "PERCENT")).unwrap_or(false);
+                        if bounded && !is_100_percent {
+                            has_top = true;
                         }
                     }
                 } else if is_word(tk, "FROM") || is_word(tk, "JOIN") {
@@ -77,7 +86,7 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         }
 
         if let Some(loc_idx) = order_by_at {
-            if !has_top_paren && !has_offset && !reads_only_temp {
+            if !has_top && !has_offset && !reads_only_temp {
                 out.push(finding(
                     "tempdb.spill_risk_large_sort",
                     sev,

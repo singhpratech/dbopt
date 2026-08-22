@@ -5,6 +5,7 @@
 //! (`json`), or SARIF 2.1.0 (`sarif`, ingestible by code-scanning dashboards and
 //! editor Problems panels). Exit code is driven by `--fail-on`.
 
+use crate::rule_docs;
 use crate::source::{self, Source};
 use crate::suppress::{spec_matches, split_specs, FileSuppressions};
 use analyzer_core::{analyze, AnalyzeInput, Finding, Severity};
@@ -675,21 +676,43 @@ fn sarif_level(s: Severity) -> &'static str {
     }
 }
 
-fn sarif_security_severity(s: Severity) -> &'static str {
-    // GitHub code scanning ranks results by this 0.0-10.0 score.
-    match s {
-        Severity::Info => "1.0",
-        Severity::Warning => "4.0",
-        Severity::Error => "7.0",
-        Severity::Critical => "9.5",
-    }
-}
+// NOTE: there is deliberately NO `security-severity` property on the rule
+// descriptors. GitHub code scanning treats any rule carrying that key as a
+// SECURITY rule (7.0-8.9 = High, >= 9.0 = Critical), which turned a NOLOCK
+// hint into a "High security alert" that branch protection would block on.
+// Performance lint is ranked by `defaultConfiguration.level` alone.
 
 fn print_sarif(
     all: &[FileFinding],
     read_errors: &[(String, String)],
     max_per_rule: usize,
 ) -> anyhow::Result<()> {
+    let sarif = build_sarif(all, read_errors, max_per_rule);
+    println!("{}", serde_json::to_string_pretty(&sarif)?);
+    Ok(())
+}
+
+/// The SARIF result message: the instance message plus, when the rule produced
+/// one, its recommendation (which for index rules is the concrete DDL for THAT
+/// file's table). Previously the recommendation was dropped from results and
+/// leaked into the shared rule descriptor instead.
+fn sarif_result_message(f: &Finding) -> serde_json::Value {
+    match f.recommendation.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(rec) => serde_json::json!({
+            "text": format!("{}\n\nRecommendation: {}", f.message, rec),
+            "markdown": format!("{}\n\n**Recommendation:** {}", f.message, rec)
+        }),
+        None => serde_json::json!({ "text": f.message }),
+    }
+}
+
+/// Build the SARIF 2.1.0 log. Split from `print_sarif` so tests can inspect
+/// the structure without capturing stdout.
+fn build_sarif(
+    all: &[FileFinding],
+    read_errors: &[(String, String)],
+    max_per_rule: usize,
+) -> serde_json::Value {
     // SARIF is complete by default (0 = no cap): a code-scanning dashboard is
     // meant to hold every result. But one chatty hygiene rule can be 70%+ of a
     // run, so `--max-per-rule` is honoured here too when it is asked for —
@@ -698,33 +721,42 @@ fn print_sarif(
     // from rules[] just because its results were trimmed.
     let (kept, hidden) = cap_per_rule(all, max_per_rule);
     let _ = hidden;
-    // Build the rules[] catalog: one descriptor per distinct rule id we emitted,
-    // carrying the most severe sample message/severity for that rule.
+
+    // Build the rules[] catalog: one descriptor per distinct rule id we emitted.
+    // Descriptions come from the STATIC per-rule docs (`rule_docs`), never from
+    // a finding — a consumer shows the descriptor on every alert for the rule,
+    // so instance text (one file's CREATE INDEX) there was actively misleading
+    // and changed with file order. Only the default level is taken from the
+    // findings: the most severe one seen for that rule.
     let mut rule_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut rules: Vec<serde_json::Value> = Vec::new();
 
     for ff in all {
         let id = ff.finding.rule.0.clone();
-        if rule_index.contains_key(&id) {
+        if let Some(&idx) = rule_index.get(&id) {
+            let level_now = sarif_level(ff.finding.severity);
+            if level_rank(level_now) < level_rank(rules[idx]["defaultConfiguration"]["level"].as_str().unwrap_or("note")) {
+                rules[idx]["defaultConfiguration"]["level"] = serde_json::Value::from(level_now);
+            }
             continue;
         }
         rule_index.insert(id.clone(), rules.len());
-        let desc = ff
-            .finding
-            .recommendation
-            .clone()
-            .unwrap_or_else(|| ff.finding.message.clone());
-        rules.push(serde_json::json!({
+        let doc = rule_docs::lookup(&id);
+        let mut rule = serde_json::json!({
             "id": id,
             "name": id.replace('.', "_"),
-            "shortDescription": { "text": ff.finding.message },
-            "fullDescription": { "text": desc },
+            "shortDescription": { "text": doc.short },
+            "fullDescription": { "text": doc.full },
+            "help": { "text": doc.full },
             "defaultConfiguration": { "level": sarif_level(ff.finding.severity) },
             "properties": {
-                "tags": ["sql", "performance"],
-                "security-severity": sarif_security_severity(ff.finding.severity)
+                "tags": ["sql", sarif_family_tag(&id)]
             }
-        }));
+        });
+        if let Some(uri) = rule_docs::help_uri(&doc) {
+            rule["helpUri"] = serde_json::Value::from(uri);
+        }
+        rules.push(rule);
     }
 
     let results: Vec<serde_json::Value> = kept
@@ -737,12 +769,16 @@ fn print_sarif(
                 Some(l) => (l.line.max(1), l.col.max(1)),
                 None => (1, 1),
             };
+            let mut props = serde_json::json!({ "severity": severity_label(ff.finding.severity) });
+            if let Some(rec) = ff.finding.recommendation.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                props["recommendation"] = serde_json::Value::from(rec);
+            }
             serde_json::json!({
                 "ruleId": id,
                 "ruleIndex": rule_idx,
                 "level": sarif_level(ff.finding.severity),
-                "message": { "text": ff.finding.message },
-                "properties": { "severity": severity_label(ff.finding.severity) },
+                "message": sarif_result_message(&ff.finding),
+                "properties": props,
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": { "uri": uri_for(&ff.path) },
@@ -756,7 +792,7 @@ fn print_sarif(
         })
         .collect();
 
-    let sarif = serde_json::json!({
+    serde_json::json!({
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
@@ -788,10 +824,28 @@ fn print_sarif(
                     .collect::<Vec<_>>()
             }]
         }]
-    });
+    })
+}
 
-    println!("{}", serde_json::to_string_pretty(&sarif)?);
-    Ok(())
+/// Lower = more severe, for picking a rule's default level across findings.
+fn level_rank(level: &str) -> u8 {
+    match level {
+        "error" => 0,
+        "warning" => 1,
+        "note" => 2,
+        _ => 3,
+    }
+}
+
+/// A neutral classification tag per rule family. `security.*` rules are the
+/// only ones tagged "security"; everything else is performance/correctness
+/// lint and must not be presented as a vulnerability.
+fn sarif_family_tag(rule_id: &str) -> &'static str {
+    match rule_id.split('.').next().unwrap_or("") {
+        "security" => "security",
+        "deprecated" | "tran" | "ddl" | "datatype" => "correctness",
+        _ => "performance",
+    }
 }
 
 /// SARIF artifactLocation.uri should use forward slashes and relative paths.
@@ -815,5 +869,101 @@ fn uri_for(path: &str) -> String {
         format!("file://{norm}")
     } else {
         norm
+    }
+}
+
+#[cfg(test)]
+mod sarif_tests {
+    use super::*;
+
+    fn ff(path: &str, rule: &str, sev: Severity, msg: &str, fix: &str) -> FileFinding {
+        let mut f = synthetic(rule, sev, msg, fix);
+        if fix.is_empty() {
+            f.recommendation = None;
+        }
+        FileFinding { path: path.to_string(), finding: f }
+    }
+
+    fn rules(sarif: &serde_json::Value) -> &Vec<serde_json::Value> {
+        sarif["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap()
+    }
+
+    #[test]
+    fn rule_descriptor_is_static_and_results_carry_instance_ddl() {
+        // Two files hit the same rule with DIFFERENT per-file DDL. The bug
+        // this guards: the first file's CREATE INDEX became the rule's
+        // fullDescription, and the per-result recommendation vanished.
+        let all = vec![
+            ff("a.sql", "index.missing_index_from_predicate", Severity::Warning,
+               "Single-table SELECT on dbo.Orders filters by CustomerId",
+               "CREATE NONCLUSTERED INDEX [IX_Orders] ON dbo.Orders ([CustomerId]);"),
+            ff("b.sql", "index.missing_index_from_predicate", Severity::Warning,
+               "Single-table SELECT on dbo.Customers filters by IsActive",
+               "CREATE NONCLUSTERED INDEX [IX_Customers] ON dbo.Customers ([IsActive]);"),
+        ];
+        let s = build_sarif(&all, &[], 0);
+        let r = rules(&s);
+        assert_eq!(r.len(), 1);
+        let full = r[0]["fullDescription"]["text"].as_str().unwrap();
+        let short = r[0]["shortDescription"]["text"].as_str().unwrap();
+        for t in [full, short] {
+            assert!(!t.contains("dbo.Orders"), "descriptor leaks instance text: {t}");
+            assert!(!t.contains("CREATE NONCLUSTERED"), "descriptor carries DDL: {t}");
+        }
+        assert!(r[0]["helpUri"].as_str().unwrap().starts_with("https://learn.microsoft.com/"));
+
+        let res = s["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(res.len(), 2);
+        let m1 = res[1]["message"]["text"].as_str().unwrap();
+        assert!(m1.contains("dbo.Customers filters by IsActive"));
+        assert!(m1.contains("CREATE NONCLUSTERED INDEX [IX_Customers]"), "result lost its DDL: {m1}");
+        assert!(!m1.contains("IX_Orders"), "result shows another file's DDL");
+        assert_eq!(
+            res[1]["properties"]["recommendation"].as_str().unwrap(),
+            "CREATE NONCLUSTERED INDEX [IX_Customers] ON dbo.Customers ([IsActive]);"
+        );
+        assert!(res[1]["message"]["markdown"].as_str().unwrap().contains("**Recommendation:** CREATE NONCLUSTERED INDEX [IX_Customers]"));
+    }
+
+    #[test]
+    fn no_security_severity_and_only_security_rules_tagged_security() {
+        let all = vec![
+            ff("a.sql", "hygiene.nolock", Severity::Error, "NOLOCK on dbo.T", ""),
+            ff("a.sql", "security.xp_cmdshell", Severity::Critical, "xp_cmdshell", ""),
+        ];
+        let s = build_sarif(&all, &[], 0);
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(!text.contains("security-severity"), "security-severity must not be emitted");
+        let r = rules(&s);
+        let by_id = |id: &str| r.iter().find(|x| x["id"] == id).unwrap();
+        let nolock = by_id("hygiene.nolock");
+        assert_eq!(nolock["defaultConfiguration"]["level"], "error");
+        assert_eq!(nolock["properties"]["tags"], serde_json::json!(["sql", "performance"]));
+        assert_eq!(
+            by_id("security.xp_cmdshell")["properties"]["tags"],
+            serde_json::json!(["sql", "security"])
+        );
+        // A result without a recommendation keeps a plain text message.
+        let res = &s["runs"][0]["results"][0];
+        assert_eq!(res["message"]["text"], "NOLOCK on dbo.T");
+        assert!(res["message"].get("markdown").is_none());
+        assert!(res["properties"].get("recommendation").is_none());
+    }
+
+    #[test]
+    fn every_result_rule_id_resolves_and_level_is_most_severe() {
+        let all = vec![
+            ff("a.sql", "hygiene.select_star", Severity::Info, "a", ""),
+            ff("b.sql", "hygiene.select_star", Severity::Error, "b", ""),
+            ff("b.sql", "sarg.leading_wildcard", Severity::Warning, "c", ""),
+        ];
+        let s = build_sarif(&all, &[], 0);
+        let r = rules(&s);
+        for res in s["runs"][0]["results"].as_array().unwrap() {
+            let idx = res["ruleIndex"].as_u64().unwrap() as usize;
+            assert_eq!(r[idx]["id"], res["ruleId"]);
+        }
+        let star = r.iter().find(|x| x["id"] == "hygiene.select_star").unwrap();
+        assert_eq!(star["defaultConfiguration"]["level"], "error");
     }
 }

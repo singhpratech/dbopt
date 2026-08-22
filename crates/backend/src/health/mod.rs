@@ -35,18 +35,24 @@ pub struct HealthReport {
     pub window_from: DateTime<Utc>,
     pub window_to: DateTime<Utc>,
     pub connected: ConnectedInfo,
-    /// Composite headline: the WORSE of the two lanes.
+    /// Composite headline: the WORST of ALL THREE lanes.
     ///
     /// This used to mirror reliability alone, which meant a database with a
     /// perfect reliability lane and a failing efficiency lane served
     /// `{"score":100,"grade":"A","status":"excellent"}` at the top level while
-    /// carrying hundreds of error-severity findings. The UI never showed that —
-    /// it renders both pillars side by side — but an alert rule or dashboard
-    /// reading the obvious top-level fields got a clean bill on a sick database.
+    /// carrying hundreds of error-severity findings. The fix took the worse of
+    /// those two — and then the operational lane was added and the same bug
+    /// recurred: "no backup ever + CHECKDB never run" (operational F/50) was
+    /// headlined "excellent / A / 100". An alert rule or dashboard reading the
+    /// obvious top-level fields got a clean bill on an unrecoverable database.
     ///
-    /// Taking the worse lane means the headline can never be better than the
+    /// Taking the worst lane means the headline can never be better than the
     /// report it summarizes. Per-lane values remain exact and unchanged; read
     /// `reliability_*` when you specifically mean "are users hurting".
+    ///
+    /// An operational lane that could NOT be evaluated (msdb / DBCC markers
+    /// unreadable) emits no operational issues and therefore scores 100 — the
+    /// readable-gates keep "not checked" from dragging the headline down.
     pub score: u8,
     pub grade: char,
     pub status: String,
@@ -67,10 +73,21 @@ pub struct HealthReport {
     /// Seconds of sentinel telemetry backing the runtime signals (None when the
     /// monitor hasn't captured anything yet). Lets the UI say "monitoring for 2h"
     /// vs "7 days" instead of implying the grade is backed by long history.
+    ///
+    /// Span only counts when its NEWEST sample falls inside this report's
+    /// window: history that ended months ago is `None` here (see
+    /// `last_capture_secs` for how old the newest sample actually is).
     pub monitoring_age_secs: Option<i64>,
+    /// Seconds since the NEWEST sentinel capture (`now - MAX(captured_at)`), or
+    /// `None` when nothing was ever captured. This is the staleness signal:
+    /// a monitor that stopped 86 days ago still has a 7-day "age", but its
+    /// `last_capture_secs` says the feed is dead.
+    pub last_capture_secs: Option<i64>,
     /// "Today vs rolling baseline" trend behind the grade, built from the durable
-    /// per-query baseline. `None` when no query has a mature baseline yet — the
-    /// UI then shows "baseline forming" rather than a fabricated delta.
+    /// per-query baseline of THIS server+database. `None` when no query has a
+    /// mature baseline yet — the UI then shows "baseline forming" rather than a
+    /// fabricated delta. A baseline last updated BEFORE the report window is
+    /// returned with `band: "stale"` so it is never presented as today's trend.
     pub baseline_trend: Option<BaselineTrend>,
     pub counts: SeverityCounts,
     pub issues: Vec<Issue>,
@@ -155,9 +172,51 @@ pub struct BaselineTrend {
     pub delta_pct: f64,
     /// Worst single-query z-score of latest-vs-baseline.
     pub worst_z_score: f64,
-    /// `"steady" | "elevated" | "regressed"` — banded from the worst z-score so
-    /// the UI can color the badge without re-deriving the rule.
+    /// `"steady" | "elevated" | "regressed" | "stale"` — banded from the worst
+    /// z-score so the UI can color the badge without re-deriving the rule.
+    /// `"stale"` overrides the z-band whenever `last_updated` precedes the
+    /// report window: the numbers are still reported, but as history.
     pub band: String,
+    /// When the sentinel last folded a sample into any tracked baseline.
+    pub last_updated: DateTime<Utc>,
+    /// True when `last_updated` is older than the report window — the badge
+    /// must read "baseline stale", not "steady".
+    pub stale: bool,
+}
+
+/// Build the trend badge from a durable-baseline summary, honestly dated.
+///
+/// The z-bands map to `REGRESSION_Z_SCORE_K` (3σ = regressed) and its midpoint
+/// (elevated). A baseline whose newest update precedes `window_from` is
+/// flagged `stale` and banded `"stale"` regardless of its z-score — an 83-day-
+/// old "steady" under a "last 7 days" header is the exact trap this prevents.
+pub fn baseline_trend_from(
+    b: &sentinel::storage::HealthBaselineSummary,
+    window_from: DateTime<Utc>,
+) -> BaselineTrend {
+    use sentinel::storage::REGRESSION_Z_SCORE_K;
+    let last_updated = DateTime::<Utc>::from_timestamp_millis(b.last_updated_ms)
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    let stale = last_updated < window_from;
+    let band = if stale {
+        "stale"
+    } else if b.worst_z_score >= REGRESSION_Z_SCORE_K {
+        "regressed"
+    } else if b.worst_z_score >= REGRESSION_Z_SCORE_K / 2.0 {
+        "elevated"
+    } else {
+        "steady"
+    };
+    BaselineTrend {
+        tracked_queries: b.tracked_queries,
+        baseline_mean_ms: b.baseline_mean_ms,
+        current_mean_ms: b.current_mean_ms,
+        delta_pct: b.delta_pct,
+        worst_z_score: b.worst_z_score,
+        band: band.to_string(),
+        last_updated,
+        stale,
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -271,8 +330,8 @@ fn bucket_points(severity: &str) -> u32 {
     }
 }
 
-/// Outcome of dual-lane scoring. The top-level back-compat `score`/`grade`/
-/// `status` headline mirrors the *reliability* lane.
+/// Outcome of three-lane scoring. The top-level `score`/`grade`/`status`
+/// headline is the worst lane (see [`composite_headline`]).
 pub struct LaneScores {
     pub reliability_score: u8,
     pub reliability_grade: char,
@@ -398,19 +457,26 @@ pub fn score_report(
 }
 
 /// The composite headline for [`HealthReport::score`]/`grade`/`status`: the
-/// worse of the two lanes, so a summary can never read better than its parts.
+/// worst of ALL THREE lanes (reliability, efficiency, operational), so a
+/// summary can never read better than its parts.
 ///
 /// "learning" is preserved verbatim — a provisional grade must keep saying it
 /// is provisional rather than being restated as a confident verdict.
 pub fn composite_headline(scores: &LaneScores) -> (u8, char, String) {
+    let score = scores
+        .reliability_score
+        .min(scores.efficiency_score)
+        .min(scores.operational_score);
     if scores.is_learning {
         return (
-            scores.reliability_score.min(scores.efficiency_score),
-            scores.reliability_grade.max(scores.efficiency_grade),
+            score,
+            scores
+                .reliability_grade
+                .max(scores.efficiency_grade)
+                .max(scores.operational_grade),
             scores.status.clone(),
         );
     }
-    let score = scores.reliability_score.min(scores.efficiency_score);
     let (grade, status) = band(score);
     (score, grade, status.to_string())
 }
@@ -525,11 +591,96 @@ mod headline_tests {
     }
 
     #[test]
+    fn operational_failure_cannot_hide_behind_an_excellent_headline() {
+        // The exact shape an evaluator caught: no backup ever + CHECKDB never
+        // run → operational F/50, while reliability and efficiency were both
+        // 100 — and the headline said "excellent / A / 100".
+        let mut s = lanes(100, 100, false);
+        s.operational_score = 50;
+        s.operational_grade = 'F';
+        let (score, grade, status) = composite_headline(&s);
+        assert_eq!(score, 50);
+        assert_eq!(grade, 'F');
+        assert_eq!(status, "critical");
+    }
+
+    #[test]
+    fn an_unchecked_operational_lane_does_not_drag_the_headline() {
+        // Readable-gates: msdb / DBCC markers unreadable → no operational issues
+        // → the lane scores 100 ("not checked"), and the headline is unaffected.
+        let (score, grade, status) = composite_headline(&lanes(98, 96, false));
+        assert_eq!((score, grade, status.as_str()), (96, 'A', "excellent"));
+    }
+
+    #[test]
+    fn learning_headline_also_takes_the_operational_lane() {
+        let mut s = lanes(95, 95, true);
+        s.operational_score = 60;
+        s.operational_grade = 'D';
+        let (score, grade, status) = composite_headline(&s);
+        assert_eq!((score, grade), (60, 'D'));
+        assert_eq!(status, "learning");
+    }
+
+    #[test]
     fn learning_stays_learning_and_is_never_restated_as_a_verdict() {
         // A provisional grade must keep saying it is provisional — collapsing it
         // to a confident band word is how "we haven't watched long enough"
         // becomes "excellent".
         let (_, _, status) = composite_headline(&lanes(95, 95, true));
         assert_eq!(status, "learning");
+    }
+}
+
+#[cfg(test)]
+mod baseline_trend_tests {
+    use super::*;
+    use chrono::Duration;
+    use sentinel::storage::HealthBaselineSummary;
+
+    fn summary(last_updated: DateTime<Utc>, worst_z: f64) -> HealthBaselineSummary {
+        HealthBaselineSummary {
+            tracked_queries: 6,
+            baseline_mean_ms: 1.0,
+            current_mean_ms: 0.83,
+            delta_pct: -17.06,
+            worst_z_score: worst_z,
+            last_updated_ms: last_updated.timestamp_millis(),
+        }
+    }
+
+    #[test]
+    fn a_baseline_older_than_the_window_is_stale_not_steady() {
+        // The trap: a 7-day window, a baseline last touched 83 days ago, and a
+        // green "steady" badge from a dead feed.
+        let now = Utc::now();
+        let window_from = now - Duration::days(7);
+        let t = baseline_trend_from(&summary(now - Duration::days(83), 1.36), window_from);
+        assert!(t.stale);
+        assert_eq!(t.band, "stale");
+        assert_eq!(t.last_updated.timestamp_millis(), (now - Duration::days(83)).timestamp_millis());
+        // The measured numbers are still carried — as history, not a verdict.
+        assert_eq!(t.tracked_queries, 6);
+    }
+
+    #[test]
+    fn a_baseline_updated_inside_the_window_keeps_its_z_band() {
+        let now = Utc::now();
+        let window_from = now - Duration::days(7);
+        let fresh = now - Duration::hours(2);
+        assert_eq!(baseline_trend_from(&summary(fresh, 1.36), window_from).band, "steady");
+        assert!(!baseline_trend_from(&summary(fresh, 1.36), window_from).stale);
+        assert_eq!(baseline_trend_from(&summary(fresh, 1.6), window_from).band, "elevated");
+        assert_eq!(baseline_trend_from(&summary(fresh, 3.2), window_from).band, "regressed");
+    }
+
+    #[test]
+    fn staleness_is_judged_against_the_window_start_exactly() {
+        let now = Utc::now();
+        let window_from = now - Duration::days(7);
+        let just_inside = baseline_trend_from(&summary(window_from + Duration::seconds(1), 0.0), window_from);
+        let just_outside = baseline_trend_from(&summary(window_from - Duration::seconds(1), 0.0), window_from);
+        assert!(!just_inside.stale);
+        assert!(just_outside.stale);
     }
 }

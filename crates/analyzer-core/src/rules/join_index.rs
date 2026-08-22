@@ -277,7 +277,7 @@ fn push_unique(v: &mut Vec<String>, s: String) {
 /// Replace anything that is not alphanumeric/underscore with `_` for use in an
 /// index name.
 fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+    s.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
 #[derive(Debug)]

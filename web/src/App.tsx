@@ -738,7 +738,7 @@ export function App() {
                     <button
                       onClick={validateSyntax}
                       disabled={validateBusy || !conn.server}
-                      title={conn.server ? "Check T-SQL syntax against the connected server (SET PARSEONLY ON — parses every keyword for this version, runs nothing)" : "Configure a SQL Server connection first"}
+                      title={conn.server ? "Check T-SQL syntax against the connected server (SET PARSEONLY ON — syntax only, object names not bound, runs nothing)" : "Configure a SQL Server connection first"}
                     >
                       {validateBusy ? "CHECKING…" : "CHECK SYNTAX"}
                     </button>
@@ -778,7 +778,7 @@ export function App() {
                 {validateResult && (
                   validateResult.ok ? (
                     <div className="syntax-banner ok">
-                      ✓ Syntax valid — parses cleanly on SQL Server {ui.server_version} (every keyword recognized; nothing was executed).
+                      ✓ Syntax valid — parses on SQL Server {ui.server_version} via PARSEONLY (syntax only; object names are not checked; nothing was executed).
                     </div>
                   ) : (
                     <div className="syntax-banner err">
@@ -789,7 +789,7 @@ export function App() {
                           onClick={() => editorHandle.current?.jumpTo(d.line, 1)}
                           title="Jump to this line"
                         >
-                          ✗ Line {d.line} · Msg {d.number}: {d.message}
+                          ✗ Line {d.line} · {d.number === 0 ? "dbopt" : `Msg ${d.number}`}: {d.message}
                         </button>
                       ))}
                     </div>
@@ -962,7 +962,7 @@ export function App() {
         )}
 
         {ui.workspace === "history" && (
-          <Workspace title="Analysis runs" subtitle="durable log of every analyzer invocation · survives restarts">
+          <Workspace title="Analysis runs" subtitle="durable log of Analyze-editor runs · survives restarts">
             <AnalysisHistory server={conn.server || null} database={conn.database || null} />
           </Workspace>
         )}

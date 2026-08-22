@@ -359,18 +359,167 @@ async fn plan_actual(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     }
 }
 
-/// POST /api/validate — SSMS-style "Parse" of a T-SQL batch against the real
-/// engine (SET PARSEONLY ON). Returns `{ ok, diagnostics: [{number,line,message}] }`.
+/// POST /api/validate — "Parse" of a T-SQL batch against the real engine
+/// (SET PARSEONLY ON). Returns `{ ok, checked_by, diagnostics: [{number,line,message}] }`.
 /// `ok:true` with empty diagnostics = clean parse. A connection/transport
 /// failure (not a syntax verdict) returns 502.
+///
+/// One gap in PARSEONLY that this endpoint closes itself: the first statement
+/// of a batch may be a bare procedure name (`sp_who` is shorthand for
+/// `EXEC sp_who`), and PARSEONLY never binds names — so a misspelled first
+/// keyword such as `SELCT 1` or `UPDAT t SET x = 1` is accepted by the server
+/// as an implicit `EXEC SELCT 1`. Verified against SQL Server 2025: `SELCT 1`
+/// parses clean, `SELCT * FROM t` does not. [`implicit_exec_diagnostics`]
+/// flags that case so CHECK SYNTAX cannot pass a typo the engine would only
+/// reject at execution time.
 async fn validate(ApiJson(req): ApiJson<ExplainReq>) -> impl IntoResponse {
     match sqlserver::parse_check(&req.conn, &req.sql).await {
-        Ok(diags) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": diags.is_empty(), "diagnostics": diags })),
-        )
-            .into_response(),
+        Ok(mut diags) => {
+            if diags.is_empty() {
+                diags = implicit_exec_diagnostics(&req.sql);
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": diags.is_empty(),
+                    "checked_by": "SET PARSEONLY ON on the connected server (syntax only; object names are not bound) plus a first-keyword check",
+                    "diagnostics": diags,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// Words that may legitimately open a T-SQL batch. Anything else that appears
+/// as a bare, unqualified first token is a name the server would treat as an
+/// implicit `EXEC` — almost always a misspelled keyword.
+const BATCH_OPENERS: &[&str] = &[
+    "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "DECLARE", "SET", "IF", "ELSE",
+    "WHILE", "BEGIN", "END", "BREAK", "CONTINUE", "RETURN", "GOTO", "WAITFOR", "TRY", "CATCH",
+    "THROW", "RAISERROR", "PRINT", "EXEC", "EXECUTE", "CREATE", "ALTER", "DROP", "TRUNCATE",
+    "USE", "GRANT", "REVOKE", "DENY", "OPEN", "CLOSE", "FETCH", "DEALLOCATE", "COMMIT",
+    "ROLLBACK", "SAVE", "BACKUP", "RESTORE", "DBCC", "BULK", "ENABLE", "DISABLE", "KILL",
+    "CHECKPOINT", "RECONFIGURE", "SHUTDOWN", "REVERT", "SEND", "RECEIVE", "MOVE", "GET",
+    "READTEXT", "WRITETEXT", "UPDATETEXT", "SETUSER", "ADD", "OPENROWSET", "VALUES", "GO",
+];
+
+/// Split the text into GO batches, and for the FIRST statement of each batch
+/// flag a bare first token that is neither a T-SQL statement keyword nor
+/// something that plausibly names a procedure (`sp_`/`xp_` prefix, a
+/// schema-qualified or bracketed name, a variable, a label). `line` is the
+/// 1-based line of the offending token within the submitted text.
+fn implicit_exec_diagnostics(sql: &str) -> Vec<sqlserver::ParseDiagnostic> {
+    let mut out = Vec::new();
+    let mut batch_start_line = 1usize;
+    let mut batch = String::new();
+    let mut line_no = 0usize;
+    let mut flush = |batch: &mut String, start: usize, out: &mut Vec<sqlserver::ParseDiagnostic>| {
+        if let Some(d) = first_token_diagnostic(batch, start) {
+            out.push(d);
+        }
+        batch.clear();
+    };
+    for line in sql.lines() {
+        line_no += 1;
+        let t = line.trim();
+        let is_go = t.get(..2).is_some_and(|w| w.eq_ignore_ascii_case("go"))
+            && t[2..].trim_start().chars().next().map_or(true, |c| c.is_ascii_digit() || c == '-');
+        if is_go {
+            flush(&mut batch, batch_start_line, &mut out);
+            batch_start_line = line_no + 1;
+            continue;
+        }
+        batch.push_str(line);
+        batch.push('\n');
+    }
+    flush(&mut batch, batch_start_line, &mut out);
+    out
+}
+
+fn first_token_diagnostic(batch: &str, start_line: usize) -> Option<sqlserver::ParseDiagnostic> {
+    // Skip whitespace, `--` line comments and `/* */` block comments, counting lines.
+    let b = batch.as_bytes();
+    let mut i = 0usize;
+    let mut line = start_line;
+    loop {
+        while i < b.len() && (b[i] as char).is_whitespace() {
+            if b[i] == b'\n' { line += 1; }
+            i += 1;
+        }
+        if b[i..].starts_with(b"--") {
+            while i < b.len() && b[i] != b'\n' { i += 1; }
+            continue;
+        }
+        if b[i..].starts_with(b"/*") {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                if b[i] == b'\n' { line += 1; }
+                i += 1;
+            }
+            i = (i + 2).min(b.len());
+            continue;
+        }
+        break;
+    }
+    let rest = &batch[i..];
+    let first = rest.chars().next()?;
+    // Not a bare word: `(`, `;`, `[name]`, `@var`, `"quoted"`, a number… — the
+    // server's own parser is the authority for all of these.
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '#') {
+        return None;
+    }
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '#' || *c == '$')
+        .collect();
+    let after = rest[word.len()..].chars().next();
+    let upper = word.to_ascii_uppercase();
+    if BATCH_OPENERS.contains(&upper.as_str()) {
+        return None;
+    }
+    // A plausible procedure call: `sp_…`, `xp_…`, `dbo.proc`, `proc_name`, or a label `retry:`.
+    let lower = word.to_ascii_lowercase();
+    if lower.starts_with("sp_") || lower.starts_with("xp_") || lower.starts_with("usp_")
+        || lower.starts_with('#') || lower.contains('_') || after == Some('.') || after == Some(':')
+    {
+        return None;
+    }
+    Some(sqlserver::ParseDiagnostic {
+        number: 0,
+        line: line as u32,
+        message: format!(
+            "'{word}' is not a T-SQL statement keyword. The server accepted it only because a bare name opening a batch is read as an implicit procedure call (EXEC {word} …), which PARSEONLY does not verify. If {word} is a procedure, write EXEC {word} explicitly; otherwise fix the spelling."
+        ),
+    })
+}
+
+#[cfg(test)]
+mod validate_gate_tests {
+    use super::implicit_exec_diagnostics;
+
+    #[test]
+    fn misspelled_first_keyword_is_flagged() {
+        for sql in ["SELCT 1", "SELCT 1, 2", "-- note\nSELCT 1", "/* x */ UPDAT t SET a = 1", "  Selct"] {
+            let d = implicit_exec_diagnostics(sql);
+            assert_eq!(d.len(), 1, "{sql:?} should be flagged");
+            assert_eq!(d[0].number, 0);
+        }
+        assert_eq!(implicit_exec_diagnostics("-- c\nSELCT 1")[0].line, 2);
+        assert_eq!(implicit_exec_diagnostics("SELECT 1\nGO\nSELCT 2")[0].line, 3);
+    }
+
+    #[test]
+    fn real_openers_and_procedure_calls_pass() {
+        for sql in [
+            "SELECT 1", "select 1", "WITH c AS (SELECT 1 x) SELECT * FROM c", "DECLARE @a INT; SET @a = 1",
+            "sp_who", "dbo.usp_Report @d = 1", "[dbo].[proc]", "@x = 1", "(SELECT 1)", ";", "",
+            "BEGIN TRAN", "retry:\nSELECT 1", "EXEC my_proc", "my_proc 1, 2", "GO", "  \n  ",
+            "SELECT 1\nGO\nSELECT 2\nGO 5",
+        ] {
+            assert!(implicit_exec_diagnostics(sql).is_empty(), "{sql:?} should pass");
+        }
     }
 }
 

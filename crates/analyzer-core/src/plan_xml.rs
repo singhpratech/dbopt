@@ -950,7 +950,7 @@ fn create_stats_sql(cols: &[ColumnRef]) -> String {
 
 /// Reduce an identifier to a name fragment safe for an index/statistics name.
 fn sanitize_ident(s: &str) -> String {
-    unbracket(s).chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+    unbracket(s).chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
 #[cfg(test)]

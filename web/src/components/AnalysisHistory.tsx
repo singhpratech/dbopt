@@ -38,7 +38,7 @@ export function AnalysisHistory(props: { server: string | null; database: string
           <div className="empty-card">
             <div className="empty-glyph">⎯</div>
             <div className="empty-title">No analysis runs recorded yet</div>
-            <div className="empty-hint">Every analyzer invocation — ad-hoc script or full database scan — is logged here durably (SQLite). Survives backend restart + browser cache clear.</div>
+            <div className="empty-hint">Analyses you run from the Analyze editor are logged here durably (SQLite) and survive backend restarts and browser cache clears. Health checks, database scans, plan fetches and CLI runs are not recorded here.</div>
           </div>
         </div>
       ) : (

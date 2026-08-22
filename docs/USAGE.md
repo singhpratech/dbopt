@@ -54,13 +54,13 @@ The left rail is grouped **START → OPERATE → INSPECT → SETUP**. Toggle **D
 
 ### START
 - **❤ Health** — the front door. One click fuses static analysis + advisor + monitor into a scored, ranked list of issues with a dual grade (Reliability / Efficiency). Each issue is clickable through to its remediation.
-- **▤ Analyze** — paste or load T-SQL. The analyzer runs in-browser (WebAssembly) and lists findings with severity, the offending line, the **concrete rewrite**, and the engine-level reasoning. Buttons: **Check syntax** (real `SET PARSEONLY`), **Estimated plan**, **Actual plan** (runs inside an always-rollback transaction; refuses DDL/EXEC/COMMIT). Set the target version (2014 / 2016 / 2017 / 2019 / 2022 / 2025) so rewrites are never suggested above your engine. *Offline index suggestions order the key columns by SARGable role (equality predicates before range/inequality), not by measured histogram selectivity — connect to confirm the most selective column leads.*
+- **▤ Analyze** — paste or load T-SQL. The analyzer runs in-browser (WebAssembly) and lists findings with severity, the offending line, the **concrete rewrite**, and the engine-level reasoning. Buttons: **Check syntax** (parses on the connected server via `SET PARSEONLY ON` — syntax only, object names are not bound, so a missing table is *not* an error here; dbopt additionally flags a misspelled first keyword such as `SELCT 1`, which the server would otherwise accept as an implicit `EXEC SELCT`), **Estimated plan**, **Actual plan** (runs inside an always-rollback transaction; refuses DDL/EXEC/COMMIT). Set the target version (2014 / 2016 / 2017 / 2019 / 2022 / 2025) so rewrites are never suggested above your engine. *Offline index suggestions order the key columns by SARGable role (equality predicates before range/inequality), not by measured histogram selectivity — connect to confirm the most selective column leads.*
 - **⌬ Connection** — manage server profiles (see §3).
 
 ### OPERATE
 - **◉ Watch** — on-demand **Live Pulse**: real-time vitals (CPU load, throughput, contention, waits) polled from DMVs while you watch, plus **Report** mode that keeps the top-50 queries by duration every few minutes. This is the UI view of the **sentinel** poller (§6). You start it and read it yourself; it can also raise threshold alerts to a webhook (§6). There is no paging or escalation service.
-- **✦ Advise** — turns DMV usage stats into ranked, copy-paste T-SQL recommendations (missing/unused/duplicate indexes, etc.). *Empty advisor ≠ broken* — SQL Server resets DMV stats on restart, so a freshly-restarted instance just hasn't accumulated stats yet.
-- **⌖ Runs** — history of your analysis runs.
+- **✦ Advise** — turns DMV usage stats into ranked, copy-paste T-SQL recommendations (missing/unused/duplicate indexes, etc.). *Empty advisor ≠ broken* — SQL Server resets DMV stats on restart, so a freshly-restarted instance just hasn't accumulated stats yet. *Ranking caveat:* every usage-based recommendation (missing, unused and duplicate indexes, and their impact ranking) is computed from DMV counters that SQL Server resets on restart and on index rebuild. The ranking is only as good as the counter age: check the uptime shown beside the advice before trusting a #1, and treat a young-counter list as a hint, not a verdict.
+- **⌖ Runs** — history of the analyses you ran from the **Analyze** editor (ad-hoc scripts, deduplicated by SQL hash). Health checks, database scans, plan fetches and `dbopt` CLI runs are **not** recorded here.
 - **⎯ Logs** — durable AI + analysis history (also downloadable as JSON/CSV). Persisted in `~/.dbopt/sentinel.db`.
 
 ### INSPECT
@@ -78,7 +78,8 @@ The left rail is grouped **START → OPERATE → INSPECT → SETUP**. Toggle **D
 ```bash
 dbopt query.sql                    # static findings for a script
 dbopt plan.sqlplan                 # analyze a saved plan
-dbopt bundle.zip                   # a script + plan bundle
+dbopt bundle.json                  # an AnalyzeInput JSON bundle (sql + plan_xml + dmv_bundle)
+cat query.sql | dbopt --stdin      # read the script from stdin
 dbopt-backend                      # the web observatory (API + UI on :3690)
 
 # Lint a whole tree for CI (offline, no connection)
@@ -107,6 +108,8 @@ dbopt-sentinel report 7            # last 7 days
 ```
 
 The backend can also start/stop the sentinel from the **Watch** workspace and will **autostart** monitoring on boot if `~/.dbopt/sentinel-config.json` exists.
+
+**Where the binary is:** `dbopt-sentinel` ships alongside `dbopt` and `dbopt-backend` in the `.tar.gz` (glibc and musl), the Windows `.zip` and the `.msi` (installed to the same `bin\` folder). The macOS `.dmg` and the Linux AppImage are launchers for the app only — take the `.tar.gz` if you want the command-line tools on those platforms. The pain report's headline wait uses the same benign-wait filter as Live Pulse, so a background scheduler wait never becomes the headline.
 
 ## 7. Environment variables
 

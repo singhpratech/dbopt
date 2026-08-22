@@ -120,7 +120,7 @@ commit on error-level findings.
 |---|------|--------------|
 | **01** | **Static** | A token-level analyzer — **103 rules** across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, statistics, transactions, security and datatypes. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
 | **02** | **Plan** | Fetches the *estimated* plan (compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, spill and lookup risk. |
-| **03** | **Live** | Reads index usage, missing indexes and sizes on demand; the **sentinel** daemon samples query history, waits, deadlocks and vitals into a local SQLite time-series, with thresholds and webhook alerts. |
+| **03** | **Live** | Reads index usage, missing indexes and sizes on demand; the **sentinel** daemon samples query history, waits, deadlocks and vitals into a local SQLite time-series, with thresholds and webhook alerts. Usage-based index advice is ranked from DMV counters that reset on restart — the ranking is only as trustworthy as the counter age shown beside it. |
 
 Every finding carries a severity, the offending line, a **copy-paste rewrite** and the engine-level
 reasoning behind it. Advice is **version-gated** — a 2022+ rewrite is never suggested against a 2019

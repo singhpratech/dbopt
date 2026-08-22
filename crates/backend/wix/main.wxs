@@ -123,6 +123,16 @@
                                 Source='$(var.CargoTargetBinDir)\dbopt-backend.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='binary1' Guid='*'>
+                            <!-- The standalone poller daemon (USAGE.md §6). The app
+                                 can start it itself; this lets it run without the app. -->
+                            <File
+                                Id='exe1'
+                                Name='dbopt-sentinel.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\dbopt-sentinel.exe'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
                 </Directory>
             </Directory>
@@ -167,6 +177,7 @@
             <ComponentRef Id='License'/>
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='binary1'/>
             <ComponentRef Id='AppShortcut'/>
 
             <Feature

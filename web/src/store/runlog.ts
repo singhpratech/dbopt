@@ -1,7 +1,7 @@
 /**
  * Analysis-run history.
  *
- * Records every analyzer invocation to `/api/logs/analysis` so users have a
+ * Records Analyze-editor runs (ad-hoc) to `/api/logs/analysis` so users have a
  * durable timeline of what they've analyzed, against which server/database,
  * with what plan cost, and the per-rule findings. Mirrors a small recent-N
  * list in memory for the History panel.

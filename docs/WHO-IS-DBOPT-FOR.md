@@ -54,6 +54,9 @@ or the server's real usage.
    - **Unused & duplicate indexes** to drop (write overhead with no read benefit), from real
      `sys.dm_db_index_usage_stats`.
    - Sizes/heatmap so you see where the wins actually are.
+   - **The honest caveat:** all of the above is computed from DMV counters that SQL Server resets on
+     restart (and on index rebuild). A freshly-restarted instance ranks on minutes of evidence; check
+     the counter age shown with the advice before acting on a #1.
 3. Every suggestion is **review-then-run** ("Safe-Apply") — dbopt never executes DDL for you.
 
 **Net:** the "scroll for hours + guess the index" loop becomes "scoped, ranked findings →

@@ -93,6 +93,11 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short:
       "How much speed and storage you could reclaim — index and columnstore opportunities. Lower = more easy wins available, not 'broken'.",
   },
+  operational_grade: {
+    term: "Operational grade",
+    short:
+      "Can you recover it? Backups, integrity checks (CHECKDB), recovery model, maintenance jobs and instance config. Only what could be read is scored — an unreadable check never lowers the grade.",
+  },
   learning_mode: {
     term: "Learning mode",
     short:

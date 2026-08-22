@@ -250,7 +250,7 @@ pub fn or_chain_predicate(ctx: &RuleCtx) -> Vec<Finding> {
                 Severity::Info,
                 format!("WHERE clause contains {} OR predicates. Long OR chains often prevent index seeks and force a scan.", or_count),
                 loc,
-                Some("Rewrite as UNION ALL of seekable predicates, or as a join against a derived table / VALUES list. If the OR is over a single column with discrete values, use IN (…) which the optimizer reasons about more cleanly.".into()),
+                Some("Rewrite as a UNION of seekable predicates — use UNION ALL only when the branches are provably mutually exclusive (e.g. each branch is an equality on a different value of the same unique column); with overlapping predicates UNION ALL returns a row once per branch it matches, which changes the result. Alternatively join against a derived table / VALUES list. If the OR is over a single column with discrete values, use IN (…) which the optimizer reasons about more cleanly.".into()),
             ));
         }
     }

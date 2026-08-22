@@ -371,33 +371,30 @@ impl HealthProvider for SqlServerHealthProvider {
         // h. Score (per-lane). Back-compat headline mirrors the reliability lane.
         //    The monitoring data-age lets the scorer tell a fresh/just-reset
         //    monitor ("learning") from a long, genuinely-clean history.
-        let monitoring_secs = sentinel_api::monitoring_age_secs();
+        //    A monitoring span only backs THIS window when its newest sample
+        //    falls inside it: a 7-day history that ended 86 days ago is a
+        //    fossil, and must not promote "no signals" to a mature all-clear.
+        let last_capture_secs = sentinel_api::last_capture_secs();
+        let window_secs = (report.window_to - report.window_from).num_seconds().max(0);
+        let telemetry_is_current = last_capture_secs.map(|s| s <= window_secs).unwrap_or(false);
+        let monitoring_secs = if telemetry_is_current {
+            sentinel_api::monitoring_age_secs()
+        } else {
+            None
+        };
         let scores = score_report(&issues, &signals, monitoring_secs);
-        // The top-level headline summarizes BOTH lanes (see HealthReport::score).
+        // The top-level headline is the WORST of all three lanes (see HealthReport::score).
         let (headline_score, headline_grade, headline_status) = composite_headline(&scores);
         let counts = count_severities(&issues);
 
         // "Today vs rolling baseline" trend behind the grade, from the durable
-        // per-query baseline. `None` (UI: "baseline forming") until a query has
-        // accumulated a mature baseline — never a fabricated delta. The z-score
-        // bands map to REGRESSION_Z_SCORE_K (3σ = regressed) and a midpoint.
-        let baseline_trend = sentinel_api::health_baseline_summary(&req.server).map(|b| {
-            let band = if b.worst_z_score >= sentinel::storage::REGRESSION_Z_SCORE_K {
-                "regressed"
-            } else if b.worst_z_score >= sentinel::storage::REGRESSION_Z_SCORE_K / 2.0 {
-                "elevated"
-            } else {
-                "steady"
-            };
-            super::BaselineTrend {
-                tracked_queries: b.tracked_queries,
-                baseline_mean_ms: b.baseline_mean_ms,
-                current_mean_ms: b.current_mean_ms,
-                delta_pct: b.delta_pct,
-                worst_z_score: b.worst_z_score,
-                band: band.to_string(),
-            }
-        });
+        // per-query baseline of THIS server+database. `None` (UI: "baseline
+        // forming") until a query has accumulated a mature baseline — never a
+        // fabricated delta — and banded "stale" when the baseline predates the
+        // report window (see `super::baseline_trend_from`).
+        let baseline_trend =
+            sentinel_api::health_baseline_summary(&req.server, req.database.as_deref())
+                .map(|b| super::baseline_trend_from(&b, report.window_from));
 
         Ok(HealthReport {
             engine: "sqlserver".to_string(),
@@ -420,6 +417,7 @@ impl HealthProvider for SqlServerHealthProvider {
             action_plan,
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
+            last_capture_secs,
             baseline_trend,
             counts,
             issues,
@@ -482,9 +480,17 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         }
         RecKind::MergeIndex => {
             // observed — reclaimed storage + halved write maintenance.
-            match metric("Storage") {
-                Some(storage) => format!(
-                    "Redundant with another index: dropping it reclaims {} and halves the write maintenance on this key for zero unique reads.",
+            match (metric("Storage"), metric("Reads")) {
+                (Some(storage), Some(reads)) if reads.starts_with("no usage") => format!(
+                    "Redundant with another index: dropping it reclaims {} and halves the write maintenance on this key. No reads recorded on it since the last restart — confirm over a representative window that the superset index covers its queries.",
+                    storage
+                ),
+                (Some(storage), Some(reads)) => format!(
+                    "Redundant with another index: dropping it reclaims {} and halves the write maintenance on this key. {} reads recorded on the redundant index — confirm the superset index covers them before dropping.",
+                    storage, reads
+                ),
+                (Some(storage), None) => format!(
+                    "Redundant with another index: dropping it reclaims {} and halves the write maintenance on this key.",
                     storage
                 ),
                 _ => "Redundant with another index — double the write cost for no read benefit.".to_string(),
@@ -548,6 +554,8 @@ fn advisor_metric_source(kind: RecKind, label: &str) -> Option<String> {
         // MergeIndex: reclaimed storage vs catalog-derived uniqueness.
         RecKind::MergeIndex => match label {
             "Storage" => "sys.dm_db_partition_stats",
+            // "Reads" / "Writes" are real usage counters (or an explicit
+            // "no usage recorded" when the DMV has no row for the index).
             _ => "sys.dm_db_index_usage_stats",
         },
         // ColumnstoreCandidate: size/rows vs scan counters.

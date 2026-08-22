@@ -322,6 +322,14 @@ pub fn monitoring_age_secs() -> Option<i64> {
     Storage::open(&path).ok().and_then(|s| s.monitoring_age_secs())
 }
 
+/// Seconds since the NEWEST sentinel capture (`now - MAX(captured_at)`), or
+/// `None` when nothing was ever captured. Tells the Health front-door whether
+/// the telemetry is live or a fossil — `monitoring_age_secs` alone cannot.
+pub fn last_capture_secs() -> Option<i64> {
+    let path = SentinelConfig::default_db_path();
+    Storage::open(&path).ok().and_then(|s| s.last_capture_secs())
+}
+
 /// Read the most-recent DEEP-VITALS sample of each surface for `server` out of
 /// the sentinel store, shaped for the live UI's "DEEP VITALS" panel.
 ///
@@ -429,10 +437,21 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
 /// doesn't exist, the server was never monitored, or no query has accumulated a
 /// mature baseline yet — the UI then renders "baseline forming" rather than a
 /// fabricated delta. Read-only; never touches the live server.
-pub fn health_baseline_summary(server: &str) -> Option<sentinel::storage::HealthBaselineSummary> {
+///
+/// Scoped to the DATABASE being graded: when `database` is given, only the
+/// instance monitored for that exact server+database pair is consulted, and a
+/// miss is `None` — never another database's baseline wearing this one's
+/// badge. Without a database the server's newest instance is used.
+pub fn health_baseline_summary(
+    server: &str,
+    database: Option<&str>,
+) -> Option<sentinel::storage::HealthBaselineSummary> {
     let path = SentinelConfig::default_db_path();
     let storage = Storage::open(&path).ok()?;
-    let instance_id = storage.get_instance_id(server)?;
+    let instance_id = match database {
+        Some(db) if !db.is_empty() => storage.get_instance_id_for_db(server, db)?,
+        _ => storage.get_instance_id(server)?,
+    };
     storage.health_baseline_summary(instance_id)
 }
 

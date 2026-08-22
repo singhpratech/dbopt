@@ -39,6 +39,11 @@ pub struct IndexUsage {
     pub user_scans: u64,
     pub user_lookups: u64,
     pub user_updates: u64,
+    /// True when `sys.dm_db_index_usage_stats` had NO row for this index (the
+    /// collector LEFT JOINs and zero-fills so every index is listed). A
+    /// zero-filled row is "not observed since restart", not "measured 0".
+    #[serde(default)]
+    pub no_stats_row: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +53,12 @@ pub struct IndexMeta {
     pub index_name: String,
     pub is_unique: bool,
     pub is_primary_key: bool,
+    /// True when this is the table's clustered index (`sys.indexes.index_id = 1`).
+    /// Optional on the wire so older bundles / hand-written scenario files still
+    /// parse; when absent the columnstore pass falls back to "the PK is clustered"
+    /// (SQL Server's default) for tables that are not heaps.
+    #[serde(default)]
+    pub is_clustered: bool,
     pub key_columns: Vec<String>,
     pub included_columns: Vec<String>,
 }
@@ -457,6 +468,30 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                 .or_insert(0) += p.reserved_kb;
         }
     }
+    // Per-index usage counters so a merge/drop rec can report what was
+    // actually measured for the index it proposes to drop. A missing row
+    // means sys.dm_db_index_usage_stats has not seen the index since the
+    // last restart — which is NOT the same as "zero reads".
+    let mut usage_by_index: BTreeMap<(String, String, String), &IndexUsage> = BTreeMap::new();
+    for u in &bundle.index_usage {
+        usage_by_index.insert(
+            (u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase()),
+            u,
+        );
+    }
+    // (Reads chip, Writes chip, confidence) for the index being dropped.
+    let usage_chips = |schema: &str, table: &str, index: &str| -> (Vec<(String, String)>, &'static str) {
+        match usage_by_index.get(&(schema.to_lowercase(), table.to_lowercase(), index.to_lowercase())) {
+            Some(u) if !u.no_stats_row => (
+                vec![
+                    ("Reads".into(), commas(u.user_seeks + u.user_scans + u.user_lookups)),
+                    ("Writes".into(), commas(u.user_updates)),
+                ],
+                "observed",
+            ),
+            _ => (vec![("Reads".into(), "no usage recorded since restart".into())], "estimated"),
+        }
+    };
     for u in &bundle.index_usage {
         let reads = u.user_seeks + u.user_scans + u.user_lookups;
         if reads != 0 || u.user_updates <= 100 { continue; }
@@ -511,6 +546,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                     .get(&(schema.to_lowercase(), table.to_lowercase(), drop.index_name.to_lowercase()))
                     .copied()
                     .unwrap_or(0);
+                let (drop_chips, drop_conf) = usage_chips(schema, table, &drop.index_name);
                 recs.push(Recommendation {
                     kind: RecKind::MergeIndex,
                     priority: "medium".into(),
@@ -525,12 +561,14 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                         br(&keep.index_name), br(&drop.index_name), br(schema), br(table)
                     ),
                     impact_score: 5_000.0,
-                    metrics: vec![
-                        ("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb))),
-                        ("Reads".into(), "0 unique".into()),
-                    ],
-                    // Identical key columns are read directly from catalog metadata.
-                    confidence: "observed".into(),
+                    metrics: {
+                        let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
+                        m.extend(drop_chips);
+                        m
+                    },
+                    // Identical key columns are read directly from catalog metadata;
+                    // the Reads/Writes chips are only "observed" when a usage row exists.
+                    confidence: drop_conf.into(),
                 });
             }
         }
@@ -550,6 +588,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             .get(&(r.schema.to_lowercase(), r.table.to_lowercase(), r.redundant_index.to_lowercase()))
             .copied()
             .unwrap_or(0);
+        let (drop_chips, drop_conf) = usage_chips(&r.schema, &r.table, &r.redundant_index);
         recs.push(Recommendation {
             kind: RecKind::MergeIndex,
             priority: "medium".into(),
@@ -569,12 +608,14 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                 br(&r.redundant_index), br(&r.schema), br(&r.table)
             ),
             impact_score: 4_000.0,
-            metrics: vec![
-                ("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb))),
-                ("Reads".into(), "0 unique".into()),
-            ],
-            // Prefix relationship is read directly from catalog key-column metadata.
-            confidence: "observed".into(),
+            metrics: {
+                let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
+                m.extend(drop_chips);
+                m
+            },
+            // Prefix relationship is read directly from catalog key-column metadata;
+            // the Reads/Writes chips are only "observed" when a usage row exists.
+            confidence: drop_conf.into(),
         });
     }
 
@@ -593,28 +634,38 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         e.1 += u.user_scans;
         e.2 += u.user_updates;
     }
+    // Which tables are heaps (a partition row with no index name = index_id 0).
+    let heap_tables: std::collections::BTreeSet<(String, String)> = bundle
+        .partition_stats
+        .iter()
+        .filter(|p| p.index_name.is_none())
+        .map(|p| (p.schema_name.to_lowercase(), p.table_name.to_lowercase()))
+        .collect();
+    /// Minimum scan count before a table is called "scan-dominated". Usage
+    /// counters reset on every restart, so a handful of scans (a DBA's own
+    /// test runs minutes after a reboot) must not produce the #1-ranked rec.
+    const COLUMNSTORE_MIN_SCANS: u64 = 100;
     for ((schema, table), (rows, reserved_kb)) in &size_by_table {
         let (seeks, scans, updates) = usage_by_table.get(&(schema.clone(), table.clone())).copied().unwrap_or((0, 0, 0));
         let reads = seeks + scans;
         // Large, scan-dominated, low write churn → analytic table that wants a CCI.
         let big = *rows >= 1_000_000 || *reserved_kb >= 1_048_576; // ≥1M rows or ≥1GB
-        let scan_heavy = scans > seeks && scans > 0;
+        let scan_heavy = scans > seeks && scans >= COLUMNSTORE_MIN_SCANS;
         let low_churn = reads == 0 || (updates as f64) < (reads as f64) * 0.2;
         if big && scan_heavy && low_churn {
             let priority = if *reserved_kb >= 1_048_576 { "high" } else { "medium" };
+            let is_heap = heap_tables.contains(&(schema.to_lowercase(), table.to_lowercase()));
+            let clustered = clustered_index_for(&bundle.indexes, schema, table, is_heap);
             recs.push(Recommendation {
                 kind: RecKind::ColumnstoreCandidate,
                 priority: priority.into(),
                 title: format!("Columnstore candidate: {}.{}", schema, table),
                 object: format!("{}.{}", schema, table),
                 rationale: format!(
-                    "{} rows, {:.0} MB, scan-dominated ({} scans vs {} seeks) with low write churn ({} updates). Analytic/scan workloads on tables this size typically get 5–10× compression and large scan speedups from a clustered columnstore index.",
-                    rows, (*reserved_kb as f64) / 1024.0, scans, seeks, updates
+                    "{} rows, {:.0} MB, scan-dominated ({} scans vs {} seeks) with low write churn ({} updates). Analytic/scan workloads on tables this size typically get 5–10× compression and large scan speedups from a clustered columnstore index. Usage counters reset on restart — {} scans is a small sample; confirm over a representative window first.",
+                    rows, (*reserved_kb as f64) / 1024.0, scans, seeks, updates, commas(scans)
                 ),
-                ddl: format!(
-                    "-- Validate workload is analytic/scan-heavy (not OLTP point lookups) first.\n-- Converting replaces the clustered rowstore; test in a non-prod copy.\nCREATE CLUSTERED COLUMNSTORE INDEX [CCI_{}] ON {}.{}\n  WITH (DROP_EXISTING = OFF, MAXDOP = 1);",
-                    idfrag(table), br(schema), br(table)
-                ),
+                ddl: columnstore_ddl(schema, table, is_heap, clustered),
                 impact_score: *reserved_kb as f64,
                 metrics: vec![
                     ("Rows".into(), commas(*rows)),
@@ -633,6 +684,61 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             .then(b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal))
     });
     recs
+}
+
+/// The table's clustered index, if we can identify it. Prefers the explicit
+/// `is_clustered` flag; for bundles that predate it, falls back to the PK on a
+/// non-heap table (SQL Server clusters the PK by default). `None` for heaps and
+/// for non-heap tables whose index metadata we never collected.
+fn clustered_index_for<'a>(indexes: &'a [IndexMeta], schema: &str, table: &str, is_heap: bool) -> Option<&'a IndexMeta> {
+    let on_table = |ix: &&IndexMeta| {
+        ix.schema_name.eq_ignore_ascii_case(schema) && ix.table_name.eq_ignore_ascii_case(table)
+    };
+    if let Some(ix) = indexes.iter().filter(on_table).find(|ix| ix.is_clustered) {
+        return Some(ix);
+    }
+    if is_heap { return None; }
+    indexes.iter().filter(on_table).find(|ix| ix.is_primary_key)
+}
+
+/// Clustered-columnstore conversion DDL that actually compiles against the
+/// table's current shape. SQL Server allows ONE clustered index per table, so:
+///   heap                          → plain CREATE (DROP_EXISTING = OFF)
+///   plain clustered index         → rebuild it in place with DROP_EXISTING = ON
+///   constraint-backed clustered PK→ DROP CONSTRAINT, build the CCI, re-add the
+///                                   PK as NONCLUSTERED (DROP_EXISTING fails
+///                                   with Msg 1907 on a constraint index)
+fn columnstore_ddl(schema: &str, table: &str, is_heap: bool, clustered: Option<&IndexMeta>) -> String {
+    let head = "-- Validate workload is analytic/scan-heavy (not OLTP point lookups) first.\n-- Converting replaces the clustered rowstore; test in a non-prod copy.\n";
+    match clustered {
+        None if is_heap => format!(
+            "{head}CREATE CLUSTERED COLUMNSTORE INDEX [CCI_{}] ON {}.{}\n  WITH (DROP_EXISTING = OFF, MAXDOP = 1);",
+            idfrag(table), br(schema), br(table)
+        ),
+        None => format!(
+            "{head}-- This table has a clustered index, but its name was not in the collected metadata.\n-- Replace <clustered_index_name> below (see sys.indexes WHERE index_id = 1); if it backs a\n-- PRIMARY KEY/UNIQUE constraint, DROP the constraint first and re-add it NONCLUSTERED after.\nCREATE CLUSTERED COLUMNSTORE INDEX [<clustered_index_name>] ON {}.{}\n  WITH (DROP_EXISTING = ON, MAXDOP = 1);",
+            br(schema), br(table)
+        ),
+        Some(ix) if ix.is_primary_key || ix.is_unique => {
+            let kind = if ix.is_primary_key { "PRIMARY KEY" } else { "UNIQUE" };
+            let keys = if ix.key_columns.is_empty() {
+                "<key columns>".to_string()
+            } else {
+                ix.key_columns.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ")
+            };
+            format!(
+                "{head}-- {} is a {kind} constraint, so DROP_EXISTING cannot replace it (Msg 1907).\n-- Any FOREIGN KEY referencing this {kind} must be dropped before, and re-created after.\nALTER TABLE {}.{} DROP CONSTRAINT {};\nCREATE CLUSTERED COLUMNSTORE INDEX [CCI_{}] ON {}.{}\n  WITH (MAXDOP = 1);\nALTER TABLE {}.{} ADD CONSTRAINT {} {kind} NONCLUSTERED ({});",
+                ix.index_name,
+                br(schema), br(table), br(&ix.index_name),
+                idfrag(table), br(schema), br(table),
+                br(schema), br(table), br(&ix.index_name), keys
+            )
+        }
+        Some(ix) => format!(
+            "{head}-- Rebuilds the existing clustered index {} in place as columnstore.\nCREATE CLUSTERED COLUMNSTORE INDEX {} ON {}.{}\n  WITH (DROP_EXISTING = ON, MAXDOP = 1);",
+            ix.index_name, br(&ix.index_name), br(schema), br(table)
+        ),
+    }
 }
 
 // ===========================================================================
@@ -888,6 +994,7 @@ mod dedup_tests {
             index_name: name.into(),
             is_unique: unique,
             is_primary_key: pk,
+            is_clustered: false,
             key_columns: keys.iter().map(|s| s.to_string()).collect(),
             included_columns: vec![],
         }
@@ -903,6 +1010,7 @@ mod dedup_tests {
             user_scans: scans,
             user_lookups: lookups,
             user_updates: updates,
+            no_stats_row: false,
         }
     }
 
@@ -1233,5 +1341,138 @@ mod dedup_tests {
         assert_eq!(o.table, "Unscanned");
         assert_eq!(o.row_count, None);
         assert_eq!(o.reserved_kb, None);
+    }
+
+    // ---- columnstore DDL vs the table's clustered index ----------------------
+
+    fn big_scanned(table: &str, index: Option<&str>, scans: u64) -> DmvBundle {
+        DmvBundle {
+            index_usage: vec![usage(table, index.unwrap_or("IX_x"), 0, scans, 0, 0)],
+            partition_stats: vec![PartitionStats {
+                schema_name: "dbo".into(),
+                table_name: table.into(),
+                index_name: index.map(|s| s.to_string()),
+                row_count: 5_000_000,
+                reserved_kb: 2_000_000,
+                used_kb: 2_000_000,
+                data_kb: 1_900_000,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn cci(recs: &[Recommendation]) -> Option<&Recommendation> {
+        recs.iter().find(|r| r.kind == RecKind::ColumnstoreCandidate)
+    }
+
+    #[test]
+    fn columnstore_on_clustered_pk_drops_constraint_and_readds_nonclustered() {
+        let mut b = big_scanned("Claims", Some("PK_Claims"), 5_000);
+        let mut pk = ix("Claims", "PK_Claims", &["ClaimId"], true, true);
+        pk.is_clustered = true;
+        b.indexes.push(pk);
+        let recs = advise(&b);
+        let r = cci(&recs).expect("columnstore rec");
+        assert!(r.ddl.contains("DROP CONSTRAINT [PK_Claims]"), "{}", r.ddl);
+        assert!(r.ddl.contains("PRIMARY KEY NONCLUSTERED ([ClaimId])"), "{}", r.ddl);
+        assert!(r.ddl.contains("FOREIGN KEY"), "must warn about referencing FKs: {}", r.ddl);
+        assert!(!r.ddl.contains("DROP_EXISTING = OFF"), "{}", r.ddl);
+        assert!(r.rationale.contains("reset on restart"), "{}", r.rationale);
+    }
+
+    #[test]
+    fn columnstore_on_pk_without_clustered_flag_still_assumes_pk_is_clustered() {
+        // Older bundles have no is_clustered; a non-heap table's PK is clustered by default.
+        let mut b = big_scanned("Claims", Some("PK_Claims"), 5_000);
+        b.indexes.push(ix("Claims", "PK_Claims", &["ClaimId"], true, true));
+        let r = cci(&advise(&b)).expect("columnstore rec").ddl.clone();
+        assert!(r.contains("DROP CONSTRAINT [PK_Claims]"), "{r}");
+        assert!(!r.contains("DROP_EXISTING = OFF"), "{r}");
+    }
+
+    #[test]
+    fn columnstore_on_plain_clustered_index_uses_drop_existing_on() {
+        let mut b = big_scanned("Facts", Some("CX_Facts"), 5_000);
+        let mut cx = ix("Facts", "CX_Facts", &["LoadDate"], false, false);
+        cx.is_clustered = true;
+        b.indexes.push(cx);
+        let r = cci(&advise(&b)).expect("columnstore rec").ddl.clone();
+        assert!(r.contains("CREATE CLUSTERED COLUMNSTORE INDEX [CX_Facts]"), "{r}");
+        assert!(r.contains("DROP_EXISTING = ON"), "{r}");
+        assert!(!r.contains("DROP CONSTRAINT"), "{r}");
+    }
+
+    #[test]
+    fn columnstore_on_heap_keeps_plain_create() {
+        let b = big_scanned("Facts", None, 5_000);
+        let r = cci(&advise(&b)).expect("columnstore rec").ddl.clone();
+        assert!(r.contains("[CCI_Facts]") && r.contains("DROP_EXISTING = OFF"), "{r}");
+    }
+
+    #[test]
+    fn columnstore_needs_a_real_scan_sample() {
+        // 18 scans minutes after a restart is a DBA's own test runs, not a workload.
+        let b = big_scanned("Facts", None, 18);
+        assert!(cci(&advise(&b)).is_none(), "a handful of scans must not rank a columnstore rec");
+    }
+
+    // ---- merge-index Reads chip reflects measured usage -----------------------
+
+    fn reads_chip(r: &Recommendation) -> Option<&str> {
+        r.metrics.iter().find(|(l, _)| l == "Reads").map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn prefix_redundant_index_with_seeks_reports_real_reads() {
+        let b = DmvBundle {
+            indexes: vec![
+                ix("Orders", "IX_cust", &["CustomerId"], false, false),
+                ix("Orders", "IX_cust_date", &["CustomerId", "OrderDate"], false, false),
+            ],
+            index_usage: vec![usage("Orders", "ix_CUST", 1_234, 5, 0, 77)],
+            ..Default::default()
+        };
+        let recs = advise(&b);
+        let r = recs.iter().find(|r| r.kind == RecKind::MergeIndex && r.object.ends_with("IX_cust")).expect("merge rec");
+        assert_eq!(reads_chip(r), Some("1,239"));
+        assert!(r.metrics.iter().any(|(l, v)| l == "Writes" && v == "77"));
+        assert_eq!(r.confidence, "observed");
+        assert!(!r.metrics.iter().any(|(_, v)| v.contains("unique")));
+    }
+
+    #[test]
+    fn duplicate_index_with_no_usage_row_is_estimated_not_zero() {
+        let b = DmvBundle {
+            indexes: vec![
+                ix("Orders", "IX_a", &["CustomerId"], false, false),
+                ix("Orders", "IX_b", &["CustomerId"], false, false),
+            ],
+            ..Default::default()
+        };
+        let recs = advise(&b);
+        let r = recs.iter().find(|r| r.kind == RecKind::MergeIndex).expect("merge rec");
+        assert_eq!(reads_chip(r), Some("no usage recorded since restart"));
+        assert_eq!(r.confidence, "estimated");
+    }
+
+    #[test]
+    fn zero_filled_usage_row_from_left_join_is_not_observed_zero() {
+        // The backend collector LEFT JOINs sys.dm_db_index_usage_stats and
+        // zero-fills, flagging `no_stats_row`. That must read as "not observed",
+        // never as a measured "0".
+        let mut u = usage("Orders", "IX_a", 0, 0, 0, 0);
+        u.no_stats_row = true;
+        let b = DmvBundle {
+            indexes: vec![
+                ix("Orders", "IX_a", &["CustomerId"], false, false),
+                ix("Orders", "IX_b", &["CustomerId", "OrderDate"], false, false),
+            ],
+            index_usage: vec![u],
+            ..Default::default()
+        };
+        let recs = advise(&b);
+        let r = recs.iter().find(|r| r.kind == RecKind::MergeIndex && r.object.ends_with("IX_a")).expect("merge rec");
+        assert_eq!(reads_chip(r), Some("no usage recorded since restart"));
+        assert_eq!(r.confidence, "estimated");
     }
 }

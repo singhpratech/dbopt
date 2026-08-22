@@ -1069,7 +1069,8 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                ISNULL(u.user_seeks, 0) AS user_seeks,
                ISNULL(u.user_scans, 0) AS user_scans,
                ISNULL(u.user_lookups, 0) AS user_lookups,
-               ISNULL(u.user_updates, 0) AS user_updates
+               ISNULL(u.user_updates, 0) AS user_updates,
+               CAST(CASE WHEN u.index_id IS NULL THEN 1 ELSE 0 END AS BIT) AS no_stats_row
         FROM sys.indexes i
         JOIN sys.tables t ON t.object_id = i.object_id
         JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -1089,6 +1090,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 user_scans:    r.get::<i64, _>(5).unwrap_or(0) as u64,
                 user_lookups:  r.get::<i64, _>(6).unwrap_or(0) as u64,
                 user_updates:  r.get::<i64, _>(7).unwrap_or(0) as u64,
+                no_stats_row:  r.get::<bool, _>(8).unwrap_or(false),
             });
         }
     }
@@ -1104,6 +1106,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
     let q_indexes = r#"
         SELECT s.name AS schema_name, t.name AS table_name, i.name AS index_name,
                i.is_unique, i.is_primary_key,
+               CAST(CASE WHEN i.index_id = 1 THEN 1 ELSE 0 END AS BIT) AS is_clustered,
                STUFF((SELECT ',' + c.name
                       FROM sys.index_columns ic
                       JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -1131,8 +1134,9 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 index_name:       r.get::<&str, _>(2).unwrap_or("").to_string(),
                 is_unique:        r.get::<bool, _>(3).unwrap_or(false),
                 is_primary_key:   r.get::<bool, _>(4).unwrap_or(false),
-                key_columns:      split(r.get::<&str, _>(5)),
-                included_columns: split(r.get::<&str, _>(6)),
+                is_clustered:     r.get::<bool, _>(5).unwrap_or(false),
+                key_columns:      split(r.get::<&str, _>(6)),
+                included_columns: split(r.get::<&str, _>(7)),
             });
         }
     }
