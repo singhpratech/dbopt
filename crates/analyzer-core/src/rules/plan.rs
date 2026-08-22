@@ -80,6 +80,18 @@ pub fn scalar_udf_block_inlining(ctx: &RuleCtx) -> Vec<Finding> {
         }
 
         let Some(ra) = returns_at else { i = body_end; continue; };
+        // The function's name, so the fix names the object it is about.
+        let fn_name: String = {
+            let mut parts = Vec::new();
+            let mut q = i + 2;
+            while q < ra {
+                let tt = &tokens[q];
+                if tt.text == "(" { break; }
+                if tt.kind == TokKind::Word || tt.text == "." { parts.push(tt.text.to_string()); }
+                q += 1;
+            }
+            parts.concat()
+        };
         // Scalar iff next non-ws after RETURNS is not TABLE (and not @var TABLE).
         let after = tokens.get(ra + 1);
         let is_table_returns = match after {
@@ -141,12 +153,23 @@ pub fn scalar_udf_block_inlining(ctx: &RuleCtx) -> Vec<Finding> {
 
             if let Some((key, blurb)) = hit {
                 if already_fired_on.insert(key) {
+                    let rewrite = match key {
+                        "rowcount" => "Drop the @@ROWCOUNT test: after `SELECT @x = COUNT(*) …` @@ROWCOUNT is always 1 (COUNT returns one row), so `IF @@ROWCOUNT > 0` is both a logic bug and an inlining blocker. Test the value you assigned (`IF @cnt > 0`) or, better, collapse to a single expression: `RETURN CASE WHEN EXISTS (SELECT 1 FROM … WHERE …) THEN 1 ELSE 0 END;`.",
+                        "error" => "Replace @@ERROR checks with TRY…CATCH in the *caller*; a scalar function cannot do error handling that the optimizer can inline. Keep the body to one RETURN of a single expression.",
+                        "scope_identity" => "Move the SCOPE_IDENTITY() read into the procedure that performed the INSERT; a function must not depend on it.",
+                        "getdate" => "Pass the timestamp in as a parameter (`@asOf datetime2`) and compute from that — the function stays deterministic and inlineable, and callers can test it.",
+                        "newseq" => "NEWSEQUENTIALID() is only valid in a column DEFAULT; generate the id at the INSERT site, not in the function.",
+                        "string_agg" => "Turn the function into an inline TVF (`RETURNS TABLE AS RETURN (SELECT STRING_AGG(…) …)`) and CROSS APPLY it; STRING_AGG inside a scalar UDF blocks inlining.",
+                        "exec_as_owner" => "Remove `EXECUTE AS OWNER` from the function (grant the caller the needed SELECT instead); it is a hard inlining blocker.",
+                        "decl_table_var" => "Replace the table variable with a single query (CTE / derived table) and RETURN its result; or rewrite as an inline TVF so the caller CROSS APPLYs it.",
+                        _ => "Rewrite as an inline TVF (`RETURNS TABLE AS RETURN (SELECT ...)`).",
+                    };
                     out.push(finding(
                         "plan.scalar_udf_block_inlining",
                         Severity::Warning,
-                        format!("Scalar UDF body {} — blocks 2019+ scalar UDF inlining; the function will run row-by-row.", blurb),
+                        format!("Scalar UDF {} {} — blocks 2019+ scalar UDF inlining; the function will run row-by-row.", fn_name, blurb),
                         Some(make_loc(tk)),
-                        Some("Rewrite as an inline TVF (`RETURNS TABLE AS RETURN (SELECT ...)`). Check sys.sql_modules.is_inlineable to verify on 2019+.".into()),
+                        Some(format!("{} Then check `SELECT is_inlineable FROM sys.sql_modules WHERE object_id = OBJECT_ID('{}')` on 2019+.", rewrite, fn_name)),
                     ));
                 }
             }
@@ -163,9 +186,9 @@ pub fn scalar_udf_block_inlining(ctx: &RuleCtx) -> Vec<Finding> {
             out.push(finding(
                 "plan.scalar_udf_block_inlining",
                 Severity::Warning,
-                format!("Scalar UDF body has {} RETURN statements — multi-return scalar UDFs are not inlineable on 2019+.", return_count),
+                format!("Scalar UDF {} has {} RETURN statements — multi-return scalar UDFs are not inlineable on 2019+.", fn_name, return_count),
                 loc,
-                Some("Rewrite as an inline TVF (`RETURNS TABLE AS RETURN (SELECT ...)`). Check sys.sql_modules.is_inlineable to verify on 2019+.".into()),
+                Some(format!("Collapse the branches into one RETURN of a single expression: `RETURN CASE WHEN <condition> THEN <value-1> ELSE <value-2> END;` (an `IF … RETURN 1; RETURN 0;` pair becomes `RETURN CASE WHEN EXISTS (SELECT 1 FROM … WHERE …) THEN 1 ELSE 0 END;`). Then check `SELECT is_inlineable FROM sys.sql_modules WHERE object_id = OBJECT_ID('{}')`.", fn_name)),
             ));
         }
 

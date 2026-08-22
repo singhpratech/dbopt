@@ -27,6 +27,81 @@ pub struct DmvBundle {
     /// lets the caller say so out loud instead of reporting a silent blank.
     #[serde(default)]
     pub scanned_database: String,
+    /// When the instance last started (`sys.dm_os_sys_info.sqlserver_start_time`,
+    /// RFC 3339 UTC). Every `sys.dm_db_*_stats` counter in this bundle has been
+    /// accumulating only since then. ADDITIVE + OPTIONAL: `None` when the
+    /// collector could not read it (offline bundle, no VIEW SERVER STATE).
+    #[serde(default)]
+    pub counters_since: Option<String>,
+    /// Seconds between `counters_since` and collection time — the lifetime of
+    /// every usage counter here. The advisor stamps it on each usage-based
+    /// recommendation and downgrades confidence while it is under a day.
+    #[serde(default)]
+    pub counter_age_secs: Option<i64>,
+    /// Per-table persistence of missing-index suggestions from the monitor's
+    /// daily DMV snapshots (see `sentinel::poll::missing_index`). Lets a
+    /// create-index rec say "seen on N of the last M monitored days" instead of
+    /// presenting one reading of a DMV that forgets on restart. ADDITIVE:
+    /// defaults to `[]` (unmonitored server → no claim either way).
+    #[serde(default)]
+    pub missing_index_history: Vec<MissingIndexHistory>,
+}
+
+/// How persistently the missing-index DMV has suggested an index on a table
+/// across the monitor's daily captures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingIndexHistory {
+    pub schema_name: String,
+    pub table_name: String,
+    /// Distinct capture days on which the DMV suggested an index on this table.
+    pub days_seen: u32,
+    /// Distinct capture days the monitor has for this instance in the window.
+    pub days_observed: u32,
+}
+
+/// Usage counters younger than this are a sample, not a verdict: confidence
+/// on usage-based recommendations is downgraded to `estimated` below it.
+pub const COUNTER_AGE_YOUNG_SECS: i64 = 24 * 3600;
+
+/// Human phrase for the counter lifetime, e.g. `counters cover 0.8 h since
+/// restart` / `counters cover 2,064 h (86 d) since restart`.
+pub fn counter_age_phrase(age_secs: i64) -> String {
+    let h = age_secs.max(0) as f64 / 3600.0;
+    if h < 10.0 {
+        format!("counters cover {h:.1} h since restart")
+    } else if age_secs < 48 * 3600 {
+        format!("counters cover {} h since restart", h.round() as u64)
+    } else {
+        format!("counters cover {} h ({} d) since restart", commas(h.round() as u64), age_secs / 86_400)
+    }
+}
+
+/// Stamp the counter lifetime on every usage-based recommendation: a rationale
+/// suffix (with the restart instant when known), an evidence chip, and a
+/// confidence downgrade from `observed` to `estimated` while the counters are
+/// younger than [`COUNTER_AGE_YOUNG_SECS`]. "0 reads since restart" measured
+/// over ten minutes is not an observation of the index being unused.
+///
+/// Every rec kind the advisor emits is usage-based (seeks, reads/writes,
+/// scans, ×/day), so all of them carry the stamp. `heuristic` is never
+/// upgraded or downgraded — it is already the weakest tier.
+pub fn apply_counter_age(recs: &mut [Recommendation], counter_age_secs: Option<i64>, counters_since: Option<&str>) {
+    let Some(age) = counter_age_secs else { return };
+    let phrase = counter_age_phrase(age);
+    let since = counters_since.map(|s| format!(" ({s})")).unwrap_or_default();
+    let young = age < COUNTER_AGE_YOUNG_SECS;
+    for r in recs.iter_mut() {
+        let mut suffix = format!(" Usage {phrase}{since}");
+        if young {
+            suffix.push_str("; under 24 h of counters is a sample, not a verdict — re-check after a representative window");
+        }
+        suffix.push('.');
+        r.rationale.push_str(&suffix);
+        r.metrics.push(("Counters since restart".into(), format!("{:.1} h", age.max(0) as f64 / 3600.0)));
+        if young && r.confidence == "observed" {
+            r.confidence = "estimated".into();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,9 +495,23 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             Some(p) => format!(" It {p}, so it ranks ahead of indexes for colder queries."),
             None => String::new(),
         };
+        // Persistence across the monitor's daily DMV snapshots, when present.
+        // The DMV forgets on every restart; "seen on 6 of the last 7 days" is
+        // the evidence that turns one reading into a pattern.
+        let history = bundle
+            .missing_index_history
+            .iter()
+            .find(|h| h.schema_name.eq_ignore_ascii_case(&m.schema_name) && h.table_name.eq_ignore_ascii_case(&m.table_name));
+        let history_note = match history {
+            Some(h) => format!(
+                " The monitor has seen a missing-index suggestion on this table on {} of the last {} monitored day(s).",
+                h.days_seen, h.days_observed
+            ),
+            None => String::new(),
+        };
         let rationale = format!(
-            "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%.{}{} Order key columns by selectivity and consolidate with existing indexes before applying.",
-            m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, write_cost_note, workload_note
+            "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%.{}{}{} Order key columns by selectivity and consolidate with existing indexes before applying.",
+            m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, write_cost_note, workload_note, history_note
         );
         let mut metrics = vec![
             ("Seeks that benefit".into(), commas(m.user_seeks)),
@@ -430,6 +519,9 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ("Avg query cost".into(), format!("{:.2}", m.avg_total_user_cost)),
             ("Write cost".into(), write_cost.label().to_string()),
         ];
+        if let Some(h) = history {
+            metrics.push(("Seen (days)".into(), format!("{} of {}", h.days_seen, h.days_observed)));
+        }
         if let Some(per_day) = ranking.executions_per_day {
             if per_day > 0.0 {
                 metrics.push(("Query runs".into(), format!("~{}×/day", if per_day >= 1.0 { format!("{:.0}", per_day.round()) } else { format!("{per_day:.1}") })));
@@ -549,7 +641,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                 let (drop_chips, drop_conf) = usage_chips(schema, table, &drop.index_name);
                 recs.push(Recommendation {
                     kind: RecKind::MergeIndex,
-                    priority: "medium".into(),
+                    priority: merge_priority(drop_reserved_kb).into(),
                     title: format!("Merge duplicate indexes on {}.{}", schema, table),
                     object: format!("{}.{}.{}", schema, table, drop.index_name),
                     rationale: format!(
@@ -560,7 +652,9 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                         "-- Merge needed INCLUDE columns into {} first, then:\nDROP INDEX {} ON {}.{};",
                         br(&keep.index_name), br(&drop.index_name), br(schema), br(table)
                     ),
-                    impact_score: 5_000.0,
+                    // Rank within kind by what the drop reclaims (+1 so an
+                    // exact duplicate edges a prefix-redundant one of equal size).
+                    impact_score: drop_reserved_kb as f64 + 1.0,
                     metrics: {
                         let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
                         m.extend(drop_chips);
@@ -591,7 +685,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         let (drop_chips, drop_conf) = usage_chips(&r.schema, &r.table, &r.redundant_index);
         recs.push(Recommendation {
             kind: RecKind::MergeIndex,
-            priority: "medium".into(),
+            priority: merge_priority(drop_reserved_kb).into(),
             title: format!("Drop prefix-redundant index {} on {}.{}", r.redundant_index, r.schema, r.table),
             object: format!("{}.{}.{}", r.schema, r.table, r.redundant_index),
             rationale: format!(
@@ -607,7 +701,7 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
                 br(&r.superset_index),
                 br(&r.redundant_index), br(&r.schema), br(&r.table)
             ),
-            impact_score: 4_000.0,
+            impact_score: drop_reserved_kb as f64,
             metrics: {
                 let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
                 m.extend(drop_chips);
@@ -678,12 +772,24 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         }
     }
 
+    // Every rec above is built from counters that only exist since the last
+    // restart — say so on each one, and don't call a ten-minute sample "observed".
+    apply_counter_age(&mut recs, bundle.counter_age_secs, bundle.counters_since.as_deref());
+
     // Rank: priority bucket first, then impact within the bucket.
     recs.sort_by(|a, b| {
         priority_rank(&a.priority).cmp(&priority_rank(&b.priority))
             .then(b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal))
     });
     recs
+}
+
+/// Priority of a merge/drop-redundant rec by the storage the drop reclaims.
+/// A redundant index on an EMPTY table is still redundant, but it is not worth
+/// a slot in "what to fix first" above anything with measured cost: it goes to
+/// `low` (informational downstream), and the rest rank by size within `medium`.
+fn merge_priority(drop_reserved_kb: u64) -> &'static str {
+    if drop_reserved_kb == 0 { "low" } else { "medium" }
 }
 
 /// The table's clustered index, if we can identify it. Prefers the explicit
@@ -1474,5 +1580,135 @@ mod dedup_tests {
         let r = recs.iter().find(|r| r.kind == RecKind::MergeIndex && r.object.ends_with("IX_a")).expect("merge rec");
         assert_eq!(reads_chip(r), Some("no usage recorded since restart"));
         assert_eq!(r.confidence, "estimated");
+    }
+
+    // ---- counter age (D2) + missing-index history (D20) + size-ranked merges (D16)
+
+    fn chip<'a>(r: &'a Recommendation, label: &str) -> Option<&'a str> {
+        r.metrics.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str())
+    }
+
+    fn dropped_index_bundle() -> DmvBundle {
+        DmvBundle {
+            indexes: vec![ix("Orders", "IX_dead", &["Note"], false, false)],
+            index_usage: vec![usage("Orders", "IX_dead", 0, 0, 0, 150_000)],
+            missing_indexes: vec![mi("Orders", &["CustomerId"], &[], &["Total"], 90.0, 8, 130.0)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn young_counters_downgrade_observed_to_estimated_and_say_how_young() {
+        // The trap: '0 reads' measured over ten minutes presented as observed.
+        let mut b = dropped_index_bundle();
+        b.counter_age_secs = Some(600);
+        b.counters_since = Some("2026-08-22T19:18:50Z".into());
+        let recs = advise(&b);
+        let drop = recs.iter().find(|r| r.kind == RecKind::DropIndex).expect("drop rec");
+        assert_eq!(drop.confidence, "estimated");
+        assert!(drop.rationale.contains("counters cover 0.2 h since restart (2026-08-22T19:18:50Z)"), "{}", drop.rationale);
+        assert!(drop.rationale.contains("sample, not a verdict"));
+        assert_eq!(chip(drop, "Counters since restart"), Some("0.2 h"));
+        // Every kind carries the stamp, including SQL Server's own projections.
+        let create = recs.iter().find(|r| r.kind == RecKind::CreateIndex).expect("create rec");
+        assert!(create.rationale.contains("counters cover 0.2 h"));
+        assert_eq!(create.confidence, "estimated");
+    }
+
+    #[test]
+    fn mature_counters_keep_observed_confidence_but_still_state_the_window() {
+        let mut b = dropped_index_bundle();
+        b.counter_age_secs = Some(86 * 86_400);
+        let recs = advise(&b);
+        let drop = recs.iter().find(|r| r.kind == RecKind::DropIndex).unwrap();
+        assert_eq!(drop.confidence, "observed");
+        assert!(drop.rationale.contains("counters cover 2,064 h (86 d) since restart"), "{}", drop.rationale);
+        assert!(!drop.rationale.contains("sample, not a verdict"));
+    }
+
+    #[test]
+    fn unknown_counter_age_adds_no_claim() {
+        let recs = advise(&dropped_index_bundle());
+        let drop = recs.iter().find(|r| r.kind == RecKind::DropIndex).unwrap();
+        assert_eq!(drop.confidence, "observed");
+        assert!(!drop.rationale.contains("counters cover"));
+        assert!(chip(drop, "Counters since restart").is_none());
+    }
+
+    #[test]
+    fn counter_age_never_touches_heuristic_confidence() {
+        let mut recs = vec![Recommendation {
+            kind: RecKind::ColumnstoreCandidate,
+            priority: "high".into(),
+            title: String::new(),
+            object: String::new(),
+            rationale: String::new(),
+            ddl: String::new(),
+            impact_score: 0.0,
+            metrics: vec![],
+            confidence: "heuristic".into(),
+        }];
+        apply_counter_age(&mut recs, Some(60), None);
+        assert_eq!(recs[0].confidence, "heuristic");
+        assert!(recs[0].rationale.contains("counters cover 0.0 h since restart;"));
+    }
+
+    #[test]
+    fn counter_age_phrase_bands() {
+        assert_eq!(counter_age_phrase(179), "counters cover 0.0 h since restart");
+        assert_eq!(counter_age_phrase(7 * 3600), "counters cover 7.0 h since restart");
+        assert_eq!(counter_age_phrase(30 * 3600), "counters cover 30 h since restart");
+        assert_eq!(counter_age_phrase(3 * 86_400), "counters cover 72 h (3 d) since restart");
+    }
+
+    #[test]
+    fn create_index_reads_back_persistence_from_the_monitor() {
+        let mut b = dropped_index_bundle();
+        b.missing_index_history = vec![MissingIndexHistory {
+            schema_name: "DBO".into(),
+            table_name: "orders".into(),
+            days_seen: 6,
+            days_observed: 7,
+        }];
+        let recs = advise(&b);
+        let create = recs.iter().find(|r| r.kind == RecKind::CreateIndex).unwrap();
+        assert!(create.rationale.contains("on 6 of the last 7 monitored day(s)"), "{}", create.rationale);
+        assert_eq!(chip(create, "Seen (days)"), Some("6 of 7"));
+        // No history → no claim either way.
+        let plain = advise(&dropped_index_bundle());
+        let create = plain.iter().find(|r| r.kind == RecKind::CreateIndex).unwrap();
+        assert!(!create.rationale.contains("monitored day"));
+        assert!(chip(create, "Seen (days)").is_none());
+    }
+
+    #[test]
+    fn redundant_index_on_an_empty_table_is_low_priority_and_ranks_last() {
+        let ps = |table: &str, index: &str, kb: u64| PartitionStats {
+            schema_name: "dbo".into(),
+            table_name: table.into(),
+            index_name: Some(index.into()),
+            row_count: if kb == 0 { 0 } else { 1000 },
+            reserved_kb: kb,
+            used_kb: kb,
+            data_kb: kb,
+        };
+        let b = DmvBundle {
+            indexes: vec![
+                ix("Empty", "IX_e", &["tenant_id"], false, false),
+                ix("Empty", "IX_e_date", &["tenant_id", "d"], false, false),
+                ix("Big", "IX_b", &["tenant_id"], false, false),
+                ix("Big", "IX_b_date", &["tenant_id", "d"], false, false),
+                ix("Mid", "IX_m", &["tenant_id"], false, false),
+                ix("Mid", "IX_m_date", &["tenant_id", "d"], false, false),
+            ],
+            partition_stats: vec![ps("Empty", "IX_e", 0), ps("Big", "IX_b", 21_300), ps("Mid", "IX_m", 2_150)],
+            ..Default::default()
+        };
+        let recs: Vec<_> = advise(&b).into_iter().filter(|r| r.kind == RecKind::MergeIndex).collect();
+        let names: Vec<&str> = recs.iter().map(|r| r.object.rsplit('.').next().unwrap()).collect();
+        assert_eq!(names, vec!["IX_b", "IX_m", "IX_e"], "{names:?}");
+        assert_eq!(recs[0].priority, "medium");
+        assert_eq!(recs[2].priority, "low");
+        assert!(recs[0].impact_score > recs[1].impact_score && recs[1].impact_score > recs[2].impact_score);
     }
 }

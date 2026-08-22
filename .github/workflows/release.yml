@@ -104,6 +104,11 @@ jobs:
             echo "               workspace); run it by hand when you want it without the app:"
             echo "                 DBOPT_SERVER=host,1433 DBOPT_USER=... DBOPT_PASSWORD=... dbopt-sentinel run"
             echo "               'dbopt-sentinel poll-once' / 'dbopt-sentinel report 7' for one shot."
+            echo ""
+            echo "The same three names on every platform, including the Windows .msi (which"
+            echo "also adds its bin\\ folder to PATH; the Start-menu entry opens dbopt-backend)."
+            echo "Before 0.4.2 the .msi installed the app AS dbopt.exe - if you typed 'dbopt'"
+            echo "to open the app on Windows, type 'dbopt-backend' now."
           } > staging/WHICH-BINARY.txt
       - name: archive
         shell: bash

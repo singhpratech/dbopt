@@ -84,7 +84,9 @@ the topbar. **The launch check is on by default and you can turn it off** — un
 "Check for updates on launch" in Settings, which is reachable whether or not an
 update happens to be available. (Equivalently: set `dbopt.auto_check_updates` to
 `false` in local storage.) Turning it off leaves the manual button working and
-means dbopt makes no network request of its own at all.
+means dbopt makes no network request of its own at all — the UI's typefaces and
+scripts are compiled into the binary and served from `127.0.0.1`, not fetched
+from a font or script CDN.
 
 The request is an anonymous public `GET` from your **browser** to `api.github.com`
 (the dbopt releases endpoint). It carries no identifiers, no telemetry, and no

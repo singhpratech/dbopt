@@ -53,7 +53,7 @@ pub async fn poll_cpu_pressure(
     let mut client = conn::open(conn_info).await?;
     let instance_id = storage.ensure_instance(&conn_info.server, conn_info)?;
 
-    let stream = match client.simple_query(CPU_PRESSURE_QUERY).await {
+    let stream = match client.simple_query(crate::probes::tag(CPU_PRESSURE_QUERY)).await {
         Ok(s) => s,
         Err(e) => {
             let msg = e.to_string();

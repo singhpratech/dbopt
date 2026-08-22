@@ -20,6 +20,8 @@ mod config;
 mod security;
 mod transactions;
 mod datatypes;
+// === target-compatibility (2026-08) ===
+mod compat;
 
 pub struct RuleCtx<'a> {
     pub src: &'a str,
@@ -181,6 +183,8 @@ pub const REGISTRY: &[Rule] = &[
     ss(datatypes::float_for_money),
     ss(datatypes::datetime_legacy_type),
     ss(datatypes::sysname_as_general_string),
+    // target-version compatibility: syntax the --server-version target cannot compile
+    ss(compat::unsupported_on_target),
 ];
 
 pub(crate) fn make_loc(t: &Token) -> Location {

@@ -134,7 +134,7 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
         }
 
         let suppressions = FileSuppressions::parse(&src.text);
-        let mut push = |finding: Finding, all: &mut Vec<FileFinding>, suppressed: &mut usize| {
+        let push = |finding: Finding, all: &mut Vec<FileFinding>, suppressed: &mut usize| {
             let rule = finding.rule.0.as_str();
             let line = finding.location.as_ref().map(|l| l.line);
             let ignored_by_flag = opts.ignore.iter().any(|spec| spec_matches(spec, rule));
@@ -147,6 +147,25 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
                 finding,
             });
         };
+        // A guessed encoding is disclosed as a finding, not just a footnote:
+        // SARIF/JSON consumers never see the human-format notes, and a CI
+        // reviewer deserves to know the text was read as Windows-1252 rather
+        // than what the author may have saved. It is Info so it cannot trip
+        // the default `--fail-on error` threshold — the file was still linted.
+        if src.lossy {
+            push(
+                synthetic(
+                    "lint.encoding",
+                    Severity::Info,
+                    &format!(
+                        "{display}: not valid UTF-8 — decoded as Windows-1252 so it could still be analyzed."
+                    ),
+                    "Save the file as UTF-8 (SSMS: File > Save As > Save with Encoding > UTF-8). Accented characters and smart quotes were read with the Windows-1252 table; the findings below are still real, but string literals may differ from what was saved.",
+                ),
+                &mut all,
+                &mut suppressed,
+            );
+        }
 
         // A file that is not SQL must not be reported as passing. This is the
         // difference between "we found nothing" and "we understood nothing".

@@ -37,7 +37,7 @@ pub async fn poll_index_usage_delta(conn: &ConnectionInfo, storage: &Storage) ->
     let mut client = conn::open(conn).await?;
     let instance_id = storage.ensure_instance(&conn.server, conn)?;
 
-    let stream = match client.simple_query(INDEX_USAGE_QUERY).await {
+    let stream = match client.simple_query(crate::probes::tag(INDEX_USAGE_QUERY)).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -73,7 +73,28 @@ pub async fn poll_index_usage_delta(conn: &ConnectionInfo, storage: &Storage) ->
         current.insert((db, schema, table, index), (seeks, scans, lookups, updates));
     }
 
-    let prior = storage.previous_index_snapshot(instance_id);
+    // Same baseline rule as the wait poller: a prior snapshot older than
+    // `BASELINE_MAX_GAP_MS`, or one the counters have been reset beneath, is
+    // re-seeded silently rather than diffed — otherwise a daemon restart after
+    // a gap books every read/write since the SQL restart into one window.
+    let prior = storage
+        .previous_index_snapshot_with_age(instance_id)
+        .and_then(|(prev, age_ms)| {
+            let decreased = prev.iter().any(|(k, p)| {
+                current.get(k).map(|c| c.0 < p.0 || c.1 < p.1 || c.2 < p.2 || c.3 < p.3).unwrap_or(false)
+            });
+            if super::waits::delta_is_trustworthy(age_ms, decreased) {
+                Some(prev)
+            } else {
+                tracing::info!(
+                    target: "sentinel::poll::index_usage",
+                    "prior index snapshot is {:.1} h old{} — re-seeding baseline, no delta emitted",
+                    age_ms as f64 / 3_600_000.0,
+                    if decreased { " and counters went backwards (instance restart)" } else { "" }
+                );
+                None
+            }
+        });
     let captured_at = Utc::now();
     let mut inserted: usize = 0;
 

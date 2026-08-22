@@ -12,6 +12,7 @@ use axum::{
     http::{header, StatusCode},
     response::IntoResponse,
 };
+use crate::routes::ConnectReq;
 use sentinel::{
     alerts::AlertConfig,
     report::{render_html, render_markdown, render_weekly, WeeklyReport},
@@ -348,6 +349,7 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
             "io_latency": [],
             "tempdb_contention": serde_json::Value::Null,
             "plan_cache": serde_json::Value::Null,
+            "missing_index_history": [],
             // Same shape as the populated path so the UI never special-cases a
             // missing key — every series is just an empty list.
             "series": {
@@ -428,6 +430,11 @@ pub fn deep_vitals(server: &str) -> serde_json::Value {
         "io_latency": io,
         "tempdb_contention": tempdb,
         "plan_cache": plan,
+        // Daily missing-index DMV snapshots, read back per table (D20): how many
+        // of the last 30 monitored days suggested an index on each table.
+        "missing_index_history": storage
+            .missing_index_history(instance_id, MISSING_INDEX_HISTORY_DAYS)
+            .unwrap_or_default(),
         "series": series,
     })
 }
@@ -453,6 +460,50 @@ pub fn health_baseline_summary(
         _ => storage.get_instance_id(server)?,
     };
     storage.health_baseline_summary(instance_id)
+}
+
+/// Per-table persistence of missing-index suggestions from the monitor's daily
+/// DMV snapshots over the last `days` days, shaped for `DmvBundle`. Scoped to
+/// the monitored server+database pair when a database is given. Empty when the
+/// store doesn't exist, the server was never monitored, or nothing was
+/// captured in the window — never a fabricated "0 of 0".
+pub fn missing_index_history(
+    server: &str,
+    database: Option<&str>,
+    days: i64,
+) -> Vec<analyzer_core::dmv::MissingIndexHistory> {
+    let path = SentinelConfig::default_db_path();
+    let Ok(storage) = Storage::open(&path) else { return Vec::new() };
+    let instance_id = match database {
+        Some(db) if !db.is_empty() => storage.get_instance_id_for_db(server, db),
+        _ => storage.get_instance_id(server),
+    };
+    let Some(instance_id) = instance_id else { return Vec::new() };
+    storage
+        .missing_index_history(instance_id, days)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| analyzer_core::dmv::MissingIndexHistory {
+            schema_name: r.schema_name,
+            table_name: r.table_name,
+            days_seen: r.days_seen.max(0) as u32,
+            days_observed: r.days_observed.max(0) as u32,
+        })
+        .collect()
+}
+
+/// Days of missing-index history the advisor reads back.
+pub const MISSING_INDEX_HISTORY_DAYS: i64 = 30;
+
+/// Fill `bundle.missing_index_history` from the monitor's store for the
+/// connection the bundle was pulled over. No-op (leaves `[]`) when unmonitored.
+pub fn attach_missing_index_history(bundle: &mut analyzer_core::dmv::DmvBundle, req: &ConnectReq) {
+    let db = if !bundle.scanned_database.is_empty() {
+        Some(bundle.scanned_database.as_str())
+    } else {
+        req.database.as_deref()
+    };
+    bundle.missing_index_history = missing_index_history(&req.server, db, MISSING_INDEX_HISTORY_DAYS);
 }
 
 pub fn build_report(window: TimeRange) -> WeeklyReport {

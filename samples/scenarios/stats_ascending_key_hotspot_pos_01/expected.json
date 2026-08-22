@@ -1,5 +1,6 @@
 {
   "also_fires": [
+    "index.missing_index_from_predicate",
     "index.order_by_forces_sort",
     "tempdb.spill_risk_large_sort"
   ],

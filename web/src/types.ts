@@ -210,6 +210,12 @@ export interface HealthReport {
   /** "Today vs rolling baseline" trend behind the grade. Absent until a query
    *  has a mature durable baseline ("baseline forming"). */
   baseline_trend?: BaselineTrend;
+  /** Seconds since the DMV usage counters were last reset (SQL restart / DB
+   *  state change). Absent on older backends; null when unknown. Young
+   *  counters (< 24h) make every usage-based verdict provisional. */
+  counter_age_secs?: number | null;
+  /** ISO timestamp of that counter reset — "counters since …". */
+  counters_since?: string | null;
   counts: SeverityCounts;
   issues: Issue[];
   signals: SignalSummary;

@@ -56,7 +56,7 @@ export function IndexHeatmap({
       right: 16,
       itemWidth: 10,
       itemHeight: 10,
-      textStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 },
+      textStyle: { color: c.textMuted, fontFamily: "IBM Plex Mono, monospace", fontSize: 10 },
     },
     tooltip: {
       trigger: "item",
@@ -80,10 +80,10 @@ export function IndexHeatmap({
       name: "← writes   reads →",
       nameLocation: "middle",
       nameGap: 26,
-      nameTextStyle: { color: c.textMuted, fontFamily: "Departure Mono, monospace", fontSize: 10 },
+      nameTextStyle: { color: c.textMuted, fontFamily: "IBM Plex Mono, monospace", fontSize: 10 },
       axisLabel: {
         color: c.text,
-        fontFamily: "Departure Mono, monospace",
+        fontFamily: "IBM Plex Mono, monospace",
         fontSize: 10,
         formatter: (v: number) => Math.abs(v).toLocaleString(),
       },
@@ -126,7 +126,7 @@ export function IndexHeatmap({
                   show: true,
                   position: "right",
                   color: c.warn,
-                  fontFamily: "Departure Mono, monospace",
+                  fontFamily: "IBM Plex Mono, monospace",
                   fontSize: 9,
                   formatter: "DROP?",
                 }

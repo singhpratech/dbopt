@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT ... ORDER BY ..." StatementId="1" StatementType="SELECT">
+      <QueryPlan DegreeOfParallelism="1" MemoryGrant="1258291" CachedPlanSize="32">
+        <RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="Sort" EstimateRows="5000" EstimatedTotalSubtreeCost="90.5">
+          <Sort Distinct="false">
+            <OrderBy><OrderByColumn Ascending="true"><ColumnReference Schema="[dbo]" Table="[wide_rows]" Column="CreatedAt" /></OrderByColumn></OrderBy>
+            <RelOp NodeId="1" PhysicalOp="Clustered Index Seek" LogicalOp="Clustered Index Seek" EstimateRows="5000" EstimatedTotalSubtreeCost="2.1">
+              <IndexScan Ordered="true">
+                <Object Schema="[dbo]" Table="[wide_rows]" Index="[PK_wide_rows]" />
+                <SeekPredicates />
+              </IndexScan>
+            </RelOp>
+          </Sort>
+        </RelOp>
+      </QueryPlan>
+    </StmtSimple>
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>

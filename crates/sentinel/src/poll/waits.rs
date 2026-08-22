@@ -43,7 +43,7 @@ pub async fn poll_wait_stats(conn_info: &ConnectionInfo, storage: &Storage) -> a
     // different shape, and a login without VIEW SERVER STATE can't read it) —
     // log once and skip, mirroring deadlocks.rs / query_store.rs, rather than
     // erroring on every tick.
-    let stream = match client.simple_query(&sql).await {
+    let stream = match client.simple_query(crate::probes::tag(&sql)).await {
         Ok(s) => s,
         Err(e) => {
             let msg = e.to_string();
@@ -87,8 +87,33 @@ pub async fn poll_wait_stats(conn_info: &ConnectionInfo, storage: &Storage) -> a
         current.insert(wait_type, (tasks, total, signal));
     }
 
-    let prior: Option<HashMap<String, (i64, i64, i64)>> =
-        storage.previous_wait_snapshot(instance_id);
+    // A prior snapshot is only a valid baseline when it is RECENT and the
+    // counters have not been reset underneath it. Otherwise the "delta" is
+    // everything accumulated since the SQL Server restart (or since the
+    // daemon last ran, days ago) stamped onto this minute — see
+    // `delta_is_trustworthy`. In that case this tick re-seeds the baseline
+    // and emits nothing, exactly like the very first tick.
+    let prior = storage
+        .previous_wait_snapshot_with_age(instance_id)
+        .and_then(|(prev, age_ms)| {
+            // Any wait type whose cumulative wait_time_ms went DOWN means the
+            // counters were reset underneath the snapshot.
+            let decreased = prev
+                .iter()
+                .any(|(k, p)| current.get(k).map(|c| c.1 < p.1).unwrap_or(false));
+            if delta_is_trustworthy(age_ms, decreased) {
+                Some(prev)
+            } else {
+                tracing::info!(
+                    target: "sentinel::poll::waits",
+                    "prior wait snapshot on {} is {:.1} h old{} — re-seeding baseline, no delta emitted",
+                    conn_info.server,
+                    age_ms as f64 / 3_600_000.0,
+                    if decreased { " and counters went backwards (instance restart)" } else { "" }
+                );
+                None
+            }
+        });
     let captured_at = Utc::now();
     let mut count = 0usize;
 
@@ -142,4 +167,51 @@ pub async fn poll_wait_stats(conn_info: &ConnectionInfo, storage: &Storage) -> a
     }
 
     Ok(())
+}
+
+/// Longest gap after which a prior cumulative snapshot is no longer a usable
+/// baseline. The wait poller's default cadence is 5 min; an hour covers a few
+/// missed ticks, while a daemon that was down overnight (or for 80 days) must
+/// re-seed rather than attribute the whole gap to one tick.
+pub const BASELINE_MAX_GAP_MS: i64 = 60 * 60 * 1000;
+
+/// Decide whether `current − prior` is a real per-window delta.
+///
+/// `prior_age_ms` is how long ago the prior snapshot was written; `decreased`
+/// is true when any cumulative counter is LOWER now than in the prior snapshot
+/// (the instance restarted, or `DBCC SQLPERF` cleared it). Either condition
+/// means the prior is a baseline only: a stale one carries waits that did not
+/// happen in this window, and a reset one would clamp to the cumulative total.
+pub fn delta_is_trustworthy(prior_age_ms: i64, decreased: bool) -> bool {
+    !decreased && prior_age_ms >= 0 && prior_age_ms <= BASELINE_MAX_GAP_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_recent_monotonic_prior_yields_a_delta() {
+        assert!(delta_is_trustworthy(5 * 60 * 1000, false));
+        assert!(delta_is_trustworthy(BASELINE_MAX_GAP_MS, false));
+    }
+
+    #[test]
+    fn an_eighty_day_old_prior_is_a_baseline_not_a_delta() {
+        // The exact trap: the daemon restarted after a long gap and its first
+        // poll wrote 13 "delta" rows against a snapshot from 2026-06-01.
+        let eighty_days = 80 * 24 * 60 * 60 * 1000;
+        assert!(!delta_is_trustworthy(eighty_days, false));
+        assert!(!delta_is_trustworthy(BASELINE_MAX_GAP_MS + 1, false));
+    }
+
+    #[test]
+    fn a_counter_reset_is_a_baseline_even_when_recent() {
+        assert!(!delta_is_trustworthy(60 * 1000, true));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_is_not_trusted() {
+        assert!(!delta_is_trustworthy(-1, false));
+    }
 }

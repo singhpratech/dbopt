@@ -45,6 +45,14 @@ fn safe_connect_err(e: &tiberius::error::Error) -> anyhow::Error {
     anyhow::anyhow!(msg)
 }
 
+/// Prefix one of dbopt's own catalog/DMV probes with its identifying comment
+/// (see `sentinel::probes`). Never applied to user-supplied SQL, SET options,
+/// transaction control, or the one DDL statement we issue — only to what we
+/// read for ourselves, so the workload surfaces can filter us out.
+fn probe(sql: &str) -> String {
+    sentinel::probes::tag(sql)
+}
+
 async fn open(req: &ConnectReq) -> anyhow::Result<Client<tokio_util::compat::Compat<TcpStream>>> {
     let mut config = Config::new();
     let parts: Vec<&str> = req.server.splitn(2, ',').collect();
@@ -145,7 +153,7 @@ fn apply_auth(config: &mut Config, req: &ConnectReq) -> anyhow::Result<()> {
 
 pub async fn ping(req: &ConnectReq) -> anyhow::Result<String> {
     let mut client = open(req).await?;
-    let row = client.query("SELECT @@VERSION", &[]).await?.into_row().await?;
+    let row = client.query(probe("SELECT @@VERSION"), &[]).await?.into_row().await?;
     let s: Option<&str> = row.as_ref().and_then(|r| r.get(0));
     Ok(s.unwrap_or("unknown").to_string())
 }
@@ -179,7 +187,7 @@ pub async fn enumerate_modules(req: &ConnectReq) -> anyhow::Result<Vec<DbModule>
           AND m.definition IS NOT NULL
         ORDER BY s.name, o.name;
     ";
-    let stream = client.simple_query(sql).await?;
+    let stream = client.simple_query(probe(&sql)).await?;
     let rows = stream.into_first_result().await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -220,14 +228,14 @@ pub struct DatabaseInfo {
 pub async fn list_databases(req: &ConnectReq) -> anyhow::Result<Vec<DatabaseInfo>> {
     let mut client = open(req).await?;
     let stream = client
-        .simple_query(
+        .simple_query(probe(
             "SELECT name, \
                     CAST(database_id AS int) AS dbid, \
                     state_desc, \
                     CAST(CASE WHEN HAS_DBACCESS(name) = 1 THEN 1 ELSE 0 END AS int) AS has_access \
              FROM sys.databases \
              ORDER BY CASE WHEN database_id <= 4 THEN 1 ELSE 0 END, name",
-        )
+        ))
         .await?;
     let rows = stream.into_first_result().await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -374,7 +382,7 @@ pub async fn query_store_status(req: &ConnectReq) -> anyhow::Result<QueryStoreSt
     // effective check. Run it independently so it works even when QS is OFF.
     let mut can_alter = false;
     if let Ok(s) = client
-        .simple_query("SELECT CAST(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS INT)")
+        .simple_query(probe("SELECT CAST(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS INT)"))
         .await
     {
         if let Ok(rows) = s.into_first_result().await {
@@ -385,7 +393,7 @@ pub async fn query_store_status(req: &ConnectReq) -> anyhow::Result<QueryStoreSt
     }
 
     let stream = client
-        .simple_query("SELECT actual_state_desc, query_capture_mode_desc FROM sys.database_query_store_options")
+        .simple_query(probe("SELECT actual_state_desc, query_capture_mode_desc FROM sys.database_query_store_options"))
         .await?;
     let rows = stream.into_first_result().await?;
     if let Some(r) = rows.into_iter().next() {
@@ -420,7 +428,7 @@ pub async fn set_query_store_capture(req: &ConnectReq, mode: &str) -> anyhow::Re
     // needed, and the UI previews it whenever it will run.
     let mut already_on = false;
     if let Ok(stream) = client
-        .simple_query("SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options")
+        .simple_query(probe("SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options"))
         .await
     {
         if let Ok(rows) = stream.into_first_result().await {
@@ -491,12 +499,18 @@ pub async fn query_store_top_queries(
            GROUP BY q.query_id
          ) m
          JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id
-         ORDER BY m.avg_ms DESC"
+         WHERE {probe_filter}
+         ORDER BY m.avg_ms DESC",
+        probe_filter = sentinel::probes::not_own_probe_sql("qt.query_sql_text")
     );
-    let stream = client.simple_query(sql.as_str()).await?;
+    let stream = client.simple_query(probe(sql.as_str())).await?;
     let rows = stream.into_first_result().await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
+        let sql_text = r.get::<&str, _>("sql_text").unwrap_or("").to_string();
+        if sentinel::probes::is_own_probe(&sql_text) {
+            continue;
+        }
         out.push(QueryStoreTopQuery {
             query_id: r.get::<i64, _>("query_id").unwrap_or(0),
             executions: r.get::<i64, _>("execs").unwrap_or(0),
@@ -504,7 +518,7 @@ pub async fn query_store_top_queries(
             max_duration_ms: r.get::<f64, _>("max_ms").unwrap_or(0.0),
             avg_cpu_ms: r.get::<f64, _>("avg_cpu_ms").unwrap_or(0.0),
             avg_logical_reads: r.get::<i64, _>("avg_reads").unwrap_or(0),
-            sql_text: r.get::<&str, _>("sql_text").unwrap_or("").to_string(),
+            sql_text,
         });
     }
     Ok(out)
@@ -574,10 +588,10 @@ pub async fn query_store_workload(
     // capture reads naturally and we never divide by zero downstream.
     let mut window_hours = 24.0_f64;
     if let Ok(s) = client
-        .simple_query(
+        .simple_query(probe(
             "SELECT CAST(DATEDIFF(MINUTE, MIN(start_time), MAX(end_time)) / 60.0 AS FLOAT) \
              FROM sys.query_store_runtime_stats_interval",
-        )
+        ))
         .await
     {
         if let Ok(rows) = s.into_first_result().await {
@@ -592,7 +606,8 @@ pub async fn query_store_workload(
     // Per-query total executions + text, ranked by FREQUENCY (not duration),
     // grouped by query_id exactly like the top-queries query. TOP 200 keeps the
     // word-boundary scan bounded. 2014+ portable: CAST to BIGINT, NULLIF guards.
-    let sql = "SELECT TOP (200) m.execs, \
+    let sql = format!(
+        "SELECT TOP (200) m.execs, \
                 CAST(LEFT(qt.query_sql_text, 2000) AS NVARCHAR(2000)) AS sql_text \
          FROM ( \
            SELECT q.query_id, \
@@ -604,8 +619,11 @@ pub async fn query_store_workload(
            GROUP BY q.query_id \
          ) m \
          JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id \
-         ORDER BY m.execs DESC";
-    let stream = client.simple_query(sql).await?;
+         WHERE {probe_filter} \
+         ORDER BY m.execs DESC",
+        probe_filter = sentinel::probes::not_own_probe_sql("qt.query_sql_text")
+    );
+    let stream = client.simple_query(probe(&sql)).await?;
     let rows = stream.into_first_result().await?;
 
     // (execs, sql_text) for each captured query, freshly owned so we can scan
@@ -824,7 +842,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     f.database_name = current_database(&mut client).await;
 
     // Server scheduler count (for MAXDOP advice). int -> bigint.
-    if let Ok(s) = client.simple_query("SELECT CAST(cpu_count AS BIGINT) FROM sys.dm_os_sys_info").await {
+    if let Ok(s) = client.simple_query(probe("SELECT CAST(cpu_count AS BIGINT) FROM sys.dm_os_sys_info")).await {
         if let Ok(rows) = s.into_first_result().await {
             f.cpu_count = rows.first().and_then(|r| r.get::<i64, _>(0));
         }
@@ -837,7 +855,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         MAX(CASE WHEN name='cost threshold for parallelism' THEN CAST(value_in_use AS BIGINT) END), \
         MAX(CASE WHEN name='optimize for ad hoc workloads' THEN CAST(value_in_use AS BIGINT) END) \
         FROM sys.configurations";
-    if let Ok(s) = client.simple_query(q_cfg).await {
+    if let Ok(s) = client.simple_query(probe(q_cfg)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.first() {
                 f.maxdop = r.get::<i64, _>(0);
@@ -853,7 +871,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         page_verify_option_desc, \
         CAST(is_auto_create_stats_on AS BIT), CAST(is_auto_update_stats_on AS BIT) \
         FROM sys.databases WHERE database_id = DB_ID()";
-    if let Ok(s) = client.simple_query(q_db).await {
+    if let Ok(s) = client.simple_query(probe(q_db)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.first() {
                 f.recovery_model = r.get::<&str, _>(0).map(|s| s.to_string());
@@ -867,7 +885,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     }
 
     // Transaction-log VLF count (sys.dm_db_log_info is 2016+).
-    if let Ok(s) = client.simple_query("SELECT CAST(COUNT(*) AS BIGINT) FROM sys.dm_db_log_info(DB_ID())").await {
+    if let Ok(s) = client.simple_query(probe("SELECT CAST(COUNT(*) AS BIGINT) FROM sys.dm_db_log_info(DB_ID())")).await {
         if let Ok(rows) = s.into_first_result().await {
             f.vlf_count = rows.first().and_then(|r| r.get::<i64, _>(0));
         }
@@ -878,7 +896,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         CAST(DATEDIFF(HOUR, MAX(CASE WHEN type='D' THEN backup_finish_date END), GETDATE()) AS BIGINT), \
         CAST(DATEDIFF(HOUR, MAX(CASE WHEN type='L' THEN backup_finish_date END), GETDATE()) AS BIGINT) \
         FROM msdb.dbo.backupset WHERE database_name = DB_NAME()";
-    if let Ok(s) = client.simple_query(q_bak).await {
+    if let Ok(s) = client.simple_query(probe(q_bak)).await {
         if let Ok(rows) = s.into_first_result().await {
             // The query ran → backup history is genuinely readable. A NULL age
             // now honestly means "no such backup", not "couldn't look".
@@ -893,7 +911,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     // Whether the connected DB is READ_ONLY (suppresses a false "stale CHECKDB"
     // alarm — the integrity marker never advances on a read-only database).
     if let Ok(s) = client
-        .simple_query("SELECT CAST(is_read_only AS BIT) FROM sys.databases WHERE database_id = DB_ID()")
+        .simple_query(probe("SELECT CAST(is_read_only AS BIT) FROM sys.databases WHERE database_id = DB_ID()"))
         .await
     {
         if let Ok(rows) = s.into_first_result().await {
@@ -912,7 +930,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         DECLARE @lkg DATETIME = (SELECT TRY_CONVERT(DATETIME, MAX(Value)) FROM @dbinfo WHERE Field = 'dbi_dbccLastKnownGood'); \
         SELECT CASE WHEN @lkg IS NULL OR @lkg <= '1900-01-01' THEN NULL \
                     ELSE CAST(DATEDIFF(DAY, @lkg, GETDATE()) AS BIGINT) END AS age_days";
-    if let Ok(s) = client.simple_query(q_checkdb).await {
+    if let Ok(s) = client.simple_query(probe(q_checkdb)).await {
         if let Ok(rows) = s.into_first_result().await {
             // The batch ran → the integrity marker is genuinely readable. A NULL
             // age now honestly means "never run", not "couldn't look".
@@ -934,7 +952,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         FROM sys.dm_hadr_database_replica_states AS drs \
         JOIN sys.availability_replicas AS ar ON drs.replica_id = ar.replica_id \
         JOIN sys.availability_groups   AS ag ON ar.group_id   = ag.group_id";
-    if let Ok(s) = client.simple_query(q_hadr).await {
+    if let Ok(s) = client.simple_query(probe(q_hadr)).await {
         if let Ok(rows) = s.into_first_result().await {
             f.hadr_readable = true;
             for r in rows {
@@ -968,7 +986,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
           AND msdb.dbo.agent_datetime(h.run_date, h.run_time) >= DATEADD(DAY, -30, GETDATE()) \
         GROUP BY j.name \
         ORDER BY last_run_at DESC";
-    if let Ok(s) = client.simple_query(q_jobs).await {
+    if let Ok(s) = client.simple_query(probe(q_jobs)).await {
         if let Ok(rows) = s.into_first_result().await {
             f.jobs_readable = true;
             for r in rows {
@@ -989,7 +1007,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     let q_ifi = "SELECT CAST(CASE WHEN UPPER(LTRIM(RTRIM(instant_file_initialization_enabled))) = 'Y' \
                THEN 1 ELSE 0 END AS BIT) \
         FROM sys.dm_server_services WHERE filename LIKE '%sqlservr.exe%'";
-    if let Ok(s) = client.simple_query(q_ifi).await {
+    if let Ok(s) = client.simple_query(probe(q_ifi)).await {
         if let Ok(rows) = s.into_first_result().await {
             f.ifi_enabled = rows.first().and_then(|r| r.get::<bool, _>(0));
         }
@@ -1000,7 +1018,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
     let q_tempdb = "SELECT CAST(COUNT(*) AS BIGINT) AS file_count, \
                CAST(CASE WHEN MIN(size) = MAX(size) THEN 0 ELSE 1 END AS BIT) AS unequal \
         FROM sys.master_files WHERE database_id = 2 AND type_desc = 'ROWS'";
-    if let Ok(s) = client.simple_query(q_tempdb).await {
+    if let Ok(s) = client.simple_query(probe(q_tempdb)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.first() {
                 f.tempdb_data_files = r.get::<i64, _>(0);
@@ -1016,7 +1034,7 @@ pub async fn pull_operational(req: &ConnectReq) -> anyhow::Result<OperationalFac
         DECLARE @ts TABLE (TraceFlag INT, Status INT, Global INT, [Session] INT); \
         INSERT INTO @ts EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS'); \
         SELECT CAST(TraceFlag AS BIGINT) FROM @ts WHERE Global = 1";
-    if let Ok(s) = client.simple_query(q_tf).await {
+    if let Ok(s) = client.simple_query(probe(q_tf)).await {
         if let Ok(rows) = s.into_first_result().await {
             f.trace_flags_readable = true;
             for r in rows {
@@ -1041,7 +1059,7 @@ pub const SYSTEM_DATABASES: &[&str] = &["master", "tempdb", "model", "msdb"];
 async fn current_database(
     client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
 ) -> String {
-    match client.simple_query("SELECT DB_NAME()").await {
+    match client.simple_query(probe("SELECT DB_NAME()")).await {
         Ok(stream) => stream
             .into_first_result()
             .await
@@ -1059,6 +1077,29 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
     // Record the scope BEFORE collecting, so an empty bundle can still say
     // which database it looked in.
     bundle.scanned_database = current_database(&mut client).await;
+
+    // Counter lifetime: every sys.dm_db_*_stats number below has only been
+    // accumulating since the instance last started. Read the age server-side
+    // (DATEDIFF against the server's own clock, so time zones cancel) and
+    // derive the UTC instant from it. Best-effort: no VIEW SERVER STATE → None,
+    // and the advisor then makes no claim about the window.
+    if let Ok(s) = client
+        .simple_query(probe(
+            "SELECT CAST(DATEDIFF(SECOND, sqlserver_start_time, GETDATE()) AS BIGINT) FROM sys.dm_os_sys_info",
+        ))
+        .await
+    {
+        if let Ok(rows) = s.into_first_result().await {
+            if let Some(age) = rows.into_iter().next().and_then(|r| r.get::<i64, _>(0)) {
+                let age = age.max(0);
+                bundle.counter_age_secs = Some(age);
+                bundle.counters_since = Some(
+                    (chrono::Utc::now() - chrono::Duration::seconds(age))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                );
+            }
+        }
+    }
 
     // Index usage stats
     let q_usage = r#"
@@ -1078,7 +1119,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
           ON u.object_id = i.object_id AND u.index_id = i.index_id AND u.database_id = DB_ID()
         WHERE t.is_ms_shipped = 0
     "#;
-    if let Ok(stream) = client.simple_query(q_usage).await {
+    if let Ok(stream) = client.simple_query(probe(q_usage)).await {
         let rows = stream.into_first_result().await.unwrap_or_default();
         for r in rows {
             bundle.index_usage.push(IndexUsage {
@@ -1124,7 +1165,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
         JOIN sys.schemas s ON s.schema_id = t.schema_id
         WHERE t.is_ms_shipped = 0 AND i.name IS NOT NULL
     "#;
-    if let Ok(stream) = client.simple_query(q_indexes).await {
+    if let Ok(stream) = client.simple_query(probe(q_indexes)).await {
         let rows = stream.into_first_result().await.unwrap_or_default();
         for r in rows {
             let split = |s: Option<&str>| s.unwrap_or("").split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect::<Vec<_>>();
@@ -1157,7 +1198,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
         JOIN sys.schemas s ON s.schema_id = t.schema_id
         WHERE mid.database_id = DB_ID()
     "#;
-    if let Ok(stream) = client.simple_query(q_missing).await {
+    if let Ok(stream) = client.simple_query(probe(q_missing)).await {
         let rows = stream.into_first_result().await.unwrap_or_default();
         for r in rows {
             let strip = |s: &str| s.trim_matches(|c| c == '[' || c == ']').to_string();
@@ -1190,7 +1231,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
         WHERE t.is_ms_shipped = 0
         GROUP BY s.name, t.name, i.name
     "#;
-    if let Ok(stream) = client.simple_query(q_size).await {
+    if let Ok(stream) = client.simple_query(probe(q_size)).await {
         let rows = stream.into_first_result().await.unwrap_or_default();
         for r in rows {
             bundle.partition_stats.push(PartitionStats {
@@ -1339,7 +1380,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
     // than an empty panel. Days-since-epoch plus milliseconds-into-today keeps
     // both DATEDIFFs inside int range and works on every supported version.
     const CLOCK_SQL: &str = "SELECT CAST(DATEDIFF(DAY, '19700101', SYSUTCDATETIME()) AS BIGINT) * 86400000                              + CAST(DATEDIFF(MILLISECOND, CAST(SYSUTCDATETIME() AS DATE), SYSUTCDATETIME()) AS BIGINT)";
-    if let Ok(s) = client.simple_query(CLOCK_SQL).await {
+    if let Ok(s) = client.simple_query(probe(CLOCK_SQL)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.server_time_ms = r.get::<i64, _>(0).unwrap_or(0);
@@ -1361,7 +1402,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         ) AS x
         ORDER BY x.timestamp DESC;
     "#;
-    if let Ok(s) = client.simple_query(cpu_sql).await {
+    if let Ok(s) = client.simple_query(probe(cpu_sql)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 let sql_cpu = r.get::<i32, _>(0).unwrap_or(0) as i64;
@@ -1385,7 +1426,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
           CAST((SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS BIGINT),
           CAST((SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1) AS BIGINT);
     "#.replace("BENIGN_WAITS", BENIGN_WAITS);
-    if let Ok(s) = client.simple_query(&counts).await {
+    if let Ok(s) = client.simple_query(probe(&counts)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.waiting_tasks = r.get::<i64, _>(0).unwrap_or(0);
@@ -1408,7 +1449,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         WHERE RTRIM(counter_name) IN
           ('Batch Requests/sec','SQL Compilations/sec','SQL Re-Compilations/sec','Transactions/sec','Page life expectancy');
     "#;
-    if let Ok(s) = client.simple_query(perf).await {
+    if let Ok(s) = client.simple_query(probe(perf)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.batch_requests_total = r.get::<i64, _>(0).unwrap_or(0);
@@ -1430,7 +1471,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
           CAST(SUM(io_stall_write_ms) AS BIGINT)
         FROM sys.dm_io_virtual_file_stats(NULL, NULL);
     "#;
-    if let Ok(s) = client.simple_query(io).await {
+    if let Ok(s) = client.simple_query(probe(io)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.io_read_bytes_total = r.get::<i64, _>(0).unwrap_or(0);
@@ -1452,7 +1493,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         GROUP BY wait_type
         ORDER BY tasks DESC, wait_ms DESC;
     "#.replace("BENIGN_WAITS", BENIGN_WAITS);
-    if let Ok(s) = client.simple_query(&waits).await {
+    if let Ok(s) = client.simple_query(probe(&waits)).await {
         if let Ok(rows) = s.into_first_result().await {
             for r in rows {
                 m.top_waits.push(LiveWait {
@@ -1487,7 +1528,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         WHERE r.session_id <> @@SPID AND s.is_user_process = 1
         ORDER BY r.cpu_time DESC;
     "#;
-    if let Ok(s) = client.simple_query(sessions).await {
+    if let Ok(s) = client.simple_query(probe(sessions)).await {
         if let Ok(rows) = s.into_first_result().await {
             for r in rows {
                 let blocked_raw = r.get::<i16, _>(6).unwrap_or(0);
@@ -1521,7 +1562,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         FROM sys.dm_os_schedulers
         WHERE status = 'VISIBLE ONLINE';
     "#;
-    if let Ok(s) = client.simple_query(cpu_pressure).await {
+    if let Ok(s) = client.simple_query(probe(cpu_pressure)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.online_schedulers = Some(r.get::<i64, _>(0).unwrap_or(0));
@@ -1538,7 +1579,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
             CAST(ISNULL(SUM(waiter_count), 0) AS BIGINT)
         FROM sys.dm_exec_query_resource_semaphores;
     "#;
-    if let Ok(s) = client.simple_query(mem_grants).await {
+    if let Ok(s) = client.simple_query(probe(mem_grants)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.pending_memory_grants = Some(r.get::<i64, _>(0).unwrap_or(0));
@@ -1554,7 +1595,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
         FROM sys.dm_os_performance_counters
         WHERE RTRIM(counter_name) IN ('Target Server Memory (KB)','Total Server Memory (KB)');
     "#;
-    if let Ok(s) = client.simple_query(mem_totals).await {
+    if let Ok(s) = client.simple_query(probe(mem_totals)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.target_server_memory_kb = r.get::<i64, _>(0);
@@ -1573,7 +1614,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
                  THEN SUM(io_stall_write_ms) * 1.0 / SUM(num_of_writes) ELSE 0 END AS FLOAT)
         FROM sys.dm_io_virtual_file_stats(NULL, NULL);
     "#;
-    if let Ok(s) = client.simple_query(io_latency).await {
+    if let Ok(s) = client.simple_query(probe(io_latency)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.avg_read_latency_ms = r.get::<f64, _>(0);
@@ -1592,7 +1633,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
             CAST((SELECT COUNT(*) FROM sys.master_files
                   WHERE database_id = 2 AND type_desc = 'ROWS') AS BIGINT);
     "#;
-    if let Ok(s) = client.simple_query(tempdb).await {
+    if let Ok(s) = client.simple_query(probe(tempdb)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.tempdb_pagelatch_waiters = Some(r.get::<i64, _>(0).unwrap_or(0));
@@ -1609,7 +1650,7 @@ pub async fn pull_live_metrics(req: &ConnectReq) -> anyhow::Result<LiveMetrics> 
             CAST(COUNT(*) AS BIGINT)
         FROM sys.dm_exec_cached_plans;
     "#;
-    if let Ok(s) = client.simple_query(plan_cache).await {
+    if let Ok(s) = client.simple_query(probe(plan_cache)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 m.single_use_plan_count = Some(r.get::<i64, _>(0).unwrap_or(0));

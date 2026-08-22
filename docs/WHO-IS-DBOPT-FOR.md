@@ -28,7 +28,7 @@ and it tells you the *exact* index to create — grounded in either the script's
 or the server's real usage.
 
 **Proof.**
-- The static analyzer runs **103 rules** in milliseconds with a self-graded **F1 = 1.000** on our
+- The static analyzer runs **104 rules** in milliseconds with a self-graded **F1 = 1.000** on our
   312-scenario corpus (covering every rule, plus 13 more for the 12 plan-XML/DMV checks) — so the flags it's tested on are precise, not noise.
 - It is fast enough that scale is not the interesting part: linting is a token pass, so a
   multi-megabyte directory finishes in well under a second on a laptop. What matters is that

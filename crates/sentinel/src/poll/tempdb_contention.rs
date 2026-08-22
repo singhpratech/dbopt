@@ -87,7 +87,7 @@ pub async fn poll_tempdb_contention(
         tempdb_data_files: 0,
     };
 
-    match client.simple_query(TEMPDB_WAITS_QUERY).await {
+    match client.simple_query(crate::probes::tag(TEMPDB_WAITS_QUERY)).await {
         Ok(s) => {
             if let Ok(rows) = s.into_first_result().await {
                 if let Some(r) = rows.into_iter().next() {
@@ -114,7 +114,7 @@ pub async fn poll_tempdb_contention(
     }
 
     // tempdb data-file count (best-effort).
-    if let Ok(s) = client.simple_query(TEMPDB_FILES_QUERY).await {
+    if let Ok(s) = client.simple_query(crate::probes::tag(TEMPDB_FILES_QUERY)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 row.tempdb_data_files = r.get::<i64, _>(0).unwrap_or(0);

@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "modern.exec_string_concat"
+  ],
+  "category": "hygiene",
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.cursor"
+  ],
+  "server_version": 2025
+}

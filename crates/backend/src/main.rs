@@ -94,7 +94,10 @@ OPTIONS:
 ENVIRONMENT:
     PORT             Port to bind (default: 3690, then the next free port)
     DBOPT_NO_OPEN    Set to any value to skip opening the browser
-    DBOPT_DATA_DIR   Override ~/.dbopt for the local database";
+    DBOPT_DATA_DIR   Override ~/.dbopt for the local database. If ~/.dbopt does
+                     not exist but the pre-rename ~/.sqlopt does, that is used
+                     instead (nothing is moved); GET /api/sentinel/status shows
+                     the path in use.";
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {

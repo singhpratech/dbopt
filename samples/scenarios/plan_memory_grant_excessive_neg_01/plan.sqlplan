@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT ... FROM dbo.Orders WHERE ... ORDER BY ..." StatementId="1" StatementType="SELECT">
+      <QueryPlan DegreeOfParallelism="1" MemoryGrant="204800" CachedPlanSize="32">
+        <MemoryGrantInfo SerialRequiredMemory="1024" SerialDesiredMemory="204800" RequiredMemory="1024" DesiredMemory="204800" RequestedMemory="204800" GrantWaitTime="0" GrantedMemory="204800" MaxUsedMemory="184320" MaxQueryMemory="1500000" />
+        <RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="Sort" EstimateRows="2000" EstimatedTotalSubtreeCost="45.0">
+          <Sort Distinct="false">
+            <OrderBy><OrderByColumn Ascending="true"><ColumnReference Schema="[dbo]" Table="[Orders]" Column="OrderDate" /></OrderByColumn></OrderBy>
+            <RunTimeInformation><RunTimeCountersPerThread Thread="0" ActualRows="2100" ActualExecutions="1" /></RunTimeInformation>
+            <RelOp NodeId="1" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="2000" EstimatedTotalSubtreeCost="1.0">
+              <IndexScan Ordered="true"><Object Schema="[dbo]" Table="[Orders]" Index="[IX_Orders_CustomerId]" /><SeekPredicates /></IndexScan>
+              <RunTimeInformation><RunTimeCountersPerThread Thread="0" ActualRows="2100" ActualExecutions="1" /></RunTimeInformation>
+            </RelOp>
+          </Sort>
+        </RelOp>
+      </QueryPlan>
+    </StmtSimple>
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>

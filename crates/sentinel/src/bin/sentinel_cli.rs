@@ -132,6 +132,7 @@ async fn run_once(conn: &ConnectionInfo, storage: &Storage) {
     run_one("deadlocks",   poll::deadlocks::poll_deadlocks(conn, storage)).await;
     run_one("index_usage", poll::index_usage::poll_index_usage_delta(conn, storage)).await;
     run_one("sizes",       poll::sizes::poll_sizes(conn, storage)).await;
+    run_one("missing_index", poll::missing_index::poll_missing_index(conn, storage)).await;
 }
 
 async fn run_one(name: &str, fut: impl std::future::Future<Output = anyhow::Result<()>>) {

@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.memory_grant_warning"],
+  "must_not_fire": ["plan.warning.MemoryGrantWarning", "plan.memory_grant_excessive"],
+  "server_version": 2025,
+  "category": "plan"
+}

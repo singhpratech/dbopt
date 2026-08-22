@@ -1,0 +1,8 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "compat.unsupported_on_target"
+  ],
+  "server_version": 2025,
+  "category": "compat"
+}

@@ -125,19 +125,130 @@ pub fn nolock_hint(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// What a cursor is declared over and what its loop does — the facts that
+/// decide whether `hygiene.cursor` is a real finding or the DBA-loop exception
+/// the rule's own fix text carves out.
+struct CursorShape {
+    /// FAST_FORWARD, or STATIC/FORWARD_ONLY together with READ_ONLY: a
+    /// read-only, forward-only cursor that is as cheap as a cursor gets.
+    read_only: bool,
+    /// The cursor's SELECT reads only catalog views / DMVs / INFORMATION_SCHEMA
+    /// — the "run something per database/table" admin loop.
+    admin_source: bool,
+    /// The loop body (or the declaration itself, via FOR UPDATE) contains
+    /// row-by-row DML: the case set-based rewrites actually exist for.
+    loop_has_dml: bool,
+}
+
+fn cursor_shape(tokens: &[Token], cursor_idx: usize) -> CursorShape {
+    // Options sit between CURSOR and FOR. `DECLARE @c CURSOR;` has no FOR.
+    let mut read_only = false;
+    let mut fast_forward = false;
+    let mut static_or_fwd = false;
+    let mut admin_source = false;
+    let mut loop_has_dml = false;
+    let mut j = cursor_idx + 1;
+    let mut for_at: Option<usize> = None;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == ";" || is_batch_separator(tokens, j) { break; }
+        if is_word(t, "FOR") { for_at = Some(j); break; }
+        if is_word(t, "FAST_FORWARD") { fast_forward = true; }
+        if is_word(t, "STATIC") || is_word(t, "FORWARD_ONLY") { static_or_fwd = true; }
+        if is_word(t, "READ_ONLY") { read_only = true; }
+        j += 1;
+    }
+    let read_only = fast_forward || (static_or_fwd && read_only);
+
+    // The cursor's SELECT: every FROM/JOIN source must be a catalog object for
+    // the loop to count as an admin loop. One user table in the mix and the
+    // exception does not apply.
+    if let Some(f) = for_at {
+        let mut saw_source = false;
+        let mut all_catalog = true;
+        let mut k = f + 1;
+        let mut depth = 0i32;
+        while k < tokens.len() {
+            let t = &tokens[k];
+            if t.text == "(" { depth += 1; }
+            else if t.text == ")" { depth -= 1; if depth < 0 { break; } }
+            else if depth == 0 && (t.text == ";" || is_batch_separator(tokens, k)) { break; }
+            else if depth == 0 && (is_word(t, "OPEN") || is_word(t, "DECLARE") || is_word(t, "FETCH")) { break; }
+            else if is_word(t, "UPDATE") && depth == 0 {
+                // `FOR UPDATE [OF col]` — the cursor exists to write rows.
+                loop_has_dml = true;
+            } else if is_word(t, "FROM") || is_word(t, "JOIN") {
+                if let Some(n) = next_significant(tokens, k) {
+                    let src = tokens[n].text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+                    saw_source = true;
+                    let catalog = src == "sys" || src == "information_schema" || src == "master" || src == "msdb";
+                    if !catalog { all_catalog = false; }
+                }
+            }
+            k += 1;
+        }
+        admin_source = saw_source && all_catalog;
+    }
+
+    // Loop body: from the declaration to DEALLOCATE / batch end. Any
+    // INSERT/UPDATE/DELETE/MERGE in there is row-by-row DML.
+    let mut k = cursor_idx + 1;
+    while k < tokens.len() {
+        if is_batch_separator(tokens, k) || is_word(&tokens[k], "DEALLOCATE") { break; }
+        let t = &tokens[k];
+        if is_keyword_at(tokens, k, "INSERT") || is_keyword_at(tokens, k, "UPDATE")
+            || is_keyword_at(tokens, k, "DELETE") || is_keyword_at(tokens, k, "MERGE")
+        {
+            // `FOR UPDATE` inside the declaration already counted; a bare
+            // `UPDATE` anywhere else in the loop is a write per fetched row.
+            let _ = t;
+            loop_has_dml = true;
+            break;
+        }
+        k += 1;
+    }
+    CursorShape { read_only, admin_source, loop_has_dml }
+}
+
 pub fn cursor_usage(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
-    for t in ctx.tokens {
-        if is_word(t, "CURSOR") {
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        if !is_keyword_at(tokens, i, "CURSOR") { continue; }
+        let shape = cursor_shape(tokens, i);
+        if shape.loop_has_dml {
             out.push(finding(
                 "hygiene.cursor",
                 Severity::Warning,
-                "Cursors process one row at a time and are an order of magnitude slower than the equivalent set-based query for almost every workload.",
+                "Cursor loop performs row-by-row DML (INSERT/UPDATE/DELETE/MERGE per fetched row). Set-based statements are an order of magnitude faster for almost every such workload.",
                 Some(make_loc(t)),
-                Some("Rewrite as a single set-based UPDATE / MERGE / INSERT … SELECT. Reserve cursors for genuinely procedural work (e.g., DBA scripts that must call sp_* per database).".into()),
+                Some("Rewrite the loop as a single set-based UPDATE / MERGE / INSERT … SELECT (join the cursor's SELECT to the target instead of fetching a row at a time). If the batch must be bounded, loop over `UPDATE TOP (n) … WHERE …` chunks, not rows.".into()),
             ));
             break; // one finding is enough; the recommendation is the same
         }
+        if shape.admin_source {
+            // The documented exception: a catalog-driven DBA loop (per
+            // database / per table) has no set-based equivalent. Silent.
+            continue;
+        }
+        if shape.read_only {
+            out.push(finding(
+                "hygiene.cursor",
+                Severity::Info,
+                "Read-only, forward-only cursor (FAST_FORWARD / STATIC READ_ONLY) with no DML in the loop. This is the cheapest cursor shape, but each FETCH is still a round trip through the procedural engine.",
+                Some(make_loc(t)),
+                Some("If the loop only formats or aggregates rows, a single SELECT with STRING_AGG / window functions / a set-based INSERT … SELECT usually replaces it. Keep the cursor if each row drives a procedural call (EXEC, PRINT, RAISERROR) that has no set-based form.".into()),
+            ));
+            break;
+        }
+        out.push(finding(
+            "hygiene.cursor",
+            Severity::Warning,
+            "Cursors process one row at a time and are an order of magnitude slower than the equivalent set-based query for almost every workload.",
+            Some(make_loc(t)),
+            Some("Rewrite as a single set-based UPDATE / MERGE / INSERT … SELECT. If a cursor is genuinely needed (per-row procedural work), declare it LOCAL FAST_FORWARD (or STATIC READ_ONLY) so it is read-only and forward-only; cursors over sys.* / INFORMATION_SCHEMA for DBA loops are exempt from this rule.".into()),
+        ));
+        break;
     }
     out
 }
@@ -942,4 +1053,49 @@ pub fn at_at_identity(ctx: &RuleCtx) -> Vec<Finding> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cursor_shape_tests {
+    use super::*;
+    use crate::tokens::tokenize;
+    use crate::Engine;
+
+    fn run(sql: &str) -> Vec<Finding> {
+        let toks = tokenize(sql);
+        cursor_usage(&RuleCtx { src: sql, tokens: &toks, server_version: Some(2025), engine: Engine::SqlServer })
+    }
+
+    #[test]
+    fn admin_loop_over_catalog_is_exempt() {
+        let sql = "DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT name FROM sys.databases; OPEN c; FETCH NEXT FROM c INTO @d; WHILE @@FETCH_STATUS = 0 BEGIN EXEC sp_foo @d; FETCH NEXT FROM c INTO @d; END; CLOSE c; DEALLOCATE c;";
+        assert!(run(sql).is_empty());
+        let sql2 = "DECLARE c CURSOR FOR SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES; OPEN c;";
+        assert!(run(sql2).is_empty());
+    }
+
+    #[test]
+    fn dml_loop_is_warning_even_when_fast_forward() {
+        let sql = "DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT id FROM dbo.t; OPEN c; FETCH NEXT FROM c INTO @i; WHILE @@FETCH_STATUS = 0 BEGIN UPDATE dbo.t SET x = 1 WHERE id = @i; FETCH NEXT FROM c INTO @i; END; DEALLOCATE c;";
+        let f = run(sql);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Warning);
+        // A FOR UPDATE cursor declares its intent to write.
+        let f = run("DECLARE c CURSOR FOR SELECT id FROM dbo.t FOR UPDATE OF x; OPEN c;");
+        assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn read_only_cursor_over_user_table_is_info() {
+        let sql = "DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT n FROM dbo.t; OPEN c; FETCH NEXT FROM c INTO @n; WHILE @@FETCH_STATUS = 0 BEGIN PRINT @n; FETCH NEXT FROM c INTO @n; END;";
+        let f = run(sql);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn catalog_joined_to_user_table_is_not_exempt() {
+        let sql = "DECLARE c CURSOR FOR SELECT t.name FROM sys.tables AS t JOIN dbo.Audit AS a ON a.name = t.name; OPEN c;";
+        assert_eq!(run(sql).len(), 1);
+    }
 }

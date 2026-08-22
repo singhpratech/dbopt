@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "hygiene.scalar_udf_in_select",
+    "index.missing_index_from_predicate"
+  ],
+  "category": "compat",
+  "must_fire": [],
+  "must_not_fire": [
+    "compat.unsupported_on_target"
+  ],
+  "server_version": 2014
+}

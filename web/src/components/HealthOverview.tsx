@@ -4,6 +4,7 @@ import * as P from "../store/persist";
 import * as backend from "../api/backend";
 import type { BaselineTrend, Confidence, HealthReport, Issue, IssueSeverity } from "../api/backend";
 import { IssueDetailPane } from "./IssueDetailPane";
+import { CounterAgeChip } from "./CounterAgeChip";
 import { MetricChip } from "./MetricChip";
 import { Term } from "./Term";
 import { CONF_GLYPH, CONF_LABEL, confGlyph, confTitle } from "../confidence";
@@ -90,7 +91,7 @@ export function HealthOverview({
       scanlog.append(conn.server, conn.database || undefined, r);
       setReport(r);
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      setErr(backend.humanizeError(e));
       setReport(null);
     } finally {
       setBusy(false);
@@ -189,11 +190,36 @@ export function HealthOverview({
                 ? report.status
                 : "Idle"}
             </div>
+            {/* WHICH database this grade is for — always named, never implied.
+                With no database chosen SQL Server lands the login in its default
+                database (usually master), so say so and offer the picker. */}
+            {connected && (
+              <div className="health-target" data-testid="health-target">
+                <span className="health-target-server">{conn.server}</span>
+                <span className="health-target-sep" aria-hidden>›</span>
+                {conn.database ? (
+                  <span className="health-target-db">{conn.database}</span>
+                ) : (
+                  <>
+                    <span className="health-target-db default">{report?.connected.database || "master"}</span>
+                    <span className="health-target-note">
+                      the login's default database —{" "}
+                      <button className="link-inline" onClick={() => setUi({ ...ui, workspace: "connection" })}>
+                        pick the database you meant →
+                      </button>
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
             <div className="health-window">
               {report && !err
                 ? `Window: last 7 days · scanned ${fmtTime(report.generated_at)}${lastCaptureNote(report)}`
                 : "one-screen snapshot + what to fix first"}
             </div>
+            {report && !err && (
+              <CounterAgeChip ageSecs={report.counter_age_secs} since={report.counters_since} />
+            )}
           </div>
           <div className="form-actions health-actions">
             <button

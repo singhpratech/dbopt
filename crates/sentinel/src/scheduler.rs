@@ -132,6 +132,18 @@ pub async fn run(cfg: RunConfig) {
                 poll::index_usage::poll_index_usage_delta(&c, &s).await
             }),
         ));
+        // Missing-index DMV snapshot: ticks daily (the poller itself also
+        // refuses to write twice within 20h, so restarts don't double-count).
+        handles.push(spawn_poller(
+            format!("{name}/missing_index"),
+            Duration::from_secs(24 * 60 * 60),
+            conn.clone(),
+            storage.clone(),
+            shutdown.clone(),
+            |c, s| Box::pin(async move {
+                poll::missing_index::poll_missing_index(&c, &s).await
+            }),
+        ));
         handles.push(spawn_poller(
             format!("{name}/sizes"),
             Duration::from_secs(cadences.index_usage_mins.max(1) * 60),

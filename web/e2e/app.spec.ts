@@ -33,14 +33,16 @@ test("app loads with the observatory shell", async ({ page }) => {
 });
 
 test("rail navigates between workspaces", async ({ page }) => {
+  // The first-run wizard overlays the rail until the user has onboarded.
+  await seed(page, { onboarded: true });
   await page.goto("/");
 
-  // CONN → connection panel
-  await page.locator(".rail-btn", { hasText: "CONN" }).click();
+  // Connection → connection panel
+  await page.locator(".rail-btn", { hasText: "Connection" }).click();
   await expect(page.getByRole("button", { name: /Connect & list databases/i })).toBeVisible();
 
-  // PROV → providers panel (local + cloud LLMs)
-  await page.locator(".rail-btn", { hasText: "PROV" }).click();
+  // Config → providers panel (local + cloud LLMs)
+  await page.locator(".rail-btn", { hasText: "Config" }).click();
   await expect(page.getByText(/Ollama/i).first()).toBeVisible();
 
   // RUNS → analysis history
@@ -49,7 +51,7 @@ test("rail navigates between workspaces", async ({ page }) => {
 });
 
 test("WASM analyzer flags a deliberately bad query", async ({ page }) => {
-  await seed(page, { draft_sql: BAD_SQL, ui: { workspace: "analyze", server_version: 2025 } });
+  await seed(page, { onboarded: true, draft_sql: BAD_SQL, ui: { workspace: "analyze", server_version: 2025 } });
   await page.goto("/");
 
   // The in-browser analyzer runs on load (debounced) — the NOLOCK hint must surface.
@@ -62,6 +64,7 @@ test("WASM analyzer flags a deliberately bad query", async ({ page }) => {
 
 test("saved server profiles render and switching updates the form", async ({ page }) => {
   await seed(page, {
+    onboarded: true,
     ui: { workspace: "connection", server_version: 2025 },
     servers: [
       { id: "s1", name: "app-sql-01 (2025)", server: "localhost,1433", database: "sales", user: "sa", password: "", remember_password: false, trust_cert: true, auth_mode: "sql" },
@@ -85,9 +88,77 @@ test("saved server profiles render and switching updates the form", async ({ pag
 });
 
 test("providers panel lists local + cloud models", async ({ page }) => {
-  await seed(page, { ui: { workspace: "settings", server_version: 2025 } });
+  await seed(page, { onboarded: true, ui: { workspace: "settings", server_version: 2025 } });
   await page.goto("/");
   for (const name of ["Ollama", "OpenAI", "Anthropic", "OpenRouter"]) {
     await expect(page.getByText(name, { exact: false }).first()).toBeVisible();
   }
+});
+
+test("page load makes no request off the local origin (fonts + Monaco are bundled)", async ({ page }) => {
+  // Update check off: the only documented outbound request is the opt-out
+  // GitHub version ping. Everything else — fonts included — must be local.
+  await seed(page, { onboarded: true, auto_check_updates: false, ui: { workspace: "analyze", server_version: 2025 } });
+  const external: string[] = [];
+  page.on("request", (r) => {
+    if (/^(blob|data):/.test(r.url())) return; // in-page workers, not network
+    const u = new URL(r.url());
+    if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") external.push(r.url());
+  });
+  await page.goto("/");
+  await expect(page.locator(".rail-btn").first()).toBeVisible();
+  await page.waitForTimeout(1500);
+  expect(external).toEqual([]);
+  // The editor came up from the bundle (it used to load from a CDN).
+  await expect(page.locator(".monaco-editor").first()).toBeVisible({ timeout: 15_000 });
+  // And the Plex faces actually load from /fonts.
+  const loaded = await page.evaluate(() => document.fonts.check("12px 'IBM Plex Sans'") && document.fonts.check("12px 'IBM Plex Mono'"));
+  expect(loaded).toBe(true);
+});
+
+test("server-side editor actions are disabled with a reason when the backend is down", async ({ page }) => {
+  await seed(page, {
+    onboarded: true,
+    draft_sql: BAD_SQL,
+    ui: { workspace: "analyze", server_version: 2025 },
+    servers: [{ id: "s1", name: "x", server: "localhost,1433", database: "", user: "sa", password: "", remember_password: false, trust_cert: true, auth_mode: "sql" }],
+    current_server_id: "s1",
+  });
+  await page.route((u) => u.pathname.startsWith("/api/"), (route) => route.abort()); // not "**/api/**": that also aborts Vite's /src/api/*.ts in dev
+  await page.goto("/");
+  await expect(page.getByTestId("editor-offline-note")).toBeVisible({ timeout: 10_000 });
+  for (const name of ["CHECK SYNTAX", "ESTIMATED PLAN", "ACTUAL PLAN"]) {
+    const b = page.getByRole("button", { name, exact: true });
+    await expect(b).toBeDisabled();
+    await expect(b).toHaveAttribute("title", /dbopt-backend/);
+  }
+  // The in-browser analyzer still works offline.
+  await expect(page.getByText("hygiene.nolock").first()).toBeVisible({ timeout: 10_000 });
+  // Never a stacked pair of raw fetch banners.
+  await expect(page.getByText("Failed to fetch")).toHaveCount(0);
+});
+
+test("SEVERITY counts every finding by severity and source, and jumps to the line", async ({ page }) => {
+  await seed(page, { onboarded: true, draft_sql: BAD_SQL, ui: { workspace: "severity", server_version: 2025 } });
+  await page.goto("/");
+  const tiles = page.locator(".sev-tile");
+  await expect(tiles.first()).toBeVisible({ timeout: 10_000 });
+  // The matrix names the T-SQL source row and a non-zero total.
+  await expect(page.locator(".sev-matrix-row").first()).toContainText("T-SQL text");
+  const total = await page.locator(".sev-tile.total .sev-tile-n").innerText();
+  expect(Number(total)).toBeGreaterThan(0);
+  // Each rule row carries a clickable line jump; clicking lands in ANALYZE.
+  await page.locator(".sev-jump").first().click();
+  await expect(page.locator(".rail-btn.on")).toContainText("ANALYZE");
+});
+
+test("onboarding wizard offers a remember-password control that is OFF by default", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Connect to a database/ }).first().click();
+  const cb = page.getByTestId("wizard-remember-password");
+  await expect(cb).toBeVisible();
+  await expect(cb).not.toBeChecked();
+  await expect(page.getByText(/in memory for this session only/)).toBeVisible();
+  await cb.check();
+  await expect(page.getByText(/localStorage \(key dbopt\.servers\)/)).toBeVisible();
 });

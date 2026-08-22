@@ -34,7 +34,7 @@ execution, no locks, no load on production**.
 
 > **One tool, every database.** dbopt is engine-agnostic from the core out: every rule declares which
 > database it applies to, so engines are added without destabilizing each other. **SQL Server (2014 → 2025)
-> is live today** with all 103 rules; **PostgreSQL and MySQL are next.** Ask for an engine whose rules
+> is live today** with all 104 rules; **PostgreSQL and MySQL are next.** Ask for an engine whose rules
 > haven't landed and you get an empty report — the analyzer would rather say nothing than guess.
 >
 > **Free and open.** No per-seat cost, no paywalled features — what the commercial tools do, without
@@ -66,9 +66,12 @@ irm https://dbopt.org/install.ps1 | iex
 Each is a **single self-contained binary** with the web UI embedded — run it, then open
 `http://127.0.0.1:3690`. Checksums are on the [releases page](https://github.com/singhpratech/dbopt/releases).
 
-Each archive contains **two binaries**: `dbopt` (the linter — `dbopt lint ./db`, offline, no
-connection needed) and `dbopt-backend` (the local app — run it and open <http://127.0.0.1:3690>).
-A `WHICH-BINARY.txt` in the archive says the same thing.
+Each archive — and the Windows `.msi` — installs **three binaries** under the same names on every
+platform: `dbopt` (the linter — `dbopt lint ./db`, offline, no connection needed), `dbopt-backend`
+(the local app — run it and open <http://127.0.0.1:3690>) and `dbopt-sentinel` (the standalone
+poller). A `WHICH-BINARY.txt` in the archive says the same thing. On Windows the Start-menu entry
+opens the app; before 0.4.2 the MSI installed the app *as* `dbopt.exe`, so if you typed `dbopt` to
+open it, type `dbopt-backend` now.
 
 **Developers** can skip the installer entirely:
 
@@ -83,7 +86,7 @@ Linux has no prompt. Signing is on the roadmap.
 
 ## Lint your SQL in CI — offline, no connection
 
-`dbopt lint` walks your `.sql` files, applies all 103 rules and emits machine-readable output, so a bad
+`dbopt lint` walks your `.sql` files, applies all 104 rules and emits machine-readable output, so a bad
 query fails the build *before* it ships.
 
 ```bash
@@ -118,7 +121,7 @@ commit on error-level findings.
 
 |   | Lens | What it does |
 |---|------|--------------|
-| **01** | **Static** | A token-level analyzer — **103 rules** across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, statistics, transactions, security and datatypes. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
+| **01** | **Static** | A token-level analyzer — **104 rules** across sargability, index design, plan shape, hygiene, modern rewrites, locking, tempdb, statistics, transactions, security and datatypes. Runs in-browser via WebAssembly or as a CLI. **No connection required.** |
 | **02** | **Plan** | Fetches the *estimated* plan (compile-only — never runs the query) and breaks down operator cost, scans vs. seeks, spill and lookup risk. |
 | **03** | **Live** | Reads index usage, missing indexes and sizes on demand; the **sentinel** daemon samples query history, waits, deadlocks and vitals into a local SQLite time-series, with thresholds and webhook alerts. Usage-based index advice is ranked from DMV counters that reset on restart — the ranking is only as trustworthy as the counter age shown beside it. |
 
@@ -173,7 +176,7 @@ cargo run -p eval -- --html   # → target/eval-report.html
 
 | Engine | Status | Notes |
 |---|---|---|
-| **SQL Server** | **Live** | 2014 → 2025 · all 103 rules |
+| **SQL Server** | **Live** | 2014 → 2025 · all 104 rules |
 | PostgreSQL | Next | engine seam wired · rules coming |
 | MySQL | Next | engine seam wired · rules coming |
 
@@ -195,7 +198,9 @@ A Rust workspace plus a React / Vite / TypeScript front end:
 | `eval` | the rule-quality harness (precision / recall / F1 + HTML report) |
 | `web/` | the "observatory" UI (analysis, plans, charts, AI, monitoring) |
 
-Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). No external services required.
+Storage and config live under `~/.dbopt/` (override with `DBOPT_DATA_DIR`). An install that still has the
+pre-rename `~/.sqlopt/` and no `~/.dbopt/` keeps using `~/.sqlopt/` — nothing is moved — and says so in
+one startup log line; `mv ~/.sqlopt ~/.dbopt` when you want the new name. No external services required.
 
 ## Build from source
 

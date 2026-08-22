@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { SqlConnectionConfig, UiPrefs } from "../store/persist";
 import * as backend from "../api/backend";
+import { CounterAgeChip } from "./CounterAgeChip";
 import type { Recommendation, RecommendationKind, RecommendationPriority } from "../api/backend";
 import { Term, TermText } from "./Term";
 import { CONF_GLYPH, confTier } from "../confidence";
@@ -30,6 +31,8 @@ export function AdvisorPanel({
   setUi: (u: UiPrefs) => void;
 }) {
   const [recs, setRecs] = useState<Recommendation[] | null>(null);
+  // Age of the DMV usage counters behind these verdicts (absent on older backends).
+  const [counterAge, setCounterAge] = useState<{ secs?: number | null; since?: string | null }>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -56,10 +59,11 @@ export function AdvisorPanel({
         password: conn.auth_mode === "sql" ? conn.password : undefined,
         trust_cert: conn.trust_cert,
       };
-      const { recommendations } = await backend.advise(info);
-      setRecs(recommendations);
+      const res = await backend.advise(info);
+      setRecs(res.recommendations);
+      setCounterAge({ secs: res.counter_age_secs, since: res.counters_since });
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      setErr(backend.humanizeError(e));
       setRecs(null);
     } finally {
       setBusy(false);
@@ -136,6 +140,11 @@ export function AdvisorPanel({
           </div>
         )}
         {err && <div className="form-status err">{err}</div>}
+        {recs != null && !err && (
+          <div className="counter-age-row">
+            <CounterAgeChip ageSecs={counterAge.secs} since={counterAge.since} />
+          </div>
+        )}
       </div>
 
       {recs != null && !err && (

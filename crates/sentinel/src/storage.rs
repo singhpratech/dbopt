@@ -27,6 +27,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0006_query_baseline", include_str!("../migrations/0006_query_baseline.sql")),
     ("0007_vitals",         include_str!("../migrations/0007_vitals.sql")),
     ("0008_alerts",         include_str!("../migrations/0008_alerts.sql")),
+    ("0009_missing_index",  include_str!("../migrations/0009_missing_index.sql")),
 ];
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -407,6 +408,7 @@ impl Storage {
             "query_store_snapshot",
             "live_request_snapshot",
             "wait_stats_delta",
+            "missing_index_snapshot",
             "deadlock_capture",
             "index_usage_delta",
             "size_snapshot",
@@ -1374,6 +1376,20 @@ impl Storage {
             .optional()?)
     }
 
+    /// Like [`get_state`] but also returns WHEN the value was last written
+    /// (epoch millis). Cumulative-counter pollers use the age to decide whether
+    /// a prior snapshot is still a valid baseline for a delta.
+    fn get_state_with_time(&self, instance_id: i64, key: &str) -> anyhow::Result<Option<(String, i64)>> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        Ok(lock
+            .query_row(
+                "SELECT value, updated_at FROM poller_state WHERE instance_id = ?1 AND key = ?2",
+                params![instance_id, key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?)
+    }
+
     fn set_state(&self, instance_id: i64, key: &str, value: &str) -> anyhow::Result<()> {
         let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
         lock.execute(
@@ -1388,8 +1404,17 @@ impl Storage {
     // ---------- Wait-stats snapshot --------------------------------------
 
     pub fn previous_wait_snapshot(&self, instance_id: i64) -> Option<HashMap<String, (i64, i64, i64)>> {
-        let raw = self.get_state(instance_id, "wait_snapshot").ok().flatten()?;
-        serde_json::from_str(&raw).ok()
+        self.previous_wait_snapshot_with_age(instance_id).map(|(m, _)| m)
+    }
+
+    /// The prior wait snapshot plus its age in milliseconds (now − written_at).
+    pub fn previous_wait_snapshot_with_age(
+        &self,
+        instance_id: i64,
+    ) -> Option<(HashMap<String, (i64, i64, i64)>, i64)> {
+        let (raw, at) = self.get_state_with_time(instance_id, "wait_snapshot").ok().flatten()?;
+        let m = serde_json::from_str(&raw).ok()?;
+        Some((m, Utc::now().timestamp_millis() - at))
     }
 
     pub fn update_wait_snapshot(
@@ -1408,10 +1433,101 @@ impl Storage {
         &self,
         instance_id: i64,
     ) -> Option<HashMap<(String, String, String, String), (i64, i64, i64, i64)>> {
-        let raw = self.get_state(instance_id, "index_snapshot").ok().flatten()?;
+        self.previous_index_snapshot_with_age(instance_id).map(|(m, _)| m)
+    }
+
+    /// The prior index-usage snapshot plus its age in milliseconds.
+    pub fn previous_index_snapshot_with_age(
+        &self,
+        instance_id: i64,
+    ) -> Option<(HashMap<(String, String, String, String), (i64, i64, i64, i64)>, i64)> {
+        let (raw, at) = self.get_state_with_time(instance_id, "index_snapshot").ok().flatten()?;
         let v: Vec<((String, String, String, String), (i64, i64, i64, i64))> =
             serde_json::from_str(&raw).ok()?;
-        Some(v.into_iter().collect())
+        Some((v.into_iter().collect(), Utc::now().timestamp_millis() - at))
+    }
+
+    // ---------- Missing-index snapshots (daily) ---------------------------
+
+    /// Epoch millis of the newest missing-index capture for this instance, or
+    /// `None` when none exists. The poller uses it to hold a daily cadence
+    /// across daemon restarts (the scheduler ticks immediately on start).
+    pub fn last_missing_index_capture_ms(&self, instance_id: i64) -> Option<i64> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.query_row(
+            "SELECT MAX(captured_at) FROM missing_index_snapshot WHERE instance_id = ?1",
+            [instance_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten()
+    }
+
+    pub fn insert_missing_index_row(&self, instance_id: i64, row: &MissingIndexRow) -> anyhow::Result<()> {
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        lock.execute(
+            "INSERT INTO missing_index_snapshot(instance_id, captured_at, db_name, schema_name,
+                 table_name, equality_columns, inequality_columns, included_columns,
+                 user_seeks, avg_user_impact, avg_total_user_cost)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                instance_id,
+                row.captured_at.timestamp_millis(),
+                row.db_name,
+                row.schema_name,
+                row.table_name,
+                row.equality_columns,
+                row.inequality_columns,
+                row.included_columns,
+                row.user_seeks,
+                row.avg_user_impact,
+                row.avg_total_user_cost,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Per-table persistence of missing-index suggestions over the last
+    /// `days` days: on how many DISTINCT capture days the DMV suggested an
+    /// index on that table (`days_seen`), against how many capture days the
+    /// monitor has for this instance in the window at all (`days_observed`).
+    /// Empty when nothing was ever captured — never a fabricated "0 of 0".
+    pub fn missing_index_history(&self, instance_id: i64, days: i64) -> anyhow::Result<Vec<MissingIndexHistoryRow>> {
+        let since = Utc::now().timestamp_millis() - days.max(1) * 86_400_000;
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let days_observed: i64 = lock.query_row(
+            "SELECT COUNT(DISTINCT captured_at / 86400000) FROM missing_index_snapshot
+             WHERE instance_id = ?1 AND captured_at >= ?2",
+            params![instance_id, since],
+            |r| r.get(0),
+        )?;
+        if days_observed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = lock.prepare(
+            "SELECT db_name, schema_name, table_name,
+                    COUNT(DISTINCT captured_at / 86400000) AS days_seen,
+                    MAX(user_seeks) AS max_seeks
+             FROM missing_index_snapshot
+             WHERE instance_id = ?1 AND captured_at >= ?2 AND table_name <> ''
+             GROUP BY db_name, schema_name, table_name
+             ORDER BY days_seen DESC, max_seeks DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![instance_id, since], |r| {
+                Ok(MissingIndexHistoryRow {
+                    db_name: r.get(0)?,
+                    schema_name: r.get(1)?,
+                    table_name: r.get(2)?,
+                    days_seen: r.get(3)?,
+                    days_observed,
+                    max_user_seeks: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn update_index_snapshot(
@@ -2038,6 +2154,34 @@ pub struct IndexUsageDeltaRow {
     pub scans_delta: i64,
     pub lookups_delta: i64,
     pub updates_delta: i64,
+}
+
+/// One `sys.dm_db_missing_index_*` suggestion as captured on a given day.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingIndexRow {
+    pub captured_at: DateTime<Utc>,
+    pub db_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    /// Comma-separated, as the DMV reports them (brackets stripped).
+    pub equality_columns: String,
+    pub inequality_columns: String,
+    pub included_columns: String,
+    pub user_seeks: i64,
+    pub avg_user_impact: f64,
+    pub avg_total_user_cost: f64,
+}
+
+/// Read-back of [`Storage::missing_index_history`]: how persistently the DMV
+/// has suggested an index on this table across daily captures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingIndexHistoryRow {
+    pub db_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub days_seen: i64,
+    pub days_observed: i64,
+    pub max_user_seeks: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2887,5 +3031,93 @@ mod tests {
 
         // A DIFFERENT rule is independent — fires immediately.
         assert!(s.should_fire_alert(id, "tempdb.pagelatch_contention", t1, cooldown));
+    }
+}
+
+#[cfg(test)]
+mod missing_index_history_tests {
+    use super::*;
+
+    fn inst(s: &Storage) -> i64 {
+        let c = ConnectionInfo {
+            server: "srv".into(),
+            database: Some("db".into()),
+            user: Some("u".into()),
+            password: Some("p".into()),
+            trust_cert: Some(true),
+        };
+        s.ensure_instance("srv", &c).unwrap()
+    }
+
+    fn row(at: DateTime<Utc>, table: &str, seeks: i64) -> MissingIndexRow {
+        MissingIndexRow {
+            captured_at: at,
+            db_name: "db".into(),
+            schema_name: "dbo".into(),
+            table_name: table.into(),
+            equality_columns: "Code".into(),
+            inequality_columns: String::new(),
+            included_columns: "Date".into(),
+            user_seeks: seeks,
+            avg_user_impact: 90.0,
+            avg_total_user_cost: 10.0,
+        }
+    }
+
+    #[test]
+    fn history_counts_distinct_days_seen_against_days_observed() {
+        let s = Storage::open_in_memory().unwrap();
+        let id = inst(&s);
+        let now = Utc::now();
+        let day = chrono::Duration::days(1);
+        // observations suggested on 3 of 4 capture days; procedures on 1.
+        for d in [0, 1, 3] {
+            s.insert_missing_index_row(id, &row(now - day * d, "observations", 8 + d as i64)).unwrap();
+        }
+        s.insert_missing_index_row(id, &row(now - day * 2, "procedures", 2)).unwrap();
+        // Day 2 had no observations suggestion but IS an observed day (via procedures).
+        let h = s.missing_index_history(id, 30).unwrap();
+        let obs = h.iter().find(|r| r.table_name == "observations").unwrap();
+        assert_eq!((obs.days_seen, obs.days_observed), (3, 4));
+        assert_eq!(obs.max_user_seeks, 11);
+        let proc_ = h.iter().find(|r| r.table_name == "procedures").unwrap();
+        assert_eq!((proc_.days_seen, proc_.days_observed), (1, 4));
+        // Ranked by persistence first.
+        assert_eq!(h[0].table_name, "observations");
+    }
+
+    #[test]
+    fn an_empty_dmv_day_counts_as_observed_but_never_as_a_table() {
+        let s = Storage::open_in_memory().unwrap();
+        let id = inst(&s);
+        let now = Utc::now();
+        let mut empty = row(now, "", 0);
+        empty.schema_name.clear();
+        s.insert_missing_index_row(id, &empty).unwrap();
+        s.insert_missing_index_row(id, &row(now - chrono::Duration::days(1), "observations", 1)).unwrap();
+        let h = s.missing_index_history(id, 30).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!((h[0].days_seen, h[0].days_observed), (1, 2));
+    }
+
+    #[test]
+    fn no_captures_means_no_history_not_zero_of_zero() {
+        let s = Storage::open_in_memory().unwrap();
+        let id = inst(&s);
+        assert!(s.missing_index_history(id, 30).unwrap().is_empty());
+        assert_eq!(s.last_missing_index_capture_ms(id), None);
+    }
+
+    #[test]
+    fn snapshot_age_is_reported_alongside_the_snapshot() {
+        let s = Storage::open_in_memory().unwrap();
+        let id = inst(&s);
+        assert!(s.previous_wait_snapshot_with_age(id).is_none());
+        let mut m = HashMap::new();
+        m.insert("CXPACKET".to_string(), (1i64, 2i64, 3i64));
+        s.update_wait_snapshot(id, &m).unwrap();
+        let (back, age) = s.previous_wait_snapshot_with_age(id).unwrap();
+        assert_eq!(back["CXPACKET"], (1, 2, 3));
+        assert!((0..10_000).contains(&age), "age={age}");
     }
 }

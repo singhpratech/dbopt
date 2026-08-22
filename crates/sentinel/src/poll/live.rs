@@ -44,7 +44,7 @@ pub async fn poll_live_requests(
           AND ISNULL(s.program_name, '') <> 'dbopt-sentinel';
     "#;
 
-    let stream = client.simple_query(SQL).await?;
+    let stream = client.simple_query(crate::probes::tag(SQL)).await?;
     let rows = stream.into_first_result().await?;
 
     let captured_at = Utc::now();

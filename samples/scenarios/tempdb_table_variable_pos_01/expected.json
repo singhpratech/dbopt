@@ -1,5 +1,6 @@
 {
   "also_fires": [
+    "index.missing_index_from_predicate",
     "stats.ascending_key_hotspot"
   ],
   "category": "tempdb",

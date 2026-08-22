@@ -17,7 +17,7 @@
 //   * SELECT *                                               -> skip the INCLUDE-bearing rules
 // When unsure we drop the finding rather than emit noise.
 
-use super::{finding, is_batch_separator, is_word, make_loc, RuleCtx};
+use super::{finding, is_batch_separator, is_keyword_at, is_word, make_loc, next_significant, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{Token, TokKind};
 
@@ -97,14 +97,66 @@ fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<(u32, String)> {
     names
 }
 
+/// Token ranges that are the body of a `CREATE/ALTER VIEW` or an inline
+/// table-valued function (`CREATE FUNCTION … RETURNS TABLE`). Index advice on a
+/// view or iTVF body is not actionable where it is reported: the index belongs
+/// on the base table, whose DDL never lives in the same file as the view, and
+/// every query file in a proc/view repo would otherwise carry the same note.
+/// Each range runs from the CREATE to the next batch separator (or EOF).
+fn view_and_itvf_bodies(tokens: &[Token<'_>]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if !(is_keyword_at(tokens, i, "CREATE") || is_keyword_at(tokens, i, "ALTER")) { i += 1; continue; }
+        // CREATE [OR ALTER] VIEW | FUNCTION
+        let mut k = next_significant(tokens, i);
+        if let Some(x) = k {
+            if is_word(&tokens[x], "OR") {
+                k = next_significant(tokens, x).and_then(|y| next_significant(tokens, y));
+            }
+        }
+        let Some(kind) = k else { break };
+        let is_view = is_word(&tokens[kind], "VIEW");
+        let is_fn = is_word(&tokens[kind], "FUNCTION");
+        if !is_view && !is_fn { i += 1; continue; }
+        // Batch end.
+        let mut end = tokens.len();
+        let mut j = kind + 1;
+        while j < tokens.len() {
+            if is_batch_separator(tokens, j) { end = j; break; }
+            j += 1;
+        }
+        let body = if is_view {
+            true
+        } else {
+            // Inline TVF iff `RETURNS TABLE` (not `RETURNS @t TABLE`, not scalar).
+            let mut r = kind + 1;
+            let mut inline = false;
+            while r < end {
+                if is_word(&tokens[r], "RETURNS") {
+                    inline = next_significant(tokens, r).map(|n| is_word(&tokens[n], "TABLE")).unwrap_or(false);
+                    break;
+                }
+                r += 1;
+            }
+            inline
+        };
+        if body { out.push((i, end)); }
+        i = end;
+    }
+    out
+}
+
 fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
     let ctes = cte_names(tokens);
+    let bodies = view_and_itvf_bodies(tokens);
     let mut out = Vec::new();
     let mut i = 0;
     let mut batch = 0u32;
     while i < tokens.len() {
         if is_batch_separator(tokens, i) { batch += 1; i += 1; continue; }
         if !is_word(&tokens[i], "SELECT") { i += 1; continue; }
+        if bodies.iter().any(|&(s, e)| i > s && i < e) { i += 1; continue; }
         let select_tok = i;
 
         // Statement boundary: top-level ';' or end of input. Parens are tracked
@@ -557,7 +609,10 @@ fn parse_simple_predicate(tokens: &[Token<'_>], start: usize, end: usize) -> Opt
             let nxt = skip_comments(tokens, after + 1);
             if nxt < e && tokens[nxt].text == ">" { return None; } // `<>`
             is_range = true;
-            rhs_start = after + 1;
+            // `>=` / `<=` arrive as two punct tokens; the value starts after
+            // the `=`. Reading `=` as the value rejected every `col >= 'x'`
+            // conjunct and, with it, the whole statement's recommendation.
+            rhs_start = if nxt < e && tokens[nxt].text == "=" { nxt + 1 } else { after + 1 };
         }
         "!" => return None, // `!=` / `!<` etc. — not a clean seek
         _ => return None,
@@ -1024,7 +1079,7 @@ pub fn missing_index_from_predicate(ctx: &RuleCtx) -> Vec<Finding> {
             ),
             Some(make_loc(&ctx.tokens[anchor])),
             Some(format!(
-                "Add a covering nonclustered index (equality columns first, range column last):\n\n{}\n{}\nVerify against the actual plan / sys.dm_db_missing_index_details before deploying; an index has write-side cost.",
+                "Add a covering nonclustered index (equality columns first, range column last):\n\n{}\n{}\nThis key is inferred from the predicate TEXT only — no statistics, column types, selectivity or workload were consulted, so it is a starting point, not the optimizer's answer. With a server connection prefer the optimizer's own request in sys.dm_db_missing_index_details (dbopt's ADVISE / plan paths read it): it reports the equality, inequality and INCLUDE columns the engine actually wanted. An index has write-side cost; verify against the actual plan before deploying.",
                 ddl, star_note
             )),
         ));

@@ -83,6 +83,13 @@ pub struct HealthReport {
     /// a monitor that stopped 86 days ago still has a 7-day "age", but its
     /// `last_capture_secs` says the feed is dead.
     pub last_capture_secs: Option<i64>,
+    /// Seconds the server's DMV usage counters have been accumulating — i.e.
+    /// since `sys.dm_os_sys_info.sqlserver_start_time`. Every missing /
+    /// unused / duplicate-index signal in this report is measured over THIS
+    /// window, not over `monitoring_age_secs`. `None` when unreadable.
+    pub counter_age_secs: Option<i64>,
+    /// The instance's last start (RFC 3339 UTC) — when the counters began.
+    pub counters_since: Option<String>,
     /// "Today vs rolling baseline" trend behind the grade, built from the durable
     /// per-query baseline of THIS server+database. `None` when no query has a
     /// mature baseline yet — the UI then shows "baseline forming" rather than a
@@ -317,6 +324,161 @@ pub fn rank(issues: &mut [Issue]) {
 }
 
 // ===========================================================================
+// Per-table reconciliation.
+// ===========================================================================
+
+/// Lower-cased `schema.table` for an issue's `affected_object`, stripping
+/// brackets and any trailing `.index` segment. Advisor objects are
+/// `schema.table[.index]`; static findings display `[schema].[table]`.
+pub fn table_key(affected_object: &str) -> String {
+    let clean: String = affected_object
+        .chars()
+        .filter(|c| *c != '[' && *c != ']')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let parts: Vec<&str> = clean.split('.').filter(|p| !p.is_empty()).collect();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].to_string(),
+        _ => format!("{}.{}", parts[0], parts[1]),
+    }
+}
+
+/// The static rule a `static:finding:<rule>:<key>` issue came from.
+fn static_rule(issue: &Issue) -> Option<&str> {
+    issue.id.strip_prefix("static:finding:")?.split(':').next()
+}
+
+/// Collapse the same advice repeated per table into one issue per
+/// (table, decision), with the evidence merged — the reconciliation a DBA
+/// otherwise does by hand across 60 cards:
+///
+///   * a table that is a heap AND has no primary key is ONE structural issue
+///     (same fix: add a clustered primary key), not two errors;
+///   * a static `dmv.missing_index` finding on a table the advisor already
+///     has a `missing_index` rec for is folded into that rec (it carries the
+///     DDL; the finding is the same DMV row without it);
+///   * likewise static `dmv.duplicate_or_overlapping_index` findings fold into
+///     the advisor's `duplicate_index` rec on the same table;
+///   * several advisor recs of the same kind on one table (one per redundant
+///     index, one per consolidated key set) become one issue whose `fix_sql`
+///     is the concatenation and whose `impact_rank` is the max.
+///
+/// Every merge leaves a `Merged` chip on the survivor so the count of
+/// underlying signals is still visible. Issues with no table key are untouched.
+pub fn reconcile(issues: Vec<Issue>) -> Vec<Issue> {
+    use std::collections::HashMap;
+    let mut out: Vec<Issue> = Vec::with_capacity(issues.len());
+    // (table, kind) -> index into `out` for advisor issues.
+    let mut advisor_slot: HashMap<(String, String), usize> = HashMap::new();
+    let mut heap_slot: HashMap<String, usize> = HashMap::new();
+    let mut deferred: Vec<Issue> = Vec::new();
+
+    // Pass 1: advisor recs (the DDL carriers) and heap findings anchor the
+    // merge; everything else is deferred so order of arrival cannot matter.
+    for issue in issues {
+        let table = table_key(&issue.affected_object);
+        if table.is_empty() {
+            out.push(issue);
+            continue;
+        }
+        if issue.source == "advisor" {
+            let key = (table, issue.kind.clone());
+            match advisor_slot.get(&key) {
+                Some(&i) => merge_into(&mut out[i], issue, "recommendations"),
+                None => {
+                    advisor_slot.insert(key, out.len());
+                    out.push(issue);
+                }
+            }
+            continue;
+        }
+        if static_rule(&issue) == Some("structure.heap_table") {
+            heap_slot.insert(table, out.len());
+            out.push(issue);
+            continue;
+        }
+        deferred.push(issue);
+    }
+
+    // Pass 2: fold the repeats into their anchors.
+    for issue in deferred {
+        let table = table_key(&issue.affected_object);
+        let target = match static_rule(&issue) {
+            Some("structure.no_primary_key") => heap_slot.get(&table).copied(),
+            Some("dmv.missing_index") => advisor_slot.get(&(table.clone(), "missing_index".into())).copied(),
+            Some("dmv.duplicate_or_overlapping_index") => {
+                advisor_slot.get(&(table.clone(), "duplicate_index".into())).copied()
+            }
+            Some("dmv.unused_index") => advisor_slot.get(&(table.clone(), "unused_index".into())).copied(),
+            _ => None,
+        };
+        match target {
+            Some(i) if static_rule(&issue) == Some("structure.no_primary_key") => {
+                let host = &mut out[i];
+                host.title = format!("{} It also has no primary key — one fix covers both.", host.title.trim_end());
+                host.consequence = host.title.clone();
+                host.rationale = format!("{}\n\nNo primary key: {}", host.rationale, issue.rationale);
+                host.metrics.push(Metric {
+                    label: "Merged".to_string(),
+                    value: "no primary key (same table, same fix)".to_string(),
+                    source: Some("rule:structure.no_primary_key".to_string()),
+                });
+                // Keep the worse severity / rank of the pair.
+                if severity_rank(&issue.severity) < severity_rank(&host.severity) {
+                    host.severity = issue.severity;
+                }
+                host.impact_rank = host.impact_rank.max(issue.impact_rank);
+            }
+            Some(i) => merge_into(&mut out[i], issue, "DMV findings"),
+            None => out.push(issue),
+        }
+    }
+    out
+}
+
+/// Fold `other` into `host` (same table, same decision): max rank, worse
+/// severity, concatenated fix SQL, and a running `Merged` chip.
+fn merge_into(host: &mut Issue, other: Issue, what: &str) {
+    host.impact_rank = host.impact_rank.max(other.impact_rank);
+    if severity_rank(&other.severity) < severity_rank(&host.severity) {
+        host.severity = other.severity.clone();
+    }
+    if let Some(sql) = other.fix_sql.as_deref().filter(|s| !s.trim().is_empty()) {
+        match host.fix_sql.as_mut() {
+            Some(existing) if !existing.contains(sql) => {
+                existing.push_str("\n\n");
+                existing.push_str(sql);
+            }
+            Some(_) => {}
+            None => host.fix_sql = Some(sql.to_string()),
+        }
+    }
+    if other.source == "advisor" && !host.rationale.contains(&other.rationale) {
+        host.rationale.push_str("\n\nAlso: ");
+        host.rationale.push_str(&other.rationale);
+    }
+    let label = "Merged".to_string();
+    match host.metrics.iter_mut().find(|m| m.label == label) {
+        Some(m) => {
+            // "N recommendations" / "N DMV findings" → bump the count.
+            let n: u32 = m.value.split(' ').next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            m.value = format!("{} {what}", n + 1);
+        }
+        None => host.metrics.push(Metric {
+            label,
+            value: format!("2 {what}"),
+            source: Some(format!("{}:{}", other.source, other.kind)),
+        }),
+    }
+    if other.source == "advisor" && host.kind == "duplicate_index" {
+        // Several redundant indexes on one table: say so in the headline.
+        let n = host.metrics.iter().find(|m| m.label == "Merged").and_then(|m| m.value.split(' ').next()?.parse::<u32>().ok()).unwrap_or(2);
+        host.title = format!("Drop {n} redundant indexes on {}", table_key(&host.affected_object));
+    }
+}
+
+// ===========================================================================
 // Scoring.
 // ===========================================================================
 
@@ -357,7 +519,30 @@ pub struct LaneScores {
 /// restarted instance whose DMV counters reset — absence of signal is not the
 /// same as health, so we report a provisional A/95 in "learning" mode for both
 /// lanes instead of a perfect 100.
+/// DMV counters younger than this cannot back a verdict: a server restarted
+/// minutes ago has empty usage / missing-index DMVs whatever its real state,
+/// so the report is `is_learning` until they have accumulated at least this
+/// long — regardless of how much sentinel history the store holds.
+pub const COUNTER_LEARNING_SECS: i64 = 6 * 3600;
+
 pub fn score_report(
+    issues: &[Issue],
+    signals: &SignalSummary,
+    monitoring_secs: Option<i64>,
+    counter_age_secs: Option<i64>,
+) -> LaneScores {
+    let mut scores = score_report_inner(issues, signals, monitoring_secs);
+    // Young DMV counters override a mature-looking monitor: the grade is
+    // provisional no matter what the store says, because the counters it is
+    // partly built from were reset at the restart.
+    if matches!(counter_age_secs, Some(a) if a < COUNTER_LEARNING_SECS) && !scores.is_learning {
+        scores.is_learning = true;
+        scores.status = "learning".to_string();
+    }
+    scores
+}
+
+fn score_report_inner(
     issues: &[Issue],
     signals: &SignalSummary,
     monitoring_secs: Option<i64>,
@@ -682,5 +867,155 @@ mod baseline_trend_tests {
         let just_outside = baseline_trend_from(&summary(window_from - Duration::seconds(1), 0.0), window_from);
         assert!(!just_inside.stale);
         assert!(just_outside.stale);
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+
+    fn issue(id: &str, source: &str, kind: &str, severity: &str, object: &str, rank: u32) -> Issue {
+        Issue {
+            id: id.into(),
+            source: source.into(),
+            kind: kind.into(),
+            severity: severity.into(),
+            lane: "opportunity".into(),
+            consequence: format!("{object} consequence"),
+            impact_rank: rank,
+            title: format!("{kind} on {object}"),
+            affected_object: object.into(),
+            rationale: format!("{id} rationale"),
+            fix_sql: if source == "advisor" { Some(format!("-- fix {id}")) } else { None },
+            fix_action: "review".into(),
+            metrics: vec![],
+            confidence: "observed".into(),
+        }
+    }
+
+    #[test]
+    fn table_key_normalises_brackets_case_and_index_suffix() {
+        assert_eq!(table_key("[dbo].[observations]"), "dbo.observations");
+        assert_eq!(table_key("dbo.Observations"), "dbo.observations");
+        assert_eq!(table_key("canonical.accounts.IX_accounts_tenant_id"), "canonical.accounts");
+        assert_eq!(table_key("server"), "server");
+        assert_eq!(table_key(""), "");
+    }
+
+    #[test]
+    fn heap_and_no_primary_key_on_one_table_become_one_issue() {
+        // The exact shape: action plan #2 and #3 were the same table, same fix,
+        // counted as two errors.
+        let out = reconcile(vec![
+            issue("static:finding:structure.no_primary_key:dbo.observations", "static", "finding", "error", "[dbo].[observations]", 7735),
+            issue("static:finding:structure.heap_table:dbo.observations", "static", "finding", "error", "[dbo].[observations]", 7735),
+            issue("static:finding:structure.heap_table:dbo.other", "static", "finding", "warning", "[dbo].[other]", 4000),
+        ]);
+        assert_eq!(out.len(), 2, "{:?}", out.iter().map(|i| &i.id).collect::<Vec<_>>());
+        let obs = out.iter().find(|i| i.id.contains("heap_table:dbo.observations")).unwrap();
+        assert!(obs.title.contains("also has no primary key"), "{}", obs.title);
+        assert!(obs.rationale.contains("No primary key:"));
+        assert_eq!(obs.metrics[0].label, "Merged");
+        assert_eq!(count_severities(&out).error, 1);
+        // A lone no-PK finding (table with a clustered index) is kept as-is.
+        let lone = reconcile(vec![issue("static:finding:structure.no_primary_key:dbo.x", "static", "finding", "warning", "[dbo].[x]", 1)]);
+        assert_eq!(lone.len(), 1);
+    }
+
+    #[test]
+    fn static_dmv_findings_fold_into_the_advisor_rec_that_carries_the_ddl() {
+        let out = reconcile(vec![
+            issue("static:finding:dmv.missing_index:obs-code-date", "static", "finding", "info", "[dbo].[observations]", 1735),
+            issue("advisor:missing_index:dbo.observations", "advisor", "missing_index", "warning", "dbo.observations", 1047),
+            issue("static:finding:dmv.duplicate_or_overlapping_index:hcps-a", "static", "finding", "info", "[canonical].[hcps]", 1370),
+            issue("static:finding:dmv.duplicate_or_overlapping_index:hcps-b", "static", "finding", "info", "[canonical].[hcps]", 1370),
+            issue("advisor:duplicate_index:canonical.hcps.IX_hcps_tenant_id", "advisor", "duplicate_index", "warning", "canonical.hcps.IX_hcps_tenant_id", 1800),
+            // overlap on a table WITHOUT an advisor rec stays visible
+            issue("static:finding:dmv.duplicate_or_overlapping_index:sales-a", "static", "finding", "info", "[canonical].[sales_data]", 1533),
+        ]);
+        let ids: Vec<&str> = out.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(out.len(), 3, "{ids:?}");
+        let mi = out.iter().find(|i| i.id == "advisor:missing_index:dbo.observations").unwrap();
+        assert_eq!(mi.impact_rank, 1735, "takes the max rank of the merged pair");
+        assert_eq!(mi.fix_sql.as_deref(), Some("-- fix advisor:missing_index:dbo.observations"), "DDL survives");
+        assert_eq!(mi.metrics.iter().find(|m| m.label == "Merged").unwrap().value, "2 DMV findings");
+        let dup = out.iter().find(|i| i.kind == "duplicate_index").unwrap();
+        assert_eq!(dup.metrics.iter().find(|m| m.label == "Merged").unwrap().value, "3 DMV findings");
+        assert!(ids.contains(&"static:finding:dmv.duplicate_or_overlapping_index:sales-a"));
+    }
+
+    #[test]
+    fn several_advisor_recs_of_one_kind_on_a_table_become_one_card_with_all_the_ddl() {
+        let out = reconcile(vec![
+            issue("advisor:duplicate_index:canonical.sales_data.IX_a", "advisor", "duplicate_index", "warning", "canonical.sales_data.IX_a", 1500),
+            issue("advisor:duplicate_index:canonical.sales_data.IX_b", "advisor", "duplicate_index", "info", "canonical.sales_data.IX_b", 0),
+            issue("advisor:missing_index:canonical.sales_data", "advisor", "missing_index", "warning", "canonical.sales_data", 900),
+        ]);
+        assert_eq!(out.len(), 2);
+        let dup = out.iter().find(|i| i.kind == "duplicate_index").unwrap();
+        assert_eq!(dup.title, "Drop 2 redundant indexes on canonical.sales_data");
+        assert_eq!(dup.impact_rank, 1500);
+        assert_eq!(dup.severity, "warning");
+        let sql = dup.fix_sql.as_deref().unwrap();
+        assert!(sql.contains("-- fix advisor:duplicate_index:canonical.sales_data.IX_a"));
+        assert!(sql.contains("-- fix advisor:duplicate_index:canonical.sales_data.IX_b"));
+    }
+
+    #[test]
+    fn server_scoped_and_operational_issues_pass_through_untouched() {
+        let input = vec![
+            issue("sentinel:deadlock:server", "sentinel", "deadlock", "error", "server", 1000),
+            issue("operational:integrity:checkdb", "operational", "integrity", "critical", "PharmaInsights", 9000),
+        ];
+        let out = reconcile(input.clone());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].id, "operational:integrity:checkdb");
+    }
+}
+
+#[cfg(test)]
+mod counter_age_learning_tests {
+    use super::*;
+
+    fn warning(id: &str) -> Issue {
+        Issue {
+            id: id.into(),
+            source: "advisor".into(),
+            kind: "missing_index".into(),
+            severity: "warning".into(),
+            lane: "opportunity".into(),
+            consequence: String::new(),
+            impact_rank: 1,
+            title: String::new(),
+            affected_object: "dbo.t".into(),
+            rationale: String::new(),
+            fix_sql: None,
+            fix_action: "review".into(),
+            metrics: vec![],
+            confidence: "observed".into(),
+        }
+    }
+
+    #[test]
+    fn counters_younger_than_six_hours_force_learning_despite_an_old_monitor() {
+        // The trap: sqlserver_start_time 3 minutes ago, sentinel.db 86 days old,
+        // is_learning = false.
+        let issues = vec![warning("a")];
+        let s = score_report(&issues, &SignalSummary::default(), Some(86 * 86_400), Some(179));
+        assert!(s.is_learning);
+        assert_eq!(s.status, "learning");
+        // The lane score still reflects the issues found — provisional, not blank.
+        assert_eq!(s.efficiency_score, 96);
+        let (_, _, status) = composite_headline(&s);
+        assert_eq!(status, "learning");
+    }
+
+    #[test]
+    fn mature_counters_do_not_change_the_verdict() {
+        let issues = vec![warning("a")];
+        let s = score_report(&issues, &SignalSummary::default(), Some(86 * 86_400), Some(COUNTER_LEARNING_SECS));
+        assert!(!s.is_learning);
+        let s = score_report(&issues, &SignalSummary::default(), Some(86 * 86_400), None);
+        assert!(!s.is_learning, "unknown age makes no claim");
     }
 }

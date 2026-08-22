@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT TOP (500) ... ORDER BY ..." StatementId="1" StatementType="SELECT">
+      <QueryPlan DegreeOfParallelism="1" MemoryGrant="1536" CachedPlanSize="24">
+        <MemoryGrantInfo SerialRequiredMemory="512" SerialDesiredMemory="1536" RequestedMemory="1536" GrantedMemory="1536" MaxUsedMemory="1400" />
+        <RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="TopN Sort" EstimateRows="500" EstimatedTotalSubtreeCost="0.9">
+          <TopSort Distinct="false" Rows="500">
+            <OrderBy><OrderByColumn Ascending="false"><ColumnReference Schema="[dbo]" Table="[Orders]" Column="OrderDate" /></OrderByColumn></OrderBy>
+            <RelOp NodeId="1" PhysicalOp="Hash Match" LogicalOp="Inner Join" EstimateRows="500" EstimatedTotalSubtreeCost="0.7">
+              <Hash>
+                <RelOp NodeId="2" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="500" EstimatedTotalSubtreeCost="0.2">
+                  <IndexScan Ordered="true"><Object Schema="[dbo]" Table="[Orders]" Index="[IX_Orders_CustomerId]" /><SeekPredicates /></IndexScan>
+                </RelOp>
+                <RelOp NodeId="3" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="500" EstimatedTotalSubtreeCost="0.2">
+                  <IndexScan Ordered="true"><Object Schema="[dbo]" Table="[OrderLines]" Index="[IX_OrderLines_OrderId]" /><SeekPredicates /></IndexScan>
+                </RelOp>
+              </Hash>
+            </RelOp>
+          </TopSort>
+        </RelOp>
+      </QueryPlan>
+    </StmtSimple>
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>

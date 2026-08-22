@@ -21,6 +21,16 @@ irm https://dbopt.org/install.ps1 | iex
 
 Or download an installer from the [releases page](https://github.com/singhpratech/dbopt/releases) — `.msi`/`.zip` (Windows), `.dmg` (macOS), `.tar.gz` (glibc or static musl, Linux). Each is **one self-contained binary** with the web UI embedded — nothing else to install.
 
+Every archive and the `.msi` install the same three commands, under the same names on every platform:
+
+| Command | What it is |
+|---|---|
+| `dbopt` | the CLI / linter — `dbopt lint ./db`, `dbopt query.sql`; offline, no connection |
+| `dbopt-backend` | the app — API + web UI on <http://127.0.0.1:3690> |
+| `dbopt-sentinel` | the standalone poller (the app can also start it for you) |
+
+**Windows `.msi`:** installs all three to `C:\Program Files\dbopt\bin\` and adds that folder to `PATH`; the Start-menu entry and the Add/Remove Programs icon open the app (`dbopt-backend.exe`). *Renamed in 0.4.2:* earlier MSIs installed the app **as** `dbopt.exe` and shipped no linter at all, so `dbopt lint` started the web server. If you used to type `dbopt` in a prompt to open the app, type `dbopt-backend` now — `dbopt` is the linter, exactly as on Linux and macOS. The `.dmg` and the Linux AppImage are app launchers only; take the `.tar.gz`/`.zip` for the command-line tools on those platforms.
+
 ## 2. Run the observatory
 
 ```bash
@@ -88,9 +98,14 @@ dbopt lint ./db --format sarif > dbopt.sarif     # SARIF 2.1.0 → GitHub code s
 dbopt lint ./db --fail-on warning                # exit 1 on any finding ≥ warning (gates a PR)
 ```
 
-`dbopt lint` recursively discovers `.sql` files, applies all 103 rules, and exits **0** clean /
+`dbopt lint` recursively discovers `.sql` files, applies all 104 rules, and exits **0** clean /
 **1** findings at-or-above `--fail-on` (default `error`) / **2** usage error. See the **Lint in CI**
 section of the [README](../README.md) for a copy-paste GitHub Actions snippet.
+
+**File encodings.** Files are decoded per file as UTF-8 (with or without BOM) or UTF-16 (either byte
+order, with or without BOM — SSMS's historical default). Anything else is read with the Windows-1252
+table (SSMS "ANSI"), still linted, and flagged with an `info`-level `lint.encoding` finding naming the
+file — one legacy file never aborts the run. Only a file that cannot be *read* (permissions, I/O) exits 2.
 
 ## 6. On-demand pulse poller (sentinel)
 
@@ -123,7 +138,7 @@ The backend can also start/stop the sentinel from the **Watch** workspace and wi
 | `DBOPT_DATA_DIR` | where `sentinel.db` + config live | `~/.dbopt` |
 | `DBOPT_NO_OPEN` | `1` to not auto-open the browser | — |
 
-Storage and config live under **`~/.dbopt/`**. (Upgrading from the old `sqlopt` build? Your settings and monitoring data migrate automatically on first run.)
+Storage and config live under **`~/.dbopt/`** (`sentinel.db`, `sentinel-config.json`). **Upgrading from the old `sqlopt` build?** Nothing is copied or moved: if `~/.dbopt` does not exist yet but the pre-rename `~/.sqlopt` does, dbopt keeps reading and writing `~/.sqlopt` so your history survives, and logs one line at startup saying so. **Watch ▸ REPORT** and `GET /api/sentinel/status` show the path actually in use. To move to the new name, stop dbopt and rename the folder: `mv ~/.sqlopt ~/.dbopt`. The 0600 password file and the SQLite telemetry are wherever that status line says — back up, secure or purge *that* directory.
 
 ## 8. Data handling
 

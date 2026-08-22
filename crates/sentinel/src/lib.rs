@@ -18,6 +18,7 @@ pub mod alerts;
 pub mod conn;
 pub mod notify;
 pub mod poll;
+pub mod probes;
 pub mod report;
 pub mod scheduler;
 pub mod storage;
@@ -123,7 +124,23 @@ impl SentinelConfig {
         // pre-rebrand ~/.sqlopt does, keep using it so existing monitoring data
         // and the autostart config survive the rename.
         let legacy = base.join(".sqlopt");
-        let dir = if !current.exists() && legacy.exists() { legacy } else { current };
+        let dir = if !current.exists() && legacy.exists() {
+            // Logged once per process: default_db_path() is called from several
+            // request handlers, and a DBA deciding what to back up or purge
+            // must be able to find this line, not 400 copies of it.
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                tracing::info!(
+                    target: "sentinel",
+                    "data dir: using legacy {} because {} does not exist (nothing moved; rename the folder to switch)",
+                    legacy.display(),
+                    current.display()
+                );
+            });
+            legacy
+        } else {
+            current
+        };
         dir.join("sentinel.db")
     }
 }

@@ -9,12 +9,23 @@
 //!   the file is silently analyzed as garbage — reported as clean.
 //! * **UTF-8 BOM.** Valid UTF-8, but the 3 BOM bytes shift every column on
 //!   line 1 by +3 unless they are stripped before analysis.
+//! * **Windows-1252 / Latin-1.** The default "ANSI" encoding of older SSMS,
+//!   Management Studio's "Save As… Codepage 1252", and most pre-2015 migration
+//!   scripts containing an accented name or a smart quote in a comment. Not
+//!   valid UTF-8, so a naive read errors — and one such file used to exit the
+//!   whole `dbopt lint` run with code 2. It is now decoded as Windows-1252 and
+//!   flagged with a `lint.encoding` finding instead of aborting everything.
 
 /// A source document that is ready to analyze.
 pub struct Source {
     pub text: String,
     /// Set when the bytes were not plain UTF-8, for transparency in output.
     pub encoding_note: Option<&'static str>,
+    /// True when the decode was a *guess* (Windows-1252 fallback) rather than a
+    /// declared encoding. The linter turns this into a `lint.encoding` finding
+    /// so the file is analyzed — never aborting the run — but the reader is told
+    /// the text may differ from what the author saved.
+    pub lossy: bool,
 }
 
 /// Decode a file's bytes into T-SQL text, tolerating the encodings SQL Server
@@ -25,12 +36,14 @@ pub fn decode(bytes: &[u8]) -> Result<Source, String> {
         return utf16(&bytes[2..], false).map(|text| Source {
             text,
             encoding_note: Some("decoded as UTF-16 LE"),
+            lossy: false,
         });
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
         return utf16(&bytes[2..], true).map(|text| Source {
             text,
             encoding_note: Some("decoded as UTF-16 BE"),
+            lossy: false,
         });
     }
     // UTF-8 with BOM: strip it so line-1 columns are not shifted by 3.
@@ -39,6 +52,7 @@ pub fn decode(bytes: &[u8]) -> Result<Source, String> {
             .map(|text| Source {
                 text,
                 encoding_note: None,
+                lossy: false,
             })
             .map_err(|e| e.to_string());
     }
@@ -52,14 +66,45 @@ pub fn decode(bytes: &[u8]) -> Result<Source, String> {
             } else {
                 "decoded as UTF-16 LE (no BOM)"
             }),
+            lossy: false,
         });
     }
-    String::from_utf8(bytes.to_vec())
-        .map(|text| Source {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => Ok(Source {
             text,
             encoding_note: None,
+            lossy: false,
+        }),
+        // Not UTF-8 and not UTF-16: the overwhelmingly common remaining case
+        // for a .sql file is Windows-1252 (SSMS "ANSI"). Every byte maps to a
+        // character in that table, so this cannot fail — the file is analyzed
+        // and the guess is disclosed, instead of one file sinking the run.
+        Err(_) => Ok(Source {
+            text: windows_1252(bytes),
+            encoding_note: Some("not valid UTF-8 — decoded as Windows-1252"),
+            lossy: true,
+        }),
+    }
+}
+
+/// Decode bytes as Windows-1252. Bytes 0x80–0x9F are the code page's own
+/// printable characters (smart quotes, €, …), the rest is identical to
+/// Latin-1. The five bytes that cp1252 leaves undefined decode as the C1
+/// control characters (the Latin-1 reading), like every browser does.
+pub fn windows_1252(bytes: &[u8]) -> String {
+    const HIGH: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+        '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{8D}', '\u{017D}', '\u{8F}',
+        '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+        '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{9D}', '\u{017E}', '\u{0178}',
+    ];
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => HIGH[(b - 0x80) as usize],
+            _ => b as char,
         })
-        .map_err(|e| e.to_string())
+        .collect()
 }
 
 fn utf16(bytes: &[u8], big_endian: bool) -> Result<String, String> {
@@ -255,6 +300,31 @@ mod tests {
         let src = decode(b"SELECT 1; -- caf\xc3\xa9").unwrap();
         assert!(src.text.contains("café"));
         assert!(src.encoding_note.is_none());
+    }
+
+    #[test]
+    fn windows_1252_bytes_decode_instead_of_failing_the_run() {
+        // SSMS "ANSI" save: é is a single 0xE9 byte, the smart quotes are
+        // 0x93/0x94. Invalid UTF-8, previously `Err` -> exit 2 for the whole run.
+        let raw = b"-- caf\xe9 \x93quoted\x94 \x80\nSELECT * FROM dbo.Orders WHERE Name = 'caf\xe9';\n";
+        let src = decode(raw).expect("cp1252 must decode, never abort");
+        assert_eq!(
+            src.text,
+            "-- café \u{201C}quoted\u{201D} \u{20AC}\nSELECT * FROM dbo.Orders WHERE Name = 'café';\n"
+        );
+        assert!(src.lossy);
+        assert!(src.encoding_note.unwrap().contains("Windows-1252"));
+        assert!(looks_like_sql(&src.text));
+    }
+
+    #[test]
+    fn windows_1252_table_covers_every_byte() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        let text = windows_1252(&all);
+        assert_eq!(text.chars().count(), 256);
+        assert_eq!(text.chars().nth(0x41), Some('A'));
+        assert_eq!(text.chars().nth(0xE9), Some('é'));
+        assert_eq!(text.chars().nth(0x80), Some('\u{20AC}'));
     }
 
     #[test]

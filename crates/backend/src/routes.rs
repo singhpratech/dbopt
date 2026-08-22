@@ -243,7 +243,10 @@ async fn databases(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
 /// recommendations (the advisor) plus the bundle's findings/charts in one call.
 async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
     match sqlserver::pull_dmv_bundle(&req).await {
-        Ok(bundle) => {
+        Ok(mut bundle) => {
+            // Monitor read-back: how persistently the missing-index DMV has
+            // suggested each table across daily snapshots (empty if unmonitored).
+            sentinel_api::attach_missing_index_history(&mut bundle, &req);
             let recommendations = analyzer_core::dmv::advise(&bundle);
             let advice = analyzer_core::dmv::analyze(&bundle);
             // Honest transparency: how many tables the live Query-Store workload
@@ -262,6 +265,15 @@ async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
                     "workload_window_hours": workload_window_hours,
                     "scanned_database": bundle.scanned_database,
                     "scope_warning": scope_warning(&bundle),
+                    // Lifetime of every usage counter behind the recs: the
+                    // instance's last start (RFC 3339 UTC) and seconds since.
+                    // `null` when the server would not tell us.
+                    "counters_since": bundle.counters_since,
+                    "counter_age_secs": bundle.counter_age_secs,
+                    // Per-table "seen on N of M days" from the monitor's daily
+                    // missing-index snapshots (`[]` when unmonitored).
+                    "missing_index_history": bundle.missing_index_history,
+                    "missing_index_history_days": sentinel_api::MISSING_INDEX_HISTORY_DAYS,
                 })),
             )
                 .into_response()

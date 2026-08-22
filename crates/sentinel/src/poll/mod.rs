@@ -14,6 +14,7 @@ pub mod index_usage;
 pub mod io_latency;
 pub mod live;
 pub mod memory_headroom;
+pub mod missing_index;
 pub mod plan_cache;
 pub mod query_store;
 pub mod sizes;

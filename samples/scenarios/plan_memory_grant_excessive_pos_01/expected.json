@@ -1,0 +1,6 @@
+{
+  "must_fire": ["plan.memory_grant_excessive"],
+  "must_not_fire": ["plan.memory_grant_large", "plan.sort_large", "plan.estimate_actual_skew"],
+  "server_version": 2025,
+  "category": "plan"
+}

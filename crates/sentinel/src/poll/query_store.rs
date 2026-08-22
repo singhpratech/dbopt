@@ -24,9 +24,9 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
     // just an opaque id. NOTE: MAX() rejects nvarchar(max), so we LEFT-truncate
     // and CAST to a bounded NVARCHAR *before* aggregating (also what tiberius
     // needs to read it as a string — reading a MAX type silently yields NULL).
-    // The NOT LIKE filters drop the sentinel's own polling queries so the feed
-    // shows the user's workload, not our DMV scans.
-    const SQL: &str = r#"
+    // `probes::not_own_probe_sql` drops dbopt's own polling queries (by tag and
+    // by the DMV names they reference) so the feed shows the user's workload.
+    let sql = format!(r#"
         SELECT TOP (50)
             q.query_id,
             p.plan_id,
@@ -42,27 +42,12 @@ pub async fn poll_query_store(conn_info: &ConnectionInfo, storage: &Storage) -> 
         JOIN sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
         JOIN sys.query_store_runtime_stats_interval AS i ON i.runtime_stats_interval_id = rs.runtime_stats_interval_id
         WHERE i.end_time >= DATEADD(hour, -1, SYSUTCDATETIME())
-          AND qt.query_sql_text NOT LIKE '%dm_exec_requests%'
-          AND qt.query_sql_text NOT LIKE '%query_store_runtime_stats%'
-          AND qt.query_sql_text NOT LIKE '%dm_os_wait_stats%'
-          AND qt.query_sql_text NOT LIKE '%dm_db_index_usage_stats%'
-          AND qt.query_sql_text NOT LIKE '%dm_db_partition_stats%'
-          AND qt.query_sql_text NOT LIKE '%xml_deadlock_report%'
-          AND qt.query_sql_text NOT LIKE '%dm_xe_session_targets%'
-          AND qt.query_sql_text NOT LIKE '%dm_xe_sessions%'
-          -- dbopt's own live-monitor / query-store / capabilities probes: keep
-          -- the report showing the USER's workload, not our own polling.
-          AND qt.query_sql_text NOT LIKE '%dm_os_ring_buffers%'
-          AND qt.query_sql_text NOT LIKE '%dm_os_performance_counters%'
-          AND qt.query_sql_text NOT LIKE '%dm_io_virtual_file_stats%'
-          AND qt.query_sql_text NOT LIKE '%dm_os_waiting_tasks%'
-          AND qt.query_sql_text NOT LIKE '%database_query_store_options%'
-          AND qt.query_sql_text NOT LIKE '%HAS_PERMS_BY_NAME%'
+          AND {probe_filter}
         GROUP BY q.query_id, p.plan_id
         ORDER BY total_duration_ms DESC;
-    "#;
+    "#, probe_filter = crate::probes::not_own_probe_sql("qt.query_sql_text"));
 
-    let stream = match client.simple_query(SQL).await {
+    let stream = match client.simple_query(crate::probes::tag(&sql)).await {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("{e}");

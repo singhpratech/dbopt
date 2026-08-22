@@ -29,7 +29,10 @@ pub struct SqlServerHealthProvider;
 impl HealthProvider for SqlServerHealthProvider {
     async fn scan(&self, req: &ConnectReq) -> anyhow::Result<HealthReport> {
         // a. Pull the live DMV bundle (network — may fail → caller maps to 502).
-        let bundle = ss::pull_dmv_bundle(req).await?;
+        let mut bundle = ss::pull_dmv_bundle(req).await?;
+        // Monitor read-back: how persistently the missing-index DMV has
+        // suggested each table across daily snapshots (empty if unmonitored).
+        sentinel_api::attach_missing_index_history(&mut bundle, req);
 
         // b + c. Advisor recs + static findings off the same bundle.
         let recs = dmv::advise(&bundle);
@@ -340,8 +343,9 @@ impl HealthProvider for SqlServerHealthProvider {
             }
         }
 
-        // f. Dedup by id (advisor > sentinel > static, keep max impact_rank).
-        let mut issues = dedup(issues);
+        // f. Dedup by id (advisor > sentinel > static, keep max impact_rank),
+        //    then reconcile per table so the same decision is one card.
+        let mut issues = super::reconcile(dedup(issues));
 
         // g. Sort by severity then impact_rank desc.
         rank(&mut issues);
@@ -382,7 +386,10 @@ impl HealthProvider for SqlServerHealthProvider {
         } else {
             None
         };
-        let scores = score_report(&issues, &signals, monitoring_secs);
+        //    DMV counter age (since the instance's last start) forces
+        //    "learning" under 6 h whatever the store says: the usage and
+        //    missing-index signals above were all measured since that restart.
+        let scores = score_report(&issues, &signals, monitoring_secs, bundle.counter_age_secs);
         // The top-level headline is the WORST of all three lanes (see HealthReport::score).
         let (headline_score, headline_grade, headline_status) = composite_headline(&scores);
         let counts = count_severities(&issues);
@@ -418,6 +425,8 @@ impl HealthProvider for SqlServerHealthProvider {
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
             last_capture_secs,
+            counter_age_secs: bundle.counter_age_secs,
+            counters_since: bundle.counters_since.clone(),
             baseline_trend,
             counts,
             issues,
@@ -572,11 +581,23 @@ fn advisor_metric_source(kind: RecKind, label: &str) -> Option<String> {
 /// is not comparable across kinds, so we normalize per the spec:
 ///   - CreateIndex: round(impact_score)
 ///   - DropIndex:   user_updates (== impact_score for drop recs)
-///   - MergeIndex:  fixed 5000
+///   - MergeIndex:  size-weighted from reclaimed KB (0 for an empty index)
 ///   - Columnstore: derived from reserved bytes (impact_score) → high
 fn impact_rank_for(rec: &Recommendation) -> u32 {
     match rec.kind {
-        RecKind::MergeIndex => 5000,
+        // Size-weighted: `impact_score` is the KB the drop reclaims. A
+        // redundant index on an EMPTY table ranks 0 — it must never sit above
+        // anything with measured cost — and the rest scale logarithmically
+        // from 1 MB (1000) to 1 TB (5000) so a 20 MB drop beats a 2 MB one.
+        RecKind::MergeIndex => {
+            let kb = rec.impact_score.max(0.0);
+            if kb < 1.0 {
+                0
+            } else {
+                let mb = (kb / 1024.0).max(1.0);
+                (1000.0 + (mb.log10() / 6.0).clamp(0.0, 1.0) * 4000.0).round() as u32
+            }
+        }
         RecKind::CreateIndex | RecKind::DropIndex | RecKind::ColumnstoreCandidate => {
             let v = rec.impact_score.round();
             if v.is_nan() || v < 0.0 {

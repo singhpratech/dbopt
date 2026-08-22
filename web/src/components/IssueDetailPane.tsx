@@ -302,13 +302,14 @@ function RemediationView({
           line. Purely informational; renders only when there's DDL to preview. */}
       {rem.fix_sql && <PreflightPreview rem={rem} issue={issue} />}
 
-      <Section title="Apply safely" tone="apply">
+      <Section title="Before you run it" tone="apply">
         <Checklist items={rem.apply_safely} />
-        {/* Honest about the safety boundary (playbook §7): copy-and-run means
-            the user owns the monitoring; there is no auto-validate/revert net. */}
+        {/* Honest about the boundary (playbook §7): dbopt previews DDL — you copy
+            it into your own SQL client and run it. There is no apply button, no
+            auto-validate and no auto-revert, so you own monitoring the change. */}
         <p className="issue-detail-caveat">
-          You run these yourself. dbopt ships the script + validation steps — it does NOT auto-apply
-          or auto-revert in v1, so you own monitoring the change.
+          dbopt previews DDL; it never runs it. Copy the script into your own SQL client, run it
+          yourself, then use the validation and rollback steps below.
         </p>
       </Section>
 
@@ -1031,29 +1032,196 @@ export function buildTemplateRemediation(iss: Issue): Remediation {
 
     case "finding":
     default:
-      return {
-        ...base,
-        diagnosis:
-          (iss.rationale ? iss.rationale + " " : "") +
-          `Rule: ${obj}.`,
-        solution_steps: [
-          {
-            title: "Review the rule context.",
-            detail:
-              "Apply the recommended schema/config change only if it applies to your workload.",
-          },
-        ],
-        fix_sql: iss.fix_sql,
-        apply_safely: [
-          "Advisory / design finding — generally low risk.",
-          "Confirm it applies before changing schema.",
-        ],
-        validate: ["Re-run analysis; the finding should not re-appear if remediated."],
-        rollback: ["Revert the schema / config change."],
-        impact:
-          "Improves schema health / maintainability; rarely an immediate perf win. Confidence: low.",
-      };
+      return buildFindingRemediation(iss, base);
   }
+}
+
+/**
+ * Static / structural findings arrive with `fix_sql: None` from the backend
+ * (the rule knows the OBJECT, not the key columns), so the pane used to end in
+ * templated boilerplate with no T-SQL at all — on the two most important
+ * structural findings of a database. Build the concrete DDL here from the
+ * object name, with an unmistakable placeholder where a human must choose the
+ * key, and keep the severity language consistent with the badge above.
+ */
+function buildFindingRemediation(
+  iss: Issue,
+  base: Pick<Remediation, "issue_id" | "issue_kind">,
+): Remediation {
+  const rule = staticRuleId(iss);
+  const obj = iss.affected_object;
+  const q = qualify(obj);
+  const sevWord =
+    iss.severity === "critical" ? "Critical" : iss.severity === "error" ? "High-impact" : iss.severity === "warning" ? "Worth fixing" : "Advisory";
+  // Any T-SQL the rule's own recommendation already carries (e.g. the
+  // operational checks) is the primary fix; never leave a pane without DDL when
+  // the text has it.
+  const inlineSql = !iss.fix_sql && iss.rationale ? extractSql(stripBackticks(iss.rationale))?.sql : undefined;
+
+  if (rule === "structure.heap_table" || rule === "structure.no_primary_key") {
+    const heap = rule === "structure.heap_table";
+    const pk = `PK_${q.table}`;
+    const fix =
+      `-- ${obj}: ${heap ? "add a clustered index (make it the primary key unless you have a reason not to)" : "add a primary key (clustered, unless a different clustering key is deliberate)"}.
+` +
+      `-- CHOOSE THE KEY: replace the placeholder with the column(s) that uniquely identify a row.
+` +
+      `-- A narrow, static, ever-increasing column (e.g. an INT/BIGINT IDENTITY) is the usual best choice.
+` +
+      `ALTER TABLE ${q.full}
+` +
+      `  ADD CONSTRAINT [${pk}] PRIMARY KEY CLUSTERED (/* <key column(s)> */);
+` +
+      (heap
+        ? `
+-- No unique column? Give the table a clustered index without a PK instead:
+` +
+          `-- CREATE CLUSTERED INDEX [CIX_${q.table}] ON ${q.full} (/* <key column(s)> */);
+`
+        : "");
+    return {
+      ...base,
+      diagnosis:
+        (iss.rationale ? iss.rationale + " " : "") +
+        (heap
+          ? `${obj} has no clustered index, so rows have no physical order: range scans read the whole heap, and updates that grow a row leave forward pointers that cost an extra read each.`
+          : `${obj} has no primary key, so nothing guarantees a row is unique or addressable — replication, change tracking and most ORMs need one.`),
+      solution_steps: [
+        {
+          title: "Find the key: which column(s) uniquely identify a row?",
+          detail: "Check for an existing unique index or an identity column first. If nothing is unique, a surrogate IDENTITY column is the standard answer.",
+          sql:
+            `SELECT c.name, t.name AS type_name, c.is_identity
+` +
+            `FROM sys.columns c JOIN sys.types t ON t.user_type_id = c.user_type_id
+` +
+            `WHERE c.object_id = OBJECT_ID('${obj}') ORDER BY c.column_id;
+` +
+            `-- and any unique indexes already present:
+` +
+            `SELECT name, is_unique, type_desc FROM sys.indexes WHERE object_id = OBJECT_ID('${obj}');`,
+        },
+        {
+          title: "Fill in the key and run the ALTER TABLE below in your SQL client.",
+          detail: `Building the clustered index rewrites every row of ${obj}${sizeNote(iss)} — run it in a maintenance window. ONLINE = ON (Enterprise/Developer) lets reads continue.`,
+        },
+        { title: "Re-scan HEALTH to confirm the finding is gone." },
+      ],
+      fix_sql: fix,
+      apply_safely: [
+        "Replace the <key column(s)> placeholder — the statement is deliberately incomplete until you do.",
+        "Confirm the chosen column(s) contain no duplicates: SELECT <key>, COUNT(*) FROM " + obj + " GROUP BY <key> HAVING COUNT(*) > 1 — expect no rows.",
+        "Back up (or confirm a recent backup); the build rewrites the table and needs roughly the table's size in free space plus sort space in tempdb.",
+        "Prefer WITH (ONLINE = ON) on Enterprise/Developer; otherwise schedule a window.",
+        "If the table is replicated or in an availability group, check the extra logging the build will generate.",
+      ],
+      validate: [
+        `SELECT type_desc FROM sys.indexes WHERE object_id = OBJECT_ID('${obj}') -- expect CLUSTERED, no HEAP row`,
+        "Re-run the HEALTH scan; this finding should no longer appear.",
+      ],
+      rollback: [
+        `ALTER TABLE ${q.full} DROP CONSTRAINT [${pk}]; -- returns the table to a heap (rewrites it again)`,
+      ],
+      impact:
+        `${sevWord}: the table ${heap ? "gains an ordered physical layout — range reads and point lookups stop scanning the whole heap, and forward-pointer reads disappear" : "gains a guaranteed row identity (and a clustered layout if you accept the default)"}. The one-time cost is the index build on ${obj}${sizeNote(iss)}. Confidence: observed — the missing structure is read straight from the catalog.`,
+    };
+  }
+
+  if (rule === "structure.wide_clustered_key") {
+    return {
+      ...base,
+      diagnosis:
+        (iss.rationale ? iss.rationale + " " : "") +
+        `Every nonclustered index on ${obj} stores the full clustered key in every row, so a wide key inflates all of them and every lookup.`,
+      solution_steps: [
+        { title: "Add a narrow surrogate key column (INT/BIGINT IDENTITY) if the table has none." },
+        {
+          title: "Move the clustered index onto the surrogate; keep the natural key as a UNIQUE constraint.",
+          detail: "This rebuilds every nonclustered index on the table — plan a maintenance window.",
+        },
+      ],
+      fix_sql:
+        `-- ${obj}: narrow the clustered key. Fill in the surrogate column name first.
+` +
+        `ALTER TABLE ${q.full} ADD [${q.table}Id] BIGINT IDENTITY(1,1) NOT NULL;
+` +
+        `-- 1) drop the existing PK (capture its definition first — see the catalog query above)
+` +
+        `-- ALTER TABLE ${q.full} DROP CONSTRAINT [<current PK name>];
+` +
+        `-- 2) re-add the natural key as UNIQUE (nonclustered) and cluster on the surrogate
+` +
+        `-- ALTER TABLE ${q.full} ADD CONSTRAINT [UQ_${q.table}_natural] UNIQUE NONCLUSTERED (/* <natural key columns> */);
+` +
+        `-- ALTER TABLE ${q.full} ADD CONSTRAINT [PK_${q.table}] PRIMARY KEY CLUSTERED ([${q.table}Id]);
+`,
+      apply_safely: [
+        "Script the current primary key and every nonclustered index before touching anything.",
+        "Foreign keys that reference the wide key must be re-pointed or kept on the UNIQUE constraint.",
+        "Back up; the change rebuilds all indexes on the table.",
+      ],
+      validate: [
+        `SELECT i.name, COUNT(ic.column_id) AS key_cols FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0 WHERE i.object_id = OBJECT_ID('${obj}') AND i.type = 1 GROUP BY i.name -- expect 1`,
+      ],
+      rollback: ["Re-create the original PRIMARY KEY CLUSTERED from the scripted definition and drop the surrogate column."],
+      impact:
+        "Smaller nonclustered indexes and cheaper key lookups across the table; no change to query semantics. Confidence: observed — key width is read from the catalog.",
+    };
+  }
+
+  // Generic static / operational finding. Severity-aware language; the rule's
+  // own recommendation is the solution step, and any T-SQL it carries is the fix.
+  return {
+    ...base,
+    diagnosis: (iss.rationale ? iss.rationale + " " : "") + `Rule: ${rule ?? obj}.`,
+    solution_steps: [
+      {
+        title: iss.rationale ? "Apply the rule's recommendation (above) where it fits your workload." : "Review the rule context.",
+        detail:
+          iss.severity === "critical" || iss.severity === "error"
+            ? "Flagged as " + iss.severity + " — treat it as a priority, not a style note."
+            : "Advisory: confirm it applies before changing schema or configuration.",
+      },
+    ],
+    fix_sql: iss.fix_sql ?? inlineSql,
+    apply_safely:
+      iss.severity === "critical" || iss.severity === "error"
+        ? ["Read the consequence line at the top of this pane: that is what the rule observed.", "Test the change on a non-production copy first if it alters schema or configuration."]
+        : ["Advisory / design finding — generally low risk.", "Confirm it applies before changing schema."],
+    validate: ["Re-run the HEALTH scan; the finding should not re-appear if remediated."],
+    rollback: ["Revert the schema / configuration change."],
+    impact:
+      iss.severity === "critical"
+        ? "Critical: this is an active risk to recoverability or correctness, not a tuning opportunity. Confidence: observed — the condition was read from the server."
+        : iss.severity === "error"
+        ? "High-impact: expect a measurable effect on the affected workload once fixed. Confidence: observed — the condition was read from the server."
+        : "Improves schema health / maintainability; rarely an immediate perf win. Confidence: heuristic.",
+  };
+}
+
+/** `static:finding:<rule.id>:<obj>` → the rule id; null for non-static issues. */
+function staticRuleId(iss: Issue): string | null {
+  const m = iss.id.match(/^static:finding:([a-z0-9_.]+):/i);
+  return m ? m[1] : null;
+}
+
+/** "schema.table" → bracket-quoted parts (tolerates a bare table name). */
+function qualify(obj: string): { schema: string; table: string; full: string } {
+  const clean = obj.replace(/[\[\]]/g, "");
+  const parts = clean.split(".");
+  const table = parts[parts.length - 1] || clean;
+  const schema = parts.length > 1 ? parts[parts.length - 2] : "dbo";
+  return { schema, table, full: `[${schema}].[${table}]` };
+}
+
+function stripBackticks(s: string): string {
+  return s.replace(/`/g, "");
+}
+
+/** " (4,157,358 rows)" when the backend measured the table; "" otherwise. */
+function sizeNote(iss: Issue): string {
+  const m = iss.title.match(/(\d[\d,]*)\s+rows/);
+  return m ? ` (${Number(m[1].replace(/,/g, "")).toLocaleString()} rows)` : "";
 }
 
 /* ── small pure helpers (local; mirror HealthOverview's where shared) ── */

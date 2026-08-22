@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT ..." StatementId="1" StatementType="SELECT">
+      <QueryPlan DegreeOfParallelism="1" MemoryGrant="8192" CachedPlanSize="32">
+        <Warnings>
+          <MemoryGrantWarning GrantWarningKind="Excessive Grant" RequestedMemory="8192" GrantedMemory="8192" MaxUsedMemory="256" />
+        </Warnings>
+        <MemoryGrantInfo SerialRequiredMemory="512" SerialDesiredMemory="8192" RequestedMemory="8192" GrantedMemory="8192" MaxUsedMemory="256" />
+        <RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="Sort" EstimateRows="100" EstimatedTotalSubtreeCost="0.5">
+          <Sort Distinct="false">
+            <OrderBy><OrderByColumn Ascending="true"><ColumnReference Schema="[dbo]" Table="[Orders]" Column="OrderDate" /></OrderByColumn></OrderBy>
+            <RelOp NodeId="1" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="100" EstimatedTotalSubtreeCost="0.1">
+              <IndexScan Ordered="true"><Object Schema="[dbo]" Table="[Orders]" Index="[IX_Orders_CustomerId]" /><SeekPredicates /></IndexScan>
+            </RelOp>
+          </Sort>
+        </RelOp>
+      </QueryPlan>
+    </StmtSimple>
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>

@@ -6,7 +6,7 @@ import { FindingsList } from "./components/FindingsList";
 import { PlanTreemap } from "./components/PlanTreemap";
 import { IndexHeatmap } from "./components/IndexHeatmap";
 import { SizeTreemap } from "./components/SizeTreemap";
-import { SeverityBar } from "./components/SeverityBar";
+import { SeverityBreakdown } from "./components/SeverityBreakdown";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ProvidersPanel } from "./components/ProvidersPanel";
 import { LlmChat } from "./components/LlmChat";
@@ -70,7 +70,7 @@ const WORKSPACES: { key: Workspace; glyph: string; label: string; group: NavGrou
   { key: "plan",       glyph: "◫", label: "PLAN",    group: "INSPECT" },
   { key: "indexes",    glyph: "◰", label: "INDEX",   group: "INSPECT", dba: true },
   { key: "sizes",      glyph: "◧", label: "SIZE",    group: "INSPECT", dba: true },
-  { key: "severity",   glyph: "≡", label: "Severity", group: "INSPECT" },
+  { key: "severity",   glyph: "≡", label: "SEVERITY", group: "INSPECT" },
   // SETUP — configuration that's set once and left alone.
   { key: "ai",         glyph: "↪", label: "AI",      group: "SETUP" },
   { key: "settings",   glyph: "⚙", label: "Config",   group: "SETUP" },
@@ -293,10 +293,16 @@ export function App() {
   }, [providers]);
 
   useEffect(() => {
-    backend.backendHealthy().then(setBackendOk);
+    let live = true;
+    const probe = () => backend.backendHealthy().then((ok) => { if (live) setBackendOk(ok); });
+    void probe();
+    // Re-probe on a slow heartbeat so the server-side controls (CHECK SYNTAX /
+    // plans) re-enable themselves once dbopt-backend comes up, without a reload.
+    const beat = setInterval(probe, 15000);
     // Backfill durable logs from SQLite into the in-memory caches.
     void ailog.hydrate();
     void runlog.hydrate();
+    return () => { live = false; clearInterval(beat); };
   }, []);
 
   // ── Live DB connection probe ────────────────────────
@@ -437,12 +443,43 @@ export function App() {
 
   const [explainBusy, setExplainBusy] = useState(false);
   const [actualBusy, setActualBusy] = useState(false);
-  const [explainErr, setExplainErr] = useState<string | null>(null);
+  // ONE banner for the three server-side editor actions. Each action REPLACES
+  // it (never stacks), it names the action that failed, and raw fetch failures
+  // are rewritten into a sentence that says what to start (humanizeError).
+  type EditorAction = "CHECK SYNTAX" | "ESTIMATED PLAN" | "ACTUAL PLAN";
+  const [actionErr, setActionErr] = useState<{ action: EditorAction; message: string } | null>(null);
+  const setExplainErr = (m: string | null, action: EditorAction = "ESTIMATED PLAN") =>
+    setActionErr(m == null ? null : { action, message: m });
+  const setValidateErr = (m: string | null) =>
+    setActionErr(m == null ? null : { action: "CHECK SYNTAX", message: m });
+  // The server-side actions need the dbopt backend; with it down they'd only
+  // ever produce a fetch error, so they are disabled with the reason in the tip.
+  const backendDown = backendOk === false;
+  const serverActionTip = (what: string) =>
+    backendDown
+      ? "The dbopt backend isn't reachable — start dbopt-backend (it serves this UI on :3690). The in-browser analyzer keeps working."
+      : !conn.server
+      ? "Configure a SQL Server connection first"
+      : what;
+  // SEVERITY → ANALYZE click-to-jump: the editor only exists while ANALYZE is
+  // mounted, so a jump requested from another workspace is parked here and
+  // replayed once the editor handle appears.
+  const [pendingJump, setPendingJump] = useState<{ line: number; col: number } | null>(null);
+  useEffect(() => {
+    if (!pendingJump || ui.workspace !== "analyze") return;
+    const t = setInterval(() => {
+      if (editorHandle.current) {
+        editorHandle.current.jumpTo(pendingJump.line, pendingJump.col);
+        setPendingJump(null);
+      }
+    }, 60);
+    const giveUp = setTimeout(() => setPendingJump(null), 4000);
+    return () => { clearInterval(t); clearTimeout(giveUp); };
+  }, [pendingJump, ui.workspace]);
 
   // Engine-checked T-SQL "Parse" (SET PARSEONLY ON via the real engine).
   const [validateBusy, setValidateBusy] = useState(false);
   const [validateResult, setValidateResult] = useState<backend.ValidateResult | null>(null);
-  const [validateErr, setValidateErr] = useState<string | null>(null);
 
   async function validateSyntax() {
     if (!ui.draft_sql.trim()) { setValidateErr("paste some SQL first"); return; }
@@ -463,14 +500,14 @@ export function App() {
       const first = res.diagnostics[0];
       if (first) editorHandle.current?.jumpTo(first.line, 1);
     } catch (e: any) {
-      setValidateErr(e.message ?? String(e));
+      setValidateErr(backend.humanizeError(e));
     } finally {
       setValidateBusy(false);
     }
   }
 
   // Any edit invalidates a previous parse verdict so it can't read stale.
-  useEffect(() => { setValidateResult(null); setValidateErr(null); }, [ui.draft_sql]);
+  useEffect(() => { setValidateResult(null); setActionErr(null); }, [ui.draft_sql]);
 
   async function generatePlan() {
     if (!ui.draft_sql.trim()) { setExplainErr("paste some SQL first"); return; }
@@ -487,7 +524,7 @@ export function App() {
       const planXml = await backend.explain(payload as any, ui.draft_sql);
       setUi({ ...ui, draft_plan: planXml });
     } catch (e: any) {
-      setExplainErr(e.message ?? String(e));
+      setExplainErr(backend.humanizeError(e), "ESTIMATED PLAN");
     } finally {
       setExplainBusy(false);
     }
@@ -497,7 +534,7 @@ export function App() {
   // wraps it in a transaction it always rolls back (writes leave no trace) and
   // refuses destructive / DDL / EXEC batches. See sqlserver::actual_plan.
   async function generateActualPlan() {
-    if (!ui.draft_sql.trim()) { setExplainErr("paste some SQL first"); return; }
+    if (!ui.draft_sql.trim()) { setExplainErr("paste some SQL first", "ACTUAL PLAN"); return; }
     setActualBusy(true);
     setExplainErr(null);
     try {
@@ -527,7 +564,7 @@ export function App() {
       }
       setUi({ ...ui, draft_plan: planXml });
     } catch (e: any) {
-      setExplainErr(e.message ?? String(e));
+      setExplainErr(backend.humanizeError(e), "ACTUAL PLAN");
     } finally {
       setActualBusy(false);
     }
@@ -737,22 +774,22 @@ export function App() {
                   <div className="ops">
                     <button
                       onClick={validateSyntax}
-                      disabled={validateBusy || !conn.server}
-                      title={conn.server ? "Check T-SQL syntax against the connected server (SET PARSEONLY ON — syntax only, object names not bound, runs nothing)" : "Configure a SQL Server connection first"}
+                      disabled={validateBusy || !conn.server || backendDown}
+                      title={serverActionTip("Check T-SQL syntax against the connected server (SET PARSEONLY ON — syntax only, object names not bound, runs nothing)")}
                     >
                       {validateBusy ? "CHECKING…" : "CHECK SYNTAX"}
                     </button>
                     <button
                       onClick={generatePlan}
-                      disabled={explainBusy || actualBusy || !conn.server}
-                      title={conn.server ? "ESTIMATED plan (SET SHOWPLAN_XML ON): the optimizer compiles your query and returns the plan it WOULD use. Nothing runs — no data read or written, no locks." : "Configure a SQL Server connection first"}
+                      disabled={explainBusy || actualBusy || !conn.server || backendDown}
+                      title={serverActionTip("ESTIMATED plan (SET SHOWPLAN_XML ON): the optimizer compiles your query and returns the plan it WOULD use. Nothing runs — no data read or written, no locks.")}
                     >
                       {explainBusy ? "COMPILING…" : "ESTIMATED PLAN"}
                     </button>
                     <button
                       onClick={generateActualPlan}
-                      disabled={explainBusy || actualBusy || !conn.server}
-                      title={conn.server ? "ACTUAL plan: RUNS the query for real row counts + runtime, inside a transaction that is ALWAYS rolled back so writes leave no trace. DROP/TRUNCATE/ALTER/EXEC are refused. May take real time on heavy queries." : "Configure a SQL Server connection first"}
+                      disabled={explainBusy || actualBusy || !conn.server || backendDown}
+                      title={serverActionTip("ACTUAL plan: RUNS the query for real row counts + runtime, inside a transaction that is ALWAYS rolled back so writes leave no trace. DROP/TRUNCATE/ALTER/EXEC are refused. May take real time on heavy queries.")}
                     >
                       {actualBusy ? "RUNNING…" : "ACTUAL PLAN"}
                     </button>
@@ -765,14 +802,17 @@ export function App() {
                     )}
                   </div>
                 </div>
-                {explainErr && (
-                  <div style={{ padding: "8px 14px", background: "var(--crit-glow)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
-                    {explainErr}
+                {backendDown && (
+                  <div className="editor-offline-note" data-testid="editor-offline-note">
+                    <span className="editor-offline-dot" aria-hidden />
+                    Backend offline — syntax check and plans need dbopt-backend running on :3690. The in-browser analyzer below still works.
                   </div>
                 )}
-                {validateErr && (
-                  <div style={{ padding: "8px 14px", background: "var(--crit-glow)", borderBottom: "1px solid var(--line)", color: "var(--crit)", font: "11px var(--f-mono)" }}>
-                    {validateErr}
+                {actionErr && (
+                  <div className="editor-action-err" role="alert" data-testid="editor-action-err">
+                    <span className="editor-action-err-k">{actionErr.action}</span>
+                    <span className="editor-action-err-msg">{actionErr.message}</span>
+                    <button className="editor-action-err-x" onClick={() => setActionErr(null)} title="Dismiss" aria-label="Dismiss">×</button>
                   </div>
                 )}
                 {validateResult && (
@@ -901,16 +941,18 @@ export function App() {
         )}
 
         {ui.workspace === "severity" && (
-          <Workspace title="Severity timeline" subtitle="findings distributed by source line">
-            <ChartContainer>
-              <SeverityBar
-                data={report?.charts.severity_timeline ?? []}
-                theme={ui.theme}
-                action={{ label: "Paste T-SQL to analyze", onClick: () => setUi({ ...ui, workspace: "analyze" }) }}
-                loading={dmvLoading}
-                error={dmvErr}
-              />
-            </ChartContainer>
+          <Workspace title="Severity" subtitle="every finding by severity and by where it came from">
+            <SeverityBreakdown
+              findings={report?.findings ?? []}
+              sql={ui.draft_sql}
+              hasPlan={!!ui.draft_plan}
+              hasDmv={dmv != null}
+              onJumpToSql={(line, col) => {
+                setPendingJump({ line, col });
+                setUi({ ...ui, workspace: "analyze" });
+              }}
+              onOpen={(ws) => setUi({ ...ui, workspace: ws })}
+            />
           </Workspace>
         )}
 
@@ -1018,9 +1060,16 @@ export function App() {
             setConn(c);
             // Reflect the wizard's connection into a saved profile so it shows
             // up in the CONN workspace's server list (and survives reload).
+            // Reuse the seeded/placeholder profile for the same server (same
+            // login, or one never filled in) instead of appending a twin chip.
             const name = c.server || "localhost,1433";
-            const next: P.ServerProfile[] = [...servers, { ...c, id: cryptoId(), name }];
-            saveServerList(next, next[next.length - 1].id);
+            const twin = servers.find(
+              (s) => s.server === c.server && (!s.user || s.user === c.user),
+            );
+            const next: P.ServerProfile[] = twin
+              ? servers.map((s) => (s.id === twin.id ? { ...s, ...c, id: s.id, name: s.name || name } : s))
+              : [...servers, { ...c, id: cryptoId(), name }];
+            saveServerList(next, twin ? twin.id : next[next.length - 1].id);
             setUi({ ...ui, workspace: "health" });
           }}
           onClose={() => setShowWizard(false)}

@@ -1,0 +1,7 @@
+{
+  "must_fire": ["plan.hash_join_large"],
+  "must_not_fire": [],
+  "also_fires": ["plan.sort_large", "plan.memory_grant_large", "plan.table_scan"],
+  "server_version": 2025,
+  "category": "plan"
+}

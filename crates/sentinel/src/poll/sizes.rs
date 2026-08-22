@@ -32,7 +32,7 @@ pub async fn poll_sizes(conn: &ConnectionInfo, storage: &Storage) -> anyhow::Res
     let mut client = conn::open(conn).await?;
     let instance_id = storage.ensure_instance(&conn.server, conn)?;
 
-    let stream = match client.simple_query(SIZE_QUERY).await {
+    let stream = match client.simple_query(crate::probes::tag(SIZE_QUERY)).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(

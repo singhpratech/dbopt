@@ -30,8 +30,8 @@ export const HELP_STEPS: { n: string; title: string; body: string }[] = [
   },
   {
     n: "④",
-    title: "Copy the fix / apply safely",
-    body: "Each issue comes with copy-paste T-SQL and a safe apply path — so you can fix it yourself or hand it to whoever owns the database.",
+    title: "Copy the fix, run it yourself",
+    body: "Each issue comes with copy-paste T-SQL plus pre-flight, validation and rollback steps. dbopt previews DDL and never runs it — you paste it into your own SQL client, or hand it to whoever owns the database. (The one thing dbopt can change for you is the Query Store capture mode, behind an explicit Apply button in WATCH.)",
   },
 ];
 

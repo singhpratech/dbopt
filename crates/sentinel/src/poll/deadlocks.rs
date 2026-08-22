@@ -32,7 +32,7 @@ pub async fn poll_deadlocks(conn: &ConnectionInfo, storage: &Storage) -> anyhow:
     let mut client = conn::open(conn).await?;
     let instance_id = storage.ensure_instance(&conn.server, conn)?;
 
-    let stream = match client.simple_query(DEADLOCK_QUERY).await {
+    let stream = match client.simple_query(crate::probes::tag(DEADLOCK_QUERY)).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(

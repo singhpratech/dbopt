@@ -60,6 +60,11 @@ static DOCS: &[(&str, RuleDoc)] = &[
         "File could not be parsed as T-SQL or as a ShowPlanXML plan.",
         "The linter only analyses SQL text and .sqlplan XML. The file was read but its contents \
          matched neither, so no rules ran on it. Check the extension and encoding, or exclude it.")),
+    ("lint.encoding", doc!(
+        "File is not valid UTF-8 and was decoded as Windows-1252.",
+        "dbopt reads UTF-8 (with or without BOM) and UTF-16 natively. Anything else is decoded \
+         with the Windows-1252 table — SSMS's historical 'ANSI' encoding — and linted anyway, so \
+         one legacy file never aborts a run. Re-save the file as UTF-8 to clear this.")),
     ("lint.empty_file", doc!(
         "File contains no SQL after stripping whitespace and comments.",
         "An empty input is reported so a CI run that linted nothing is visible, rather than \
@@ -529,6 +534,40 @@ static DOCS: &[(&str, RuleDoc)] = &[
         "A bad estimate drives bad join/memory/parallelism choices. Update statistics, make the \
          predicate sargable, or check for parameter sniffing.",
         "relational-databases/performance/cardinality-estimation-sql-server")),
+    ("plan.sort_large", doc!(
+        "Plan sorts a large row count.",
+        "A Sort over tens of thousands of rows costs memory grant and CPU on every execution. \
+         An index whose key matches the ORDER BY (named in the result message) lets the engine \
+         read rows in order and drop the Sort.",
+        "relational-databases/showplan-logical-and-physical-operators-reference")),
+    ("plan.hash_join_large", doc!(
+        "Plan hash-joins large inputs.",
+        "A Hash Match over large inputs builds an in-memory hash table and is usually a sign that \
+         no index supports the join column on the build side. Informational: hash joins are often \
+         the right choice for big unsorted inputs.",
+        "relational-databases/showplan-logical-and-physical-operators-reference")),
+    ("plan.memory_grant_excessive", doc!(
+        "Actual plan used a small fraction of its memory grant.",
+        "GrantedMemory was many times MaxUsedMemory: the estimate overshot, and the surplus is \
+         reserved for the query's whole runtime, starving concurrent queries. Fix the estimate \
+         or cap the grant with MIN_GRANT_PERCENT/MAX_GRANT_PERCENT.",
+        "t-sql/queries/hints-transact-sql-query")),
+    ("plan.memory_grant_large", doc!(
+        "Estimated plan requests a large memory grant.",
+        "Large grants queue behind RESOURCE_SEMAPHORE when memory is contended. Reduce the rows \
+         sorted or hashed, or supply an index so the Sort/Hash disappears.",
+        "relational-databases/system-dynamic-management-views/sys-dm-exec-query-memory-grants-transact-sql")),
+    ("plan.memory_grant_warning", doc!(
+        "Plan carries a MemoryGrantWarning (excessive or insufficient grant).",
+        "The engine itself flagged that the grant was far larger than used, or too small and \
+         caused a spill. The result message carries the figures and the rewrite.",
+        "relational-databases/showplan-logical-and-physical-operators-reference")),
+    ("compat.unsupported_on_target", doc!(
+        "Uses a construct newer than the selected SQL Server version.",
+        "The statement uses a function or clause (STRING_SPLIT, STRING_AGG, GREATEST, WINDOW, \
+         ...) introduced after the target version, so it will fail to compile there. The result \
+         message gives the version that introduced it and a rewrite.",
+        "t-sql/functions/functions")),
     ("plan.missing_index", doc!(
         "The optimizer recorded a MissingIndex suggestion in the plan.",
         "The engine itself reports which equality/inequality/include columns would have helped. \

@@ -21,6 +21,20 @@ export type {
 
 const BASE = "/api";
 
+/**
+ * Turn a raw browser fetch failure into a sentence a DBA can act on. Chrome's
+ * "Failed to fetch" (Firefox: "NetworkError when attempting to fetch resource")
+ * only ever means the dbopt backend itself was unreachable — the SQL Server
+ * errors all arrive as JSON `{error}` bodies and pass through untouched.
+ */
+export function humanizeError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg)) {
+    return "Couldn't reach the dbopt backend. Start dbopt-backend (it serves this UI on :3690) and try again — the in-browser analyzer keeps working meanwhile.";
+  }
+  return msg;
+}
+
 export async function backendHealthy(): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/health`, { method: "GET" });
@@ -196,7 +210,14 @@ export interface Recommendation {
  * Server-level prescriptive advisor. Mirrors pullDmv/listDatabases payload +
  * error handling. The backend ranks recommendations high→low before returning.
  */
-export async function advise(info: ConnectionInfo): Promise<{ recommendations: Recommendation[] }> {
+export interface AdviseResponse {
+  recommendations: Recommendation[];
+  /** See HealthReport.counter_age_secs — absent on older backends. */
+  counter_age_secs?: number | null;
+  counters_since?: string | null;
+}
+
+export async function advise(info: ConnectionInfo): Promise<AdviseResponse> {
   const r = await fetch(`${BASE}/advise`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -206,8 +227,12 @@ export async function advise(info: ConnectionInfo): Promise<{ recommendations: R
     const e = (await r.json().catch(() => ({}))) as { error?: string };
     throw new Error(e.error ?? `advise failed (${r.status})`);
   }
-  const body = (await r.json()) as { recommendations?: Recommendation[] };
-  return { recommendations: body.recommendations ?? [] };
+  const body = (await r.json()) as Partial<AdviseResponse>;
+  return {
+    recommendations: body.recommendations ?? [],
+    counter_age_secs: body.counter_age_secs,
+    counters_since: body.counters_since,
+  };
 }
 
 /**

@@ -95,6 +95,31 @@ pub struct PlanNode {
     /// lookup joins back on — typically the clustering key). Captured so the
     /// emitted DDL and width heuristic have the full key picture.
     pub seek_columns: Vec<ColumnRef>,
+
+    // --- Sort / memory-grant detail (offline plan lint) ---
+    /// ORDER BY columns of a Sort operator (`<Sort><OrderBy>…`), so the finding
+    /// can name the index that would remove the sort.
+    pub sort_columns: Vec<ColumnRef>,
+    /// Query-level memory grant, in KB. From `<MemoryGrantInfo GrantedMemory=…>`
+    /// (actual plans) or the `MemoryGrant` attribute on `<QueryPlan>`
+    /// (estimated plans). Populated on the ROOT node only.
+    pub memory_grant_kb: Option<f64>,
+    /// `MaxUsedMemory` (KB) from `<MemoryGrantInfo>` — actual plans only.
+    pub memory_used_kb: Option<f64>,
+    /// `RequestedMemory` (KB) from `<MemoryGrantInfo>`, when present.
+    pub memory_requested_kb: Option<f64>,
+    /// Detail of a `<MemoryGrantWarning>` (kind + KB figures), when present.
+    pub grant_warning: Option<GrantWarningInfo>,
+}
+
+/// Detail captured from `<MemoryGrantWarning>`: the engine's own verdict on the
+/// grant ("Excessive Grant", "Grant Increase", "Used More Than Granted", …).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GrantWarningInfo {
+    pub kind: String,
+    pub requested_kb: f64,
+    pub granted_kb: f64,
+    pub used_kb: f64,
 }
 
 /// Known SQL Server plan warning elements (children of `<Warnings>`), plus the
@@ -290,6 +315,16 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     // ColumnReference elements (scalar trees, joins, other operators) out.
     let mut in_defined_values = false;
     let mut in_seek_predicates = false;
+    // Inside `<Sort><OrderBy>` of the innermost Sort operator.
+    let mut in_order_by = false;
+    // Query-level detail that appears OUTSIDE any RelOp (`<QueryPlan
+    // MemoryGrant=…>`, `<MemoryGrantInfo>`, query-level `<Warnings>`); held
+    // until the root exists.
+    let mut pending_grant_kb: Option<f64> = None;
+    let mut pending_used_kb: Option<f64> = None;
+    let mut pending_requested_kb: Option<f64> = None;
+    let mut pending_grant_warning: Option<GrantWarningInfo> = None;
+    let mut pending_warnings: Vec<String> = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| PlanError::Xml(e.to_string()))? {
@@ -305,6 +340,38 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                 } else {
                     if let Some(d) = depth_since_relop.last_mut() { *d += 1; }
                     match name.as_str() {
+                        "QueryPlan" => {
+                            if let Some(v) = attr_val(&e, "MemoryGrant").and_then(|v| v.parse::<f64>().ok()) {
+                                if v > 0.0 { pending_grant_kb = Some(v); }
+                            }
+                        }
+                        "MemoryGrantInfo" => {
+                            let num = |k: &str| attr_val(&e, k).and_then(|v| v.parse::<f64>().ok());
+                            if let Some(g) = num("GrantedMemory") { if g > 0.0 { pending_grant_kb = Some(g); } }
+                            if let Some(u) = num("MaxUsedMemory") { pending_used_kb = Some(u); }
+                            if let Some(r) = num("RequestedMemory") { if r > 0.0 { pending_requested_kb = Some(r); } }
+                        }
+                        "MemoryGrantWarning" => {
+                            let num = |k: &str| attr_val(&e, k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                            let info = GrantWarningInfo {
+                                kind: attr_val(&e, "GrantWarningKind").unwrap_or_default(),
+                                requested_kb: num("RequestedMemory"),
+                                granted_kb: num("GrantedMemory"),
+                                used_kb: num("MaxUsedMemory"),
+                            };
+                            if let Some(top) = stack.last_mut() {
+                                top.warnings.push(name.clone());
+                                top.grant_warning = Some(info);
+                            } else {
+                                pending_warnings.push(name.clone());
+                                pending_grant_warning = Some(info);
+                            }
+                        }
+                        "OrderBy" => {
+                            if stack.last().map(|n| n.physical_op.eq_ignore_ascii_case("Sort")).unwrap_or(false) {
+                                in_order_by = true;
+                            }
+                        }
                         "MissingIndexGroup" => {
                             cur_group_impact = attr_val(&e, "Impact")
                                 .and_then(|v| v.parse().ok())
@@ -325,10 +392,14 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                         // Non-self-closing `<Column …></Column>` / `<ColumnReference …></ColumnReference>`.
                         // Same handler as the Empty form — see handle_column_el.
                         "Column" | "ColumnReference" => {
-                            handle_column_el(
-                                &e, &mut stack, in_defined_values, in_seek_predicates,
-                                in_no_stats, &mut cur_missing, &cur_usage,
-                            );
+                            if in_order_by {
+                                push_sort_column(&e, &mut stack);
+                            } else {
+                                handle_column_el(
+                                    &e, &mut stack, in_defined_values, in_seek_predicates,
+                                    in_no_stats, &mut cur_missing, &cur_usage,
+                                );
+                            }
                         }
                         "ColumnsWithNoStatistics" => {
                             in_no_stats = true;
@@ -379,7 +450,7 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             }
                         }
                         other if is_warning_elem(other) => {
-                            if let Some(top) = stack.last_mut() { top.warnings.push(name.clone()); }
+                            if let Some(top) = stack.last_mut() { top.warnings.push(name.clone()); } else { pending_warnings.push(name.clone()); }
                         }
                         _ => {}
                     }
@@ -403,6 +474,33 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                     // because its parent <IndexScan> already incremented depth.
                     let cur_depth = depth_since_relop.last().copied().unwrap_or(0);
                     match name.as_str() {
+                        "QueryPlan" => {
+                            if let Some(v) = attr_val(&e, "MemoryGrant").and_then(|v| v.parse::<f64>().ok()) {
+                                if v > 0.0 { pending_grant_kb = Some(v); }
+                            }
+                        }
+                        "MemoryGrantInfo" => {
+                            let num = |k: &str| attr_val(&e, k).and_then(|v| v.parse::<f64>().ok());
+                            if let Some(g) = num("GrantedMemory") { if g > 0.0 { pending_grant_kb = Some(g); } }
+                            if let Some(u) = num("MaxUsedMemory") { pending_used_kb = Some(u); }
+                            if let Some(r) = num("RequestedMemory") { if r > 0.0 { pending_requested_kb = Some(r); } }
+                        }
+                        "MemoryGrantWarning" => {
+                            let num = |k: &str| attr_val(&e, k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                            let info = GrantWarningInfo {
+                                kind: attr_val(&e, "GrantWarningKind").unwrap_or_default(),
+                                requested_kb: num("RequestedMemory"),
+                                granted_kb: num("GrantedMemory"),
+                                used_kb: num("MaxUsedMemory"),
+                            };
+                            if let Some(top) = stack.last_mut() {
+                                top.warnings.push(name.clone());
+                                top.grant_warning = Some(info);
+                            } else {
+                                pending_warnings.push(name.clone());
+                                pending_grant_warning = Some(info);
+                            }
+                        }
                         "SeekPredicates" => {
                             if cur_depth == 1 || cur_depth == 2 {
                                 if let Some(top) = stack.last_mut() { top.has_seek_predicate = true; }
@@ -425,10 +523,14 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             }
                         }
                         "Column" | "ColumnReference" => {
-                            handle_column_el(
-                                &e, &mut stack, in_defined_values, in_seek_predicates,
-                                in_no_stats, &mut cur_missing, &cur_usage,
-                            );
+                            if in_order_by {
+                                push_sort_column(&e, &mut stack);
+                            } else {
+                                handle_column_el(
+                                    &e, &mut stack, in_defined_values, in_seek_predicates,
+                                    in_no_stats, &mut cur_missing, &cur_usage,
+                                );
+                            }
                         }
                         "RunTimeCountersPerThread" => {
                             if let Some(top) = stack.last_mut() {
@@ -453,7 +555,7 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             if let Some(top) = stack.last_mut() { top.warnings.push(name.clone()); }
                         }
                         other if is_warning_elem(other) => {
-                            if let Some(top) = stack.last_mut() { top.warnings.push(name.clone()); }
+                            if let Some(top) = stack.last_mut() { top.warnings.push(name.clone()); } else { pending_warnings.push(name.clone()); }
                         }
                         _ => {}
                     }
@@ -490,6 +592,7 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                         "ColumnsWithNoStatistics" => { in_no_stats = false; }
                         "DefinedValues" => { in_defined_values = false; }
                         "SeekPredicates" => { in_seek_predicates = false; }
+                        "OrderBy" => { in_order_by = false; }
                         _ => {}
                     }
                 }
@@ -503,13 +606,93 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     // Attach any missing-index recommendations that were declared at QueryPlan
     // level (outside a RelOp) to the root node so derive_findings emits them once.
     root.missing_indexes.append(&mut pending_missing);
+    // Query-level grant figures and warnings live on the root operator.
+    if root.memory_grant_kb.is_none() { root.memory_grant_kb = pending_grant_kb; }
+    if root.memory_used_kb.is_none() { root.memory_used_kb = pending_used_kb; }
+    if root.memory_requested_kb.is_none() { root.memory_requested_kb = pending_requested_kb; }
+    if root.grant_warning.is_none() { root.grant_warning = pending_grant_warning; }
+    for w in pending_warnings {
+        if !root.warnings.contains(&w) { root.warnings.push(w); }
+    }
     Ok(root)
+}
+
+/// A `<ColumnReference>` under `<Sort><OrderBy>`: the column the Sort orders by.
+fn push_sort_column(e: &quick_xml::events::BytesStart, stack: &mut [PlanNode]) {
+    let col = unbracket(&attr_val(e, "Column").unwrap_or_default());
+    if col.is_empty() { return; }
+    let table = unbracket(&attr_val(e, "Table").unwrap_or_default());
+    if let Some(top) = stack.last_mut() {
+        if !top.sort_columns.iter().any(|c| c.column == col) {
+            top.sort_columns.push(ColumnRef { table, column: col });
+        }
+    }
 }
 
 pub fn derive_findings(plan: &PlanNode) -> Vec<Finding> {
     let mut out = Vec::new();
+    memory_grant_findings(plan, &mut out);
     walk(plan, None, &mut out);
     out
+}
+
+const KB_PER_MB: f64 = 1024.0;
+/// Below this a grant is not worth a finding whatever the used/granted ratio.
+const GRANT_MIN_KB: f64 = 10.0 * KB_PER_MB;
+/// Granted ≥ this × used is "excessive": the estimate that sized it was wrong.
+const GRANT_EXCESS_RATIO: f64 = 4.0;
+/// An estimated-only plan asking for this much is a query that will queue on
+/// RESOURCE_SEMAPHORE under concurrency.
+const GRANT_LARGE_KB: f64 = 100.0 * KB_PER_MB;
+const GRANT_HUGE_KB: f64 = 1024.0 * KB_PER_MB;
+
+fn fmt_mb(kb: f64) -> String {
+    if kb >= KB_PER_MB { format!("{:.0} MB", kb / KB_PER_MB) } else { format!("{:.0} KB", kb) }
+}
+
+/// Query-level memory grant: sized from estimates, it is the single number that
+/// decides whether a sort/hash spills (too small) or the query queues on
+/// RESOURCE_SEMAPHORE and starves the buffer pool (too large).
+fn memory_grant_findings(root: &PlanNode, out: &mut Vec<Finding>) {
+    let Some(granted) = root.memory_grant_kb else { return };
+    if granted < GRANT_MIN_KB { return; }
+    match root.memory_used_kb {
+        // Actual plan: the engine measured what the query really used.
+        Some(used) if used >= 0.0 && granted >= GRANT_EXCESS_RATIO * used.max(1.0) => {
+            out.push(Finding {
+                rule: RuleId("plan.memory_grant_excessive".into()),
+                severity: Severity::Warning,
+                message: format!(
+                    "Excessive memory grant: {} granted, {} actually used ({:.0}×). The grant is sized from the row/width ESTIMATE, so the optimizer over-estimated this query; while it runs the unused memory is held back from every other query, and under concurrency queries queue on RESOURCE_SEMAPHORE.",
+                    fmt_mb(granted), fmt_mb(used), granted / used.max(1.0)
+                ),
+                location: None,
+                recommendation: Some(
+                    "Fix the estimate that sized the grant: UPDATE STATISTICS on the sorted/joined tables, replace the construct the optimizer cannot estimate (table variable, multi-statement TVF, local variable — try OPTION (RECOMPILE) to confirm), or trim the width of the rows that reach the sort/hash (select fewer columns, no SELECT *). As a cap, OPTION (MAX_GRANT_PERCENT = n) limits this query; on 2017+ Memory Grant Feedback corrects repeated executions of a cached plan, but never the first.".into()
+                ),
+                object: None,
+            });
+        }
+        Some(_) => {}
+        // Estimated plan: no usage figure, only the size of the request.
+        None if granted >= GRANT_LARGE_KB => {
+            let sev = if granted >= GRANT_HUGE_KB { Severity::Warning } else { Severity::Info };
+            out.push(Finding {
+                rule: RuleId("plan.memory_grant_large".into()),
+                severity: sev,
+                message: format!(
+                    "Large memory grant: this plan asks for {} of workspace memory for its sorts/hash joins. A grant this size serialises the query behind RESOURCE_SEMAPHORE under concurrency and evicts buffer-pool pages while it runs.",
+                    fmt_mb(granted)
+                ),
+                location: None,
+                recommendation: Some(
+                    "Shrink what reaches the memory-consuming operators: filter before the join, select only needed columns (row WIDTH drives the grant as much as row count), add an index whose key order matches the ORDER BY so the Sort disappears, or paginate. Capture the actual plan to compare granted vs used memory; OPTION (MAX_GRANT_PERCENT = n) caps a single query.".into()
+                ),
+                object: None,
+            });
+        }
+        None => {}
+    }
 }
 
 /// Find, within `node`'s direct + descendant subtree, an Index Seek operator that
@@ -606,6 +789,8 @@ fn lookup_covering_ddl(node: &PlanNode, parent: Option<&PlanNode>) -> (String, V
 // not on trivially small operators. A plan-derived finding has no source
 // location, so being conservative is the only false-positive guard available.
 const HIGH_ROWS: f64 = 10_000.0;
+/// A Sort / Hash Match at this row count is a Warning (Sort) / worth a note (Hash).
+const SORT_BIG_ROWS: f64 = 100_000.0;
 const LOOKUP_HIGH_EXEC: f64 = 1_000.0;
 /// Estimate-vs-actual skew is only flagged when the larger side is at least this
 /// many rows AND the ratio is extreme, to avoid noise on tiny counts.
@@ -629,6 +814,61 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
             location: loc,
             recommendation: Some("Add a clustered index, or a covering nonclustered index on the predicate + included columns the query needs.".into()),
             object: node_object(node),
+        });
+    }
+
+    // (f) Large Sort. A sort is the operator that most directly turns a bad
+    // estimate into a spill or an oversized grant, and it is also the one an
+    // index removes outright (the index IS the sort order).
+    if node.physical_op.eq_ignore_ascii_case("Sort") && node.estimated_rows >= HIGH_ROWS {
+        let cols: Vec<String> = node.sort_columns.iter().map(|c| bracket(&c.column)).collect();
+        let table = node.sort_columns.iter().map(|c| c.table.clone()).find(|t| !t.is_empty());
+        let cols_txt = if cols.is_empty() { String::new() } else { format!(" on {}", cols.join(", ")) };
+        let sev = if node.estimated_rows >= SORT_BIG_ROWS { Severity::Warning } else { Severity::Info };
+        let ddl = match (&table, cols.is_empty()) {
+            (Some(t), false) => format!(
+                "CREATE NONCLUSTERED INDEX [IX_{}_{}] ON {} ({}) INCLUDE (<columns the query outputs>);",
+                sanitize_ident(t),
+                node.sort_columns.iter().map(|c| sanitize_ident(&c.column)).collect::<Vec<_>>().join("_"),
+                bracket(t), cols.join(", ")
+            ),
+            _ => "CREATE NONCLUSTERED INDEX IX_<table>_<sort cols> ON <schema>.<table> (<ORDER BY columns, same ASC/DESC>) INCLUDE (<output columns>);".to_string(),
+        };
+        out.push(Finding {
+            rule: RuleId("plan.sort_large".into()),
+            severity: sev,
+            message: format!(
+                "Sort of ~{:.0} rows{} at NodeId={} (cost={:.4}). The sort needs a memory grant sized from this estimate — it spills to tempdb if the estimate is low and blocks other queries if it is high — and it is a full stop-and-go operator: nothing flows downstream until every row is sorted.",
+                node.estimated_rows, cols_txt, node.node_id, node.estimated_total_subtree_cost
+            ),
+            location: loc,
+            recommendation: Some(format!(
+                "Remove the sort with an index whose key order matches the ORDER BY (the engine then reads rows already in order), or bound it with TOP / OFFSET-FETCH, or filter earlier so fewer rows reach it:\n{}",
+                ddl
+            )),
+            object: table.as_ref().map(|t| ObjectRef::new("dbo", t)),
+        });
+    }
+
+    // (g) Large Hash Match join. Not wrong by itself — it is the right join
+    // for two big unordered inputs — but its build side is held in granted
+    // memory, so it is where the grant goes and where spills happen.
+    if node.physical_op.eq_ignore_ascii_case("Hash Match")
+        && node.logical_op.to_ascii_lowercase().contains("join")
+        && node.estimated_rows >= SORT_BIG_ROWS
+    {
+        out.push(Finding {
+            rule: RuleId("plan.hash_join_large".into()),
+            severity: Severity::Info,
+            message: format!(
+                "Hash Match ({}) producing ~{:.0} rows at NodeId={} (cost={:.4}). The build input is materialised in the memory grant; if the estimate is low it spills to tempdb, and the join cannot start returning rows until the build side is fully read.",
+                node.logical_op, node.estimated_rows, node.node_id, node.estimated_total_subtree_cost
+            ),
+            location: loc,
+            recommendation: Some(
+                "Check whether the join is the problem or the input is: a selective predicate on either side plus an index on the join column turns this into a Nested Loops / Merge join over far fewer rows. If both inputs really are large, a hash join is correct — make sure the build side is the SMALLER input (estimates) and that the query returns only the columns it needs so the grant stays small.".into()
+            ),
+            object: None,
         });
     }
 
@@ -764,6 +1004,26 @@ fn walk(node: &PlanNode, parent: Option<&PlanNode>, out: &mut Vec<Finding>) {
 
                 object: None,
             },
+            "MemoryGrantWarning" => {
+                let gw = node.grant_warning.as_ref();
+                let kind = gw.map(|g| g.kind.as_str()).filter(|k| !k.is_empty()).unwrap_or("unspecified");
+                let figures = gw.filter(|g| g.granted_kb > 0.0).map(|g| format!(
+                    " Requested {}, granted {}, used {}.", fmt_mb(g.requested_kb), fmt_mb(g.granted_kb), fmt_mb(g.used_kb)
+                )).unwrap_or_default();
+                Finding {
+                    rule: RuleId("plan.memory_grant_warning".into()),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "The engine flagged this query's memory grant at NodeId={} (MemoryGrantWarning: {}).{} The grant was sized from a wrong estimate — too large holds memory back from other queries, too small spills the sort/hash to tempdb.",
+                        node.node_id, kind, figures
+                    ),
+                    location: loc,
+                    recommendation: Some(
+                        "Fix the estimate that sized the grant (UPDATE STATISTICS, remove table variables / multi-statement TVFs / non-sargable predicates from the path, try OPTION (RECOMPILE) to confirm a sniffing problem). Trim row width reaching the sort/hash. OPTION (MAX_GRANT_PERCENT = n) / (MIN_GRANT_PERCENT = n) cap or floor a single query; 2017+ Memory Grant Feedback adjusts cached plans on re-execution.".into()
+                    ),
+                    object: None,
+                }
+            }
             "ColumnsWithNoStatistics" => {
                 let cols: Vec<String> = node.no_stats_columns.iter()
                     .filter(|c| !c.column.is_empty())
@@ -1399,5 +1659,47 @@ mod tests {
     #[test]
     fn parse_error_on_garbage() {
         assert!(parse("<not-a-plan/>").is_err());
+    }
+}
+
+#[cfg(test)]
+mod grant_and_sort_tests {
+    use super::*;
+
+    fn ids(xml: &str) -> Vec<String> {
+        derive_findings(&parse(xml).unwrap()).into_iter().map(|f| f.rule.0).collect()
+    }
+
+    #[test]
+    fn excessive_grant_needs_actual_usage_figure() {
+        let actual = r#"<ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple><QueryPlan MemoryGrant="204800">
+            <MemoryGrantInfo GrantedMemory="204800" MaxUsedMemory="3072" />
+            <RelOp NodeId="0" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="10" EstimatedTotalSubtreeCost="0.1" />
+            </QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
+        assert_eq!(ids(actual), vec!["plan.memory_grant_excessive"]);
+        // Estimated-only: the same grant is reported as "large" (Info), never "excessive".
+        let est = actual.replace(r#"<MemoryGrantInfo GrantedMemory="204800" MaxUsedMemory="3072" />"#, "");
+        assert_eq!(ids(&est), vec!["plan.memory_grant_large"]);
+        // Small grants are never worth a finding.
+        let small = actual.replace("204800", "2048");
+        assert!(ids(&small).is_empty());
+    }
+
+    #[test]
+    fn sort_names_its_columns_and_warns_only_when_big() {
+        let xml = r#"<ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple><QueryPlan>
+            <RelOp NodeId="0" PhysicalOp="Sort" LogicalOp="Sort" EstimateRows="ROWS" EstimatedTotalSubtreeCost="5">
+              <Sort><OrderBy><OrderByColumn Ascending="true"><ColumnReference Table="[observations]" Column="Date" /></OrderByColumn></OrderBy>
+                <RelOp NodeId="1" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="ROWS" EstimatedTotalSubtreeCost="1" />
+              </Sort></RelOp></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
+        let big = derive_findings(&parse(&xml.replace("ROWS", "916285")).unwrap());
+        assert_eq!(big.len(), 1);
+        assert_eq!(big[0].rule.0, "plan.sort_large");
+        assert!(matches!(big[0].severity, Severity::Warning));
+        assert!(big[0].message.contains("[Date]"));
+        assert!(big[0].recommendation.as_ref().unwrap().contains("[observations]"));
+        let mid = derive_findings(&parse(&xml.replace("ROWS", "20000")).unwrap());
+        assert!(matches!(mid[0].severity, Severity::Info));
+        assert!(derive_findings(&parse(&xml.replace("ROWS", "500")).unwrap()).is_empty());
     }
 }

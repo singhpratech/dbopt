@@ -40,7 +40,7 @@ ORDER BY o.OrderDate DESC;`;
  * The wizard owns no persisted state of its own beyond the onboarded flag; the
  * active connection lives in App via the onConnect callback.
  */
-type Step = "try" | "welcome" | "connect";
+type Step = "try" | "welcome" | "connect" | "database";
 
 export function OnboardingWizard({
   conn,
@@ -64,7 +64,16 @@ export function OnboardingWizard({
     ...conn,
     auth_mode: "sql",
     server: conn?.server || defaultConn.server,
+    // Off by default HERE, unlike the CONNECTION form: the wizard is the first
+    // thing a stranger types `sa` into, possibly on a shared workstation, and
+    // it must not write that credential to the browser profile unasked.
+    remember_password: false,
   }));
+  // Databases listed after a successful ping (D11): the wizard used to hand the
+  // app a connection with no database, so the first HEALTH grade was for the
+  // login's default database (master) without ever saying so.
+  const [databases, setDatabases] = useState<backend.DatabaseInfo[] | null>(null);
+  const [dbBusy, setDbBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [integratedAuthOk, setIntegratedAuthOk] = useState(false);
@@ -129,14 +138,40 @@ export function OnboardingWizard({
         setErr(ping.error ?? "Could not connect to that server.");
         return;
       }
-      // Hand the live connection to the app, mark onboarded, and dismiss. The
-      // app's HEALTH view picks it up and scans automatically.
-      onConnect(draft);
-      finish();
+      // Connected: list the databases and let the user pick the one they
+      // actually want graded (user DBs first). If the listing fails we still
+      // go on — with a clearly-labelled default-database fallback.
+      let dbs: backend.DatabaseInfo[] = [];
+      try {
+        dbs = await backend.listDatabases({
+          server: draft.server,
+          user: draft.user || undefined,
+          password: draft.password || undefined,
+          trust_cert: draft.trust_cert,
+        });
+      } catch {
+        dbs = [];
+      }
+      setDatabases(dbs);
+      const firstUser = dbs.find((d) => !d.system && d.accessible && d.state === "ONLINE");
+      patch("database", draft.database || firstUser?.name || "");
+      setStep("database");
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      setErr(backend.humanizeError(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Hand the live connection (now with a database) to the app, mark onboarded,
+  // and dismiss. The app's HEALTH view picks it up and scans automatically.
+  function analyzeDatabase() {
+    setDbBusy(true);
+    try {
+      onConnect(draft);
+      finish();
+    } finally {
+      setDbBusy(false);
     }
   }
 
@@ -254,6 +289,34 @@ export function OnboardingWizard({
               </button>
             </div>
           </div>
+        ) : step === "database" ? (
+          <div className="onboarding-step">
+            <div className="onboarding-eyebrow">Connected to {draft.server}</div>
+            <h1 className="onboarding-title">Which database should dbopt grade?</h1>
+            <p className="onboarding-lede">
+              The health report, advisor and workload views are all per-database.
+              Pick the one you came to look at — you can switch any time in Connection.
+            </p>
+            <DatabasePicker
+              databases={databases ?? []}
+              value={draft.database ?? ""}
+              onChange={(name) => patch("database", name)}
+            />
+            {err && <div className="form-status err onboarding-status">{err}</div>}
+            <div className="onboarding-actions">
+              <button
+                className="btn primary onboarding-cta"
+                onClick={analyzeDatabase}
+                disabled={dbBusy}
+                data-testid="wizard-analyze"
+              >
+                {draft.database ? `Analyze ${draft.database} →` : "Analyze the default database →"}
+              </button>
+              <button className="onboarding-back" onClick={() => setStep("connect")} disabled={dbBusy}>
+                ← Back
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="onboarding-step">
             <h1 className="onboarding-title">Connect your SQL Server</h1>
@@ -309,6 +372,20 @@ export function OnboardingWizard({
                       }}
                     />
                   </div>
+                  <label className="form-row cb full">
+                    <input
+                      type="checkbox"
+                      checked={draft.remember_password}
+                      onChange={(e) => patch("remember_password", e.target.checked)}
+                      data-testid="wizard-remember-password"
+                    />
+                    Remember password on this device
+                  </label>
+                  <p className="form-hint full onboarding-storage-note">
+                    {draft.remember_password
+                      ? "Stored in clear text in this browser's localStorage (key dbopt.servers) — fine for a personal machine, not for a shared one. It is never sent anywhere."
+                      : "Off: the password lives in memory for this session only and is cleared on reload. The server, login and database are still saved so you can reconnect quickly."}
+                  </p>
                 </>
               )}
               <label className="form-row cb full">
@@ -325,7 +402,7 @@ export function OnboardingWizard({
 
             <div className="onboarding-actions">
               <button className="btn primary onboarding-cta" onClick={connectAndAnalyze} disabled={busy}>
-                {busy ? "Connecting…" : "Connect & analyze"}
+                {busy ? "Connecting…" : "Connect & choose a database"}
               </button>
               <button className="onboarding-back" onClick={() => setStep("try")} disabled={busy}>
                 ← Back
@@ -336,6 +413,72 @@ export function OnboardingWizard({
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Database list for the wizard: user databases first as big pick-cards, system
+ * databases collapsed behind a quieter row, and an explicit "login's default
+ * database" option so the master fallback is a choice, never a surprise.
+ */
+function DatabasePicker({
+  databases,
+  value,
+  onChange,
+}: {
+  databases: backend.DatabaseInfo[];
+  value: string;
+  onChange: (name: string) => void;
+}) {
+  const usable = (d: backend.DatabaseInfo) => d.accessible && d.state === "ONLINE";
+  const user = databases.filter((d) => !d.system);
+  const system = databases.filter((d) => d.system);
+  return (
+    <div className="onboarding-dbs" role="radiogroup" aria-label="Database">
+      {user.length === 0 && (
+        <div className="onboarding-dbs-empty">
+          No user databases are visible to this login{databases.length === 0 ? " (or the list could not be read)" : ""}.
+          You can still grade the login's default database below.
+        </div>
+      )}
+      {user.map((d) => (
+        <button
+          key={d.name}
+          role="radio"
+          aria-checked={value === d.name}
+          className={`onboarding-db${value === d.name ? " on" : ""}${usable(d) ? "" : " off"}`}
+          disabled={!usable(d)}
+          onClick={() => onChange(d.name)}
+          title={usable(d) ? `Grade ${d.name}` : `${d.name} is ${d.state}${d.accessible ? "" : " / not accessible to this login"}`}
+        >
+          <span className="onboarding-db-name">{d.name}</span>
+          <span className="onboarding-db-meta">{usable(d) ? "user database" : d.state.toLowerCase()}</span>
+        </button>
+      ))}
+      <div className="onboarding-dbs-sys">
+        {system.filter(usable).map((d) => (
+          <button
+            key={d.name}
+            role="radio"
+            aria-checked={value === d.name}
+            className={`onboarding-db sys${value === d.name ? " on" : ""}`}
+            onClick={() => onChange(d.name)}
+            title={`System database ${d.name}`}
+          >
+            {d.name}
+          </button>
+        ))}
+        <button
+          role="radio"
+          aria-checked={value === ""}
+          className={`onboarding-db sys${value === "" ? " on" : ""}`}
+          onClick={() => onChange("")}
+          title="Connect without choosing — SQL Server uses the login's default database (usually master)"
+        >
+          login default (usually master)
+        </button>
       </div>
     </div>
   );

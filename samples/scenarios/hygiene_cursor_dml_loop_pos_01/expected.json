@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "index.filtered_index_opportunity_soft_delete",
+    "index.missing_index_from_predicate"
+  ],
+  "category": "hygiene",
+  "must_fire": [
+    "hygiene.cursor"
+  ],
+  "must_not_fire": [],
+  "server_version": 2025
+}

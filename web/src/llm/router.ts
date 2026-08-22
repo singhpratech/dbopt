@@ -1,3 +1,4 @@
+import { humanizeError } from "../api/backend";
 import * as backend from "../api/backend";
 import * as webllm from "./webllm";
 import type { ChatMessage } from "../api/backend";
@@ -103,7 +104,9 @@ export function chat(
       }
       ailog.finishEntry(logId, ctrl.signal.aborted ? "cancelled" : "ok");
     } catch (e: any) {
-      const msg = e?.name === "AbortError" ? "cancelled" : (e?.message ?? String(e));
+      // A bare fetch failure here means the dbopt backend (the LLM proxy) is
+      // unreachable — say so instead of echoing the browser's "Failed to fetch".
+      const msg = e?.name === "AbortError" ? "cancelled" : humanizeError(e);
       if (e?.name !== "AbortError") onError(msg);
       ailog.finishEntry(logId, e?.name === "AbortError" ? "cancelled" : "error", msg);
     }

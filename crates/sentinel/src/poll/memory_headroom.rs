@@ -76,7 +76,7 @@ pub async fn poll_memory_headroom(
     };
 
     // --- PLE + memory totals (best-effort).
-    match client.simple_query(MEM_COUNTERS_QUERY).await {
+    match client.simple_query(crate::probes::tag(MEM_COUNTERS_QUERY)).await {
         Ok(s) => {
             if let Ok(rows) = s.into_first_result().await {
                 if let Some(r) = rows.into_iter().next() {
@@ -101,7 +101,7 @@ pub async fn poll_memory_headroom(
     }
 
     // --- pending workspace-memory grants (best-effort; older editions vary).
-    if let Ok(s) = client.simple_query(MEM_GRANTS_QUERY).await {
+    if let Ok(s) = client.simple_query(crate::probes::tag(MEM_GRANTS_QUERY)).await {
         if let Ok(rows) = s.into_first_result().await {
             if let Some(r) = rows.into_iter().next() {
                 row.pending_memory_grants = r.get::<i64, _>(0).unwrap_or(0);

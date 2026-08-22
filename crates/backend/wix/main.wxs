@@ -113,14 +113,29 @@
                                 Action='set'
                                 System='yes'/>
                         </Component>
+                        <!-- Same three names as every other platform's archive
+                             (WHICH-BINARY.txt): dbopt.exe is the CLI linter,
+                             dbopt-backend.exe is the app, dbopt-sentinel.exe the
+                             poller. Until 0.4.2 the MSI installed the app AS
+                             dbopt.exe, so `dbopt lint` on Windows started the web
+                             server and the linter was not installed at all. -->
                         <Component Id='binary0' Guid='*'>
-                            <!-- Installed as dbopt.exe (the brand + PATH command),
-                                 though cargo builds it as dbopt-backend.exe. -->
                             <File
                                 Id='exe0'
-                                Name='dbopt.exe'
+                                Name='dbopt-backend.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\dbopt-backend.exe'
+                                KeyPath='yes'/>
+                        </Component>
+                        <Component Id='binary2' Guid='*'>
+                            <!-- The CLI linter, built from crates/analyzer-cli
+                                 (bin name `dbopt`) by the same `cargo build` as
+                                 the app; cargo-wix (no-build mode) only stages it. -->
+                            <File
+                                Id='exe2'
+                                Name='dbopt.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\dbopt.exe'
                                 KeyPath='yes'/>
                         </Component>
                         <Component Id='binary1' Guid='*'>
@@ -139,7 +154,8 @@
 
             <!-- Start Menu shortcut so the product is actually launchable after
                  install (a plain PATH entry is invisible to most users). The
-                 shortcut targets the installed exe; Show='minimized' keeps the
+                 shortcut targets the APP (exe0 = dbopt-backend.exe), never the
+                 linter; Show='minimized' keeps the
                  server's console window out of the way while the browser opens. -->
             <Directory Id='ProgramMenuFolder'>
                 <Directory Id='ApplicationProgramsFolder' Name='dbopt'/>
@@ -178,12 +194,13 @@
 
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
+            <ComponentRef Id='binary2'/>
             <ComponentRef Id='AppShortcut'/>
 
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'
-                Description='Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location.'
+                Description='Add the install location of dbopt.exe (the linter), dbopt-backend.exe (the app) and dbopt-sentinel.exe (the poller) to the PATH system environment variable so they can be run from any prompt.'
                 Level='1'
                 Absent='allow'>
                 <ComponentRef Id='Path'/>

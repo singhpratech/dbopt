@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564" Build="17.0.1000.7">
+  <BatchSequence><Batch><Statements>
+    <StmtSimple StatementText="SELECT o.*, p.* FROM dbo.observations o JOIN dbo.procedures p ON p.Patient = o.Patient ORDER BY o.Date" StatementId="1" StatementType="SELECT" StatementSubTreeCost="203846" StatementEstRows="916285">
+      <QueryPlan DegreeOfParallelism="6" MemoryGrant="216883" CachedPlanSize="64" CompileTime="3" CompileCPU="3" CompileMemory="1024">
+        <MemoryGrantInfo SerialRequiredMemory="1024" SerialDesiredMemory="216883" />
+        <RelOp NodeId="0" PhysicalOp="Parallelism" LogicalOp="Gather Streams" EstimateRows="916285" EstimatedTotalSubtreeCost="203846">
+          <Parallelism>
+            <RelOp NodeId="1" PhysicalOp="Sort" LogicalOp="Sort" EstimateRows="916285" EstimatedTotalSubtreeCost="203800">
+              <Sort Distinct="false">
+                <OrderBy>
+                  <OrderByColumn Ascending="true">
+                    <ColumnReference Database="[PharmaInsights]" Schema="[dbo]" Table="[observations]" Alias="[o]" Column="Date" />
+                  </OrderByColumn>
+                </OrderBy>
+                <RelOp NodeId="2" PhysicalOp="Hash Match" LogicalOp="Inner Join" EstimateRows="916285" EstimatedTotalSubtreeCost="1200">
+                  <Hash>
+                    <RelOp NodeId="3" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="500000" EstimatedTotalSubtreeCost="31.0385">
+                      <TableScan>
+                        <Object Database="[PharmaInsights]" Schema="[dbo]" Table="[procedures]" Alias="[p]" />
+                      </TableScan>
+                    </RelOp>
+                    <RelOp NodeId="4" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="1200000" EstimatedTotalSubtreeCost="70.2">
+                      <TableScan>
+                        <Object Database="[PharmaInsights]" Schema="[dbo]" Table="[observations]" Alias="[o]" />
+                      </TableScan>
+                    </RelOp>
+                  </Hash>
+                </RelOp>
+              </Sort>
+            </RelOp>
+          </Parallelism>
+        </RelOp>
+      </QueryPlan>
+    </StmtSimple>
+  </Statements></Batch></BatchSequence>
+</ShowPlanXML>
