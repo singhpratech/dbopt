@@ -1,0 +1,7 @@
+{
+  "also_fires": [],
+  "category": "datatype",
+  "must_fire": [],
+  "must_not_fire": ["datatype.float_for_money"],
+  "server_version": 2022
+}

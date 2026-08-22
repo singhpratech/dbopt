@@ -1,6 +1,7 @@
 // Statistics / cardinality settings rules.
 
 use super::{finding, is_word, make_loc, RuleCtx};
+use super::index_design::{all_sources_non_indexable, batch_ids, cte_name_set, statement_start};
 use crate::findings::{Finding, Severity};
 use crate::tokens::TokKind;
 
@@ -141,6 +142,8 @@ pub fn update_stats_fullscan_lacking_incremental(ctx: &RuleCtx) -> Vec<Finding> 
 pub fn ascending_key_hotspot(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let ctes = cte_name_set(tokens);
+    let batches = batch_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
         if !is_word(t, "DATEADD") { continue; }
 
@@ -163,6 +166,12 @@ pub fn ascending_key_hotspot(ctx: &RuleCtx) -> Vec<Finding> {
         if !saw_gt || steps == 0 { continue; }
         let Some(col) = tokens.get(p) else { continue };
         if col.kind != TokKind::Word || col.text.starts_with('@') { continue; }
+        // The ascending-key story is about a persistent table's statistics
+        // histogram lagging its inserts. A DMV, catalog view, TVF result
+        // (`sys.fn_trace_gettable(...)`), CTE or a #temp table populated moments
+        // ago by the same proc has no such histogram.
+        let stmt_start = statement_start(tokens, i);
+        if all_sources_non_indexable(tokens, stmt_start, i, &ctes, batches[i]) { continue; }
 
         // DATEADD( … ) must contain a negative offset (the `-N`) and a now() fn.
         let mut j = i + 1;

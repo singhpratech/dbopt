@@ -1,0 +1,10 @@
+{
+  "also_fires": [],
+  "category": "sargability",
+  "must_fire": [
+    "sarg.or_chain",
+    "sarg.leading_wildcard"
+  ],
+  "must_not_fire": [],
+  "server_version": 2022
+}

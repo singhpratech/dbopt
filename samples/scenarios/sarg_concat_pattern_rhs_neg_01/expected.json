@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "sarg.leading_wildcard"
+  ],
+  "category": "sargability",
+  "must_fire": [],
+  "must_not_fire": [
+    "sarg.string_concat_in_predicate"
+  ],
+  "server_version": 2022
+}

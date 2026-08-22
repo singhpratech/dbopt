@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["sarg.leading_wildcard"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "sargability"
+}

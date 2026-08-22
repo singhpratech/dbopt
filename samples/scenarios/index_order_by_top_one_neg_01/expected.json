@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "index.order_by_forces_sort"
+  ],
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "server_version": 2022,
+  "category": "index"
+}

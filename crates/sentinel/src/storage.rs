@@ -1530,6 +1530,47 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Per-index read/write persistence over the last `days` days of
+    /// index-usage captures. `days_observed` is the number of distinct capture
+    /// days the instance has ANY delta row for (the monitor only writes rows
+    /// for indexes whose counters moved, so an index absent from a day was
+    /// idle that day). Empty when nothing was captured in the window.
+    pub fn index_usage_history(&self, instance_id: i64, days: i64) -> anyhow::Result<Vec<IndexUsageHistoryRow>> {
+        let since = Utc::now().timestamp_millis() - days.max(1) * 86_400_000;
+        let lock = self.conn.lock().expect("sentinel storage mutex poisoned");
+        let days_observed: i64 = lock.query_row(
+            "SELECT COUNT(DISTINCT captured_at / 86400000) FROM index_usage_delta
+             WHERE instance_id = ?1 AND captured_at >= ?2",
+            params![instance_id, since],
+            |r| r.get(0),
+        )?;
+        if days_observed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = lock.prepare(
+            "SELECT db_name, schema_name, table_name, index_name,
+                    COUNT(DISTINCT CASE WHEN seeks_delta + scans_delta + lookups_delta > 0 THEN captured_at / 86400000 END) AS days_with_reads,
+                    COUNT(DISTINCT CASE WHEN updates_delta > 0 THEN captured_at / 86400000 END) AS days_with_writes
+             FROM index_usage_delta
+             WHERE instance_id = ?1 AND captured_at >= ?2 AND index_name <> ''
+             GROUP BY db_name, schema_name, table_name, index_name",
+        )?;
+        let rows = stmt
+            .query_map(params![instance_id, since], |r| {
+                Ok(IndexUsageHistoryRow {
+                    db_name: r.get(0)?,
+                    schema_name: r.get(1)?,
+                    table_name: r.get(2)?,
+                    index_name: r.get(3)?,
+                    days_observed,
+                    days_with_reads: r.get(4)?,
+                    days_with_writes: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn update_index_snapshot(
         &self,
         instance_id: i64,
@@ -2170,6 +2211,21 @@ pub struct MissingIndexRow {
     pub user_seeks: i64,
     pub avg_user_impact: f64,
     pub avg_total_user_cost: f64,
+}
+
+/// Days the monitor watched an index (index-usage deltas captured for the
+/// instance) and on how many of them it saw reads / writes. Read back by the
+/// advisor to promote "never used since restart" once a week of monitored
+/// silence backs it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexUsageHistoryRow {
+    pub db_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub index_name: String,
+    pub days_observed: i64,
+    pub days_with_reads: i64,
+    pub days_with_writes: i64,
 }
 
 /// Read-back of [`Storage::missing_index_history`]: how persistently the DMV

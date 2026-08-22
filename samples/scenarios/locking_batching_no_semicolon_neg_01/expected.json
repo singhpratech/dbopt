@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "locking.dml_without_batching"
+  ],
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "server_version": 2022,
+  "category": "locking"
+}

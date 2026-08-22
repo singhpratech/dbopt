@@ -42,6 +42,15 @@ fn is_exists_subquery(tokens: &[Token], i: usize) -> bool {
     }
 }
 
+/// Is this SELECT the head of an `IN (SELECT ...)` subquery?
+fn is_in_subquery(tokens: &[Token], i: usize) -> bool {
+    let Some(open_at) = prev_significant(tokens, i) else { return false };
+    if tokens[open_at].text != "(" { return false; }
+    prev_significant(tokens, open_at)
+        .map(|p| is_keyword_at(tokens, p, "IN"))
+        .unwrap_or(false)
+}
+
 pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for (i, t) in ctx.tokens.iter().enumerate() {
@@ -88,8 +97,24 @@ pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
                 }
                 break;
             }
-            if let Some((_, nxt)) = next_nonws(ctx.tokens, at) {
+            if let Some((star_at, nxt)) = next_nonws(ctx.tokens, at) {
                 if nxt.kind == TokKind::Punct && nxt.text == "*" {
+                    // `col IN (SELECT * FROM @tv)` — a single-column source
+                    // by definition (IN requires one column), so there is no
+                    // wider column set to project.
+                    if is_in_subquery(ctx.tokens, i) {
+                        continue;
+                    }
+                    // `SELECT * INTO #snapshot FROM …` — a temp-table copy
+                    // of a rowset is all columns by intent.
+                    if next_significant(ctx.tokens, star_at)
+                        .filter(|k| is_keyword_at(ctx.tokens, *k, "INTO"))
+                        .and_then(|k| next_significant(ctx.tokens, k))
+                        .map(|k| ctx.tokens[k].text.starts_with('#'))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     out.push(finding(
                         "hygiene.select_star",
                         Severity::Warning,
@@ -104,6 +129,33 @@ pub fn select_star(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Is the table a `WITH (NOLOCK)` hint at `hint_idx` applies to a `sys.*` /
+/// `INFORMATION_SCHEMA.*` object? Walks back over the hint's `(`, `WITH`, an
+/// optional alias and the object name, stopping at the FROM/JOIN/`,` that
+/// introduced it.
+fn hint_target_is_catalog(tokens: &[Token<'_>], hint_idx: usize) -> bool {
+    let mut k = hint_idx;
+    let mut steps = 0;
+    while steps < 10 {
+        let Some(p) = prev_significant(tokens, k) else { return false };
+        let t = &tokens[p];
+        if is_keyword_at(tokens, p, "FROM") || is_keyword_at(tokens, p, "JOIN")
+            || t.text == "," || t.text == ";"
+        {
+            return false;
+        }
+        if t.kind == TokKind::Word
+            && (is_word(t, "sys") || is_word(t, "INFORMATION_SCHEMA"))
+            && next_significant(tokens, p).map(|n| tokens[n].text == ".").unwrap_or(false)
+        {
+            return true;
+        }
+        k = p;
+        steps += 1;
+    }
+    false
+}
+
 pub fn nolock_hint(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for (i, t) in ctx.tokens.iter().enumerate() {
@@ -111,6 +163,12 @@ pub fn nolock_hint(ctx: &RuleCtx) -> Vec<Finding> {
             // require it to look like a table hint: preceded by ( or WITH (
             let prev = ctx.tokens.get(i.wrapping_sub(1));
             let looks_like_hint = prev.map(|p| p.text == "(" || is_word(p, "WITH")).unwrap_or(false);
+            // `sys.dm_exec_query_stats WITH (NOLOCK)` — DMVs and catalog views
+            // are in-memory / system-managed; there is no page to dirty-read,
+            // so the hint is inert rather than dangerous.
+            if looks_like_hint && hint_target_is_catalog(ctx.tokens, i) {
+                continue;
+            }
             if looks_like_hint {
                 out.push(finding(
                     "hygiene.nolock",
@@ -146,6 +204,8 @@ fn cursor_shape(tokens: &[Token], cursor_idx: usize) -> CursorShape {
     let mut fast_forward = false;
     let mut static_or_fwd = false;
     let mut admin_source = false;
+    let mut temp_source = false;
+    let mut source_names: Vec<String> = Vec::new();
     let mut loop_has_dml = false;
     let mut j = cursor_idx + 1;
     let mut for_at: Option<usize> = None;
@@ -166,6 +226,7 @@ fn cursor_shape(tokens: &[Token], cursor_idx: usize) -> CursorShape {
     if let Some(f) = for_at {
         let mut saw_source = false;
         let mut all_catalog = true;
+        let mut all_temp = true;
         let mut k = f + 1;
         let mut depth = 0i32;
         while k < tokens.len() {
@@ -183,31 +244,168 @@ fn cursor_shape(tokens: &[Token], cursor_idx: usize) -> CursorShape {
                     saw_source = true;
                     let catalog = src == "sys" || src == "information_schema" || src == "master" || src == "msdb";
                     if !catalog { all_catalog = false; }
+                    if !(src.starts_with('#') || src.starts_with('@')) { all_temp = false; }
+                    source_names.push(src);
                 }
             }
             k += 1;
         }
         admin_source = saw_source && all_catalog;
+        temp_source = saw_source && all_temp;
     }
 
-    // Loop body: from the declaration to DEALLOCATE / batch end. Any
-    // INSERT/UPDATE/DELETE/MERGE in there is row-by-row DML.
-    let mut k = cursor_idx + 1;
-    while k < tokens.len() {
-        if is_batch_separator(tokens, k) || is_word(&tokens[k], "DEALLOCATE") { break; }
+    // Loop body. The fetch loop is `WHILE @@FETCH_STATUS = 0 <stmt|BEGIN … END>`;
+    // only DML that *starts a statement* inside that block is row-by-row DML.
+    // Scanning "until DEALLOCATE" instead blamed the cursor for every INSERT
+    // in the rest of a DEALLOCATE-less procedure, and a plain keyword scan
+    // matched `INSERT` inside dynamic-SQL string literals and comments.
+    let (body_start, body_end) = fetch_loop_body(tokens, cursor_idx);
+    let mut body_has_exec = false;
+    let mut k = body_start;
+    while k < body_end {
         let t = &tokens[k];
-        if is_keyword_at(tokens, k, "INSERT") || is_keyword_at(tokens, k, "UPDATE")
-            || is_keyword_at(tokens, k, "DELETE") || is_keyword_at(tokens, k, "MERGE")
-        {
-            // `FOR UPDATE` inside the declaration already counted; a bare
-            // `UPDATE` anywhere else in the loop is a write per fetched row.
-            let _ = t;
-            loop_has_dml = true;
-            break;
+        if t.kind == TokKind::Word && !t.text.starts_with('[') && !t.text.starts_with('"') {
+            if is_keyword_at(tokens, k, "EXEC") || is_keyword_at(tokens, k, "EXECUTE") {
+                body_has_exec = true;
+            }
+            if (is_keyword_at(tokens, k, "INSERT") || is_keyword_at(tokens, k, "UPDATE")
+                || is_keyword_at(tokens, k, "DELETE") || is_keyword_at(tokens, k, "MERGE"))
+                && starts_statement_in_block(tokens, k)
+            {
+                // `UPDATE @work SET is_processed = 1 WHERE …` against the
+                // cursor's own temp/table-variable driver list is loop
+                // bookkeeping, not per-row DML on data.
+                if temp_source && dml_target(tokens, k).map(|n| source_names.iter().any(|s| *s == n)).unwrap_or(false) {
+                    k += 1;
+                    continue;
+                }
+                loop_has_dml = true;
+                break;
+            }
         }
         k += 1;
     }
+    // A cursor over a prepared list of names/commands (`#DatabaseList`,
+    // `@tmpDatabases`, `#drop_commands`) whose loop only EXECs is the same
+    // admin loop as one over sys.databases: it runs a command per row and
+    // has no set-based form.
+    // A read-only walk over a session table (`@Errors`, `#commands`) is the
+    // same shape as the sys.databases admin loop: the rows were built by this
+    // batch and each one drives procedural work (EXEC, PRINT, RAISERROR).
+    // Only DML inside the loop makes it row-by-row processing.
+    if !admin_source && temp_source && !loop_has_dml {
+        admin_source = true;
+    }
+    let _ = body_has_exec;
     CursorShape { read_only, admin_source, loop_has_dml }
+}
+
+/// Token range `[start, end)` of the cursor's fetch loop body: the statement
+/// or `BEGIN … END` block after the first `WHILE @@FETCH_STATUS` following the
+/// declaration. Falls back to "declaration → CLOSE/DEALLOCATE/batch end" when
+/// there is no such loop.
+fn fetch_loop_body(tokens: &[Token], cursor_idx: usize) -> (usize, usize) {
+    let mut k = cursor_idx + 1;
+    let mut fallback_end = tokens.len();
+    while k < tokens.len() {
+        if is_batch_separator(tokens, k) { fallback_end = k; break; }
+        if is_keyword_at(tokens, k, "DEALLOCATE") { fallback_end = k; break; }
+        if is_keyword(&tokens[k], "WHILE") {
+            // The tokenizer splits `@@FETCH_STATUS` into `@` + `@FETCH_STATUS`;
+            // accept either shape.
+            let cond_ok = next_significant(tokens, k).map(|n| {
+                let t = tokens[n].text;
+                t.eq_ignore_ascii_case("@@FETCH_STATUS")
+                    || (t == "@" && next_significant(tokens, n)
+                        .map(|m| tokens[m].text.eq_ignore_ascii_case("@FETCH_STATUS"))
+                        .unwrap_or(false))
+            }).unwrap_or(false);
+            if cond_ok {
+                // Skip the condition: tokens up to the first BEGIN or the
+                // first statement head on a later line.
+                let mut j = k + 1;
+                let mut depth = 0i32;
+                while j < tokens.len() {
+                    let t = &tokens[j];
+                    if t.text == "(" { depth += 1; }
+                    else if t.text == ")" { depth -= 1; }
+                    else if depth == 0 && is_keyword(t, "BEGIN") {
+                        return (j + 1, matching_end(tokens, j));
+                    } else if depth == 0 && j > k + 2 && t.line != tokens[k].line
+                        && (starts_statement(tokens, j) || is_keyword(t, "FETCH"))
+                    {
+                        let mut e = j;
+                        while e < tokens.len() && tokens[e].text != ";" && !is_batch_separator(tokens, e) { e += 1; }
+                        return (j, e);
+                    }
+                    j += 1;
+                }
+                return (k, tokens.len());
+            }
+        }
+        k += 1;
+    }
+    (cursor_idx + 1, fallback_end)
+}
+
+/// Index of the `END` that closes the `BEGIN` at `begin_idx` (or the end of
+/// the token stream). `BEGIN TRAN`/`BEGIN TRY`/`BEGIN CATCH` and
+/// `END TRY`/`END CATCH` do not nest blocks.
+fn matching_end(tokens: &[Token], begin_idx: usize) -> usize {
+    let mut depth = 0i32;
+    let mut j = begin_idx;
+    while j < tokens.len() {
+        let _ = &tokens[j];
+        let next_is = |w: &str| next_significant(tokens, j).map(|n| is_keyword(&tokens[n], w)).unwrap_or(false);
+        if is_keyword_at(tokens, j, "BEGIN") {
+            if !(next_is("TRAN") || next_is("TRANSACTION") || next_is("TRY") || next_is("CATCH") || next_is("DISTRIBUTED")) {
+                depth += 1;
+            }
+        } else if is_keyword_at(tokens, j, "END") {
+            if !(next_is("TRY") || next_is("CATCH")) {
+                depth -= 1;
+                if depth == 0 { return j; }
+            }
+        } else if is_batch_separator(tokens, j) {
+            return j;
+        }
+        j += 1;
+    }
+    tokens.len()
+}
+
+/// Lower-cased, unbracketed target name of the DML statement starting at `i`
+/// (`INSERT [INTO] t`, `UPDATE t`, `DELETE [FROM] t`, `MERGE [INTO] t`).
+fn dml_target(tokens: &[Token], i: usize) -> Option<String> {
+    let mut n = next_significant(tokens, i)?;
+    if is_keyword(&tokens[n], "INTO") || is_keyword(&tokens[n], "FROM") || is_keyword(&tokens[n], "TOP") {
+        if is_keyword(&tokens[n], "TOP") {
+            // TOP (n) / TOP n
+            n = next_significant(tokens, n)?;
+            if tokens[n].text == "(" {
+                while n < tokens.len() && tokens[n].text != ")" { n += 1; }
+            }
+        }
+        n = next_significant(tokens, n)?;
+    }
+    let t = &tokens[n];
+    if t.kind != TokKind::Word { return None; }
+    Some(t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase())
+}
+
+/// Is the DML keyword at `i` the first token of a statement (rather than a
+/// word inside an expression, a string, a hint or a column name)?
+fn starts_statement_in_block(tokens: &[Token], i: usize) -> bool {
+    if tokens[i].kind != TokKind::Word { return false; }
+    match prev_significant(tokens, i) {
+        None => true,
+        Some(p) => {
+            let t = &tokens[p];
+            t.text == ";" || t.text == ")" || is_keyword(t, "BEGIN") || is_keyword(t, "END")
+                || is_keyword(t, "ELSE") || is_keyword(t, "THEN")
+                || t.line != tokens[i].line
+        }
+    }
 }
 
 pub fn cursor_usage(ctx: &RuleCtx) -> Vec<Finding> {
@@ -215,7 +413,24 @@ pub fn cursor_usage(ctx: &RuleCtx) -> Vec<Finding> {
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
         if !is_keyword_at(tokens, i, "CURSOR") { continue; }
+        // `DECLARE @c CURSOR` (or `@c CURSOR,` in a declaration list) only
+        // declares a cursor *variable*; the cursor itself is defined by a
+        // later `SET @c = CURSOR FOR …`, which this loop reaches on its own.
+        // Reporting the declaration as a "row-by-row DML loop" blamed a type
+        // name for whatever DML followed it in the batch.
+        if prev_significant(tokens, i)
+            .map(|p| tokens[p].text.starts_with('@'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let shape = cursor_shape(tokens, i);
+        if shape.admin_source {
+            // The documented exception: a catalog-driven DBA loop (per
+            // database / per table) has no set-based equivalent. Silent,
+            // including when the loop collects results into a table.
+            continue;
+        }
         if shape.loop_has_dml {
             out.push(finding(
                 "hygiene.cursor",
@@ -225,11 +440,6 @@ pub fn cursor_usage(ctx: &RuleCtx) -> Vec<Finding> {
                 Some("Rewrite the loop as a single set-based UPDATE / MERGE / INSERT … SELECT (join the cursor's SELECT to the target instead of fetching a row at a time). If the batch must be bounded, loop over `UPDATE TOP (n) … WHERE …` chunks, not rows.".into()),
             ));
             break; // one finding is enough; the recommendation is the same
-        }
-        if shape.admin_source {
-            // The documented exception: a catalog-driven DBA loop (per
-            // database / per table) has no set-based equivalent. Silent.
-            continue;
         }
         if shape.read_only {
             out.push(finding(
@@ -269,6 +479,46 @@ fn top_owner<'a>(tokens: &'a [Token<'a>], i: usize) -> Option<&'a Token<'a>> {
     None
 }
 
+/// Is the only source after this FROM a DMF that returns at most one row per
+/// input handle (`sys.dm_exec_sql_text(h)`, `sys.dm_exec_query_plan(h)`, …)?
+fn from_is_single_row_dmf(tokens: &[Token<'_>], from_at: usize) -> bool {
+    let Some(s) = next_significant(tokens, from_at) else { return false };
+    if !is_word(&tokens[s], "sys") { return false; }
+    let Some(d) = next_significant(tokens, s) else { return false };
+    if tokens[d].text != "." { return false; }
+    let Some(n) = next_significant(tokens, d) else { return false };
+    let name = bare_name(&tokens[n]);
+    let single_row = matches!(
+        name.as_str(),
+        "dm_exec_sql_text" | "dm_exec_query_plan" | "dm_exec_text_query_plan"
+            | "dm_exec_input_buffer" | "dm_exec_query_statistics_xml"
+            | "dm_exec_query_plan_stats" | "fn_get_sql"
+    );
+    if !single_row { return false; }
+    let Some(open) = next_significant(tokens, n) else { return false };
+    if tokens[open].text != "(" { return false; }
+    // Nothing else may join in: walk the rest of the statement at depth 0.
+    let mut depth = 0i32;
+    let mut j = open;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; if depth < 0 { return true; } }
+        else if depth == 0 && (t.text == ";" || t.text == "," || is_keyword_at(tokens, j, "JOIN")
+            || is_keyword_at(tokens, j, "APPLY"))
+        {
+            return t.text == ";";
+        }
+        else if depth == 0 && (is_keyword_at(tokens, j, "WHERE") || is_keyword_at(tokens, j, "ORDER")
+            || starts_statement(tokens, j))
+        {
+            return true;
+        }
+        j += 1;
+    }
+    true
+}
+
 pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -285,12 +535,15 @@ pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
         // scan forward up to a statement terminator (;) or end and see if ORDER BY appears
         let mut j = i + 1;
         let mut has_order = false;
+        let mut from_at: Option<usize> = None;
         let mut depth = 0i32;
         while j < tokens.len() {
             let tk = &tokens[j];
             if tk.text == "(" { depth += 1; }
             else if tk.text == ")" { depth -= 1; if depth < 0 { break; } }
             else if depth == 0 && tk.text == ";" { break; }
+            else if depth == 0 && from_at.is_none() && is_keyword_at(tokens, j, "FROM") { from_at = Some(j); }
+            else if depth == 0 && j > i + 1 && from_at.is_none() && starts_statement(tokens, j) { break; }
             else if depth == 0 && is_word(tk, "ORDER") {
                 if let Some(n) = tokens.get(j + 1) {
                     if is_word(n, "BY") { has_order = true; break; }
@@ -298,6 +551,12 @@ pub fn top_without_order_by(ctx: &RuleCtx) -> Vec<Finding> {
             }
             j += 1;
         }
+        // `SELECT TOP (1) @v = …` with no FROM is a single-row assignment:
+        // there is no row set for TOP to pick an arbitrary subset of.
+        let Some(from_at) = from_at else { continue };
+        // `TOP 1 text FROM sys.dm_exec_sql_text(h)` — the only source is a
+        // DMF that returns exactly one row per handle; TOP is a scalar guard.
+        if from_is_single_row_dmf(tokens, from_at) { continue; }
         if !has_order {
             out.push(finding(
                 "hygiene.top_without_order_by",
@@ -423,7 +682,7 @@ fn join_bounds_target(tokens: &[Token], j: usize) -> bool {
 
 /// The object a DML statement targets: the token after `UPDATE`, or after
 /// `DELETE [FROM]`.
-fn dml_target<'a>(tokens: &'a [Token<'a>], i: usize, is_delete: bool) -> Option<&'a Token<'a>> {
+fn dml_target_token<'a>(tokens: &'a [Token<'a>], i: usize, is_delete: bool) -> Option<&'a Token<'a>> {
     let mut j = prev_next(tokens, i)?;
     // `DELETE TOP (5000) FROM #t` — step over the row limiter, or the target
     // reads as `TOP` and every temp-table/alias check silently fails.
@@ -754,7 +1013,7 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
         // Measured against 37k lines of expert-written production T-SQL, these
         // three shapes accounted for nearly every critical-severity report on
         // code that was entirely correct.
-        if let Some(target) = dml_target(tokens, i, is_delete) {
+        if let Some(target) = dml_target_token(tokens, i, is_delete) {
             let name = bare_name(target);
             // A table variable or temp table is session-scoped and holds only
             // what this batch put in it; clearing or rewriting all of it is the
@@ -823,6 +1082,47 @@ pub fn update_delete_no_where(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Is the first statement after `SET ROWCOUNT n` an INSERT/UPDATE/DELETE/MERGE?
+/// `SET ROWCOUNT 0` (reset) never counts.
+fn set_rowcount_governs_dml(tokens: &[Token<'_>], set_idx: usize) -> bool {
+    let Some(v) = next_significant(tokens, set_idx + 1) else { return false };
+    if tokens[v].kind == TokKind::Number && tokens[v].text.trim() == "0" { return false; }
+    let mut j = v + 1;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.kind == TokKind::Comment || t.text == ";" { j += 1; continue; }
+        if is_batch_separator(tokens, j) { return false; }
+        if is_keyword_at(tokens, j, "INSERT") || is_keyword_at(tokens, j, "UPDATE")
+            || is_keyword_at(tokens, j, "DELETE") || is_keyword_at(tokens, j, "MERGE")
+        {
+            return true;
+        }
+        // `SET ROWCOUNT 10; WITH cte AS (...) DELETE ...` — look through a CTE
+        // prefix; anything else is a non-DML statement.
+        if is_keyword_at(tokens, j, "WITH") {
+            let mut depth = 0i32;
+            let mut k = j + 1;
+            while k < tokens.len() {
+                if tokens[k].text == "(" { depth += 1; }
+                else if tokens[k].text == ")" { depth -= 1; }
+                else if depth == 0 && (is_keyword_at(tokens, k, "INSERT") || is_keyword_at(tokens, k, "UPDATE")
+                    || is_keyword_at(tokens, k, "DELETE") || is_keyword_at(tokens, k, "MERGE"))
+                {
+                    return true;
+                }
+                else if depth == 0 && (is_keyword_at(tokens, k, "SELECT") && tokens.get(k.wrapping_sub(1)).map(|p| p.text == ")").unwrap_or(false)) {
+                    return false;
+                }
+                else if depth == 0 && tokens[k].text == ";" { return false; }
+                k += 1;
+            }
+            return false;
+        }
+        return false;
+    }
+    false
+}
+
 pub fn set_rowcount(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -830,6 +1130,10 @@ pub fn set_rowcount(ctx: &RuleCtx) -> Vec<Finding> {
         if !is_word(t, "SET") { continue; }
         if let Some(n) = tokens.get(i + 1) {
             if is_word(n, "ROWCOUNT") {
+                // Only the DML use is deprecated. `SET ROWCOUNT 10; SELECT …`
+                // still limits a SELECT in every version and is not on the
+                // deprecation list, so look at what the next statement is.
+                if !set_rowcount_governs_dml(tokens, i) { continue; }
                 out.push(finding(
                     "deprecated.set_rowcount_dml",
                     Severity::Warning,
@@ -919,6 +1223,71 @@ pub fn merge_statement_upsert(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Is every assignment to `var` in this file a lone string literal
+/// (`SET @sql = N'…';` / `DECLARE @sql nvarchar(max) = N'…'`), with no
+/// concatenation, `+=`, or expression anywhere? False when there is no
+/// assignment at all — an unknown value is treated as dynamic.
+fn variable_only_holds_literal(tokens: &[Token<'_>], var: &str) -> bool {
+    let mut assignments = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind != TokKind::Word || !t.text.eq_ignore_ascii_case(var) { continue; }
+        let Some(mut n) = next_significant(tokens, i) else { continue };
+        // `DECLARE @sql nvarchar(max) = N'…'` — step over the type to its `=`.
+        if tokens[n].kind == TokKind::Word && !tokens[n].text.starts_with('@')
+            && prev_significant(tokens, i)
+                .map(|p| is_keyword_at(tokens, p, "DECLARE") || tokens[p].text == ",")
+                .unwrap_or(false)
+        {
+            let Some(mut after_type) = next_significant(tokens, n) else { continue };
+            if tokens[after_type].text == "(" {
+                let mut depth = 0i32;
+                let mut k = after_type;
+                while k < tokens.len() {
+                    if tokens[k].text == "(" { depth += 1; }
+                    else if tokens[k].text == ")" { depth -= 1; if depth == 0 { break; } }
+                    k += 1;
+                }
+                let Some(a) = next_significant(tokens, k) else { continue };
+                after_type = a;
+            }
+            if tokens[after_type].text != "=" { continue; }
+            n = after_type;
+        }
+        let nt = &tokens[n];
+        // `@sql += …` is concatenation; the tokenizer may split it as `+` `=`.
+        if nt.text == "+=" || (nt.text == "+" && next_significant(tokens, n).map(|m| tokens[m].text == "=").unwrap_or(false)) {
+            return false;
+        }
+        if nt.text != "=" { continue; }
+        // `WHERE @sql = …` comparisons are not assignments; only SET / SELECT /
+        // DECLARE-list positions are. (`@p = @sql` parameter passing too.)
+        let Some(p) = prev_significant(tokens, i) else { continue };
+        let pt = &tokens[p];
+        let assigning = is_keyword_at(tokens, p, "SET") || is_keyword_at(tokens, p, "SELECT")
+            || pt.text == "," || is_keyword_at(tokens, p, "DECLARE")
+            || is_word(pt, "MAX") || pt.text == ")" || pt.kind == TokKind::Word;
+        if !assigning { continue; }
+        assignments += 1;
+        let Some(mut v) = next_significant(tokens, n) else { return false };
+        // `N'…'` may arrive as a Word `N` followed by the string token.
+        if tokens[v].kind == TokKind::Word && tokens[v].text.eq_ignore_ascii_case("N")
+            && tokens.get(v + 1).map(|s| s.kind == TokKind::String).unwrap_or(false)
+        {
+            v += 1;
+        }
+        if tokens[v].kind != TokKind::String { return false; }
+        let Some(after) = next_significant(tokens, v) else { return true };
+        let at = &tokens[after];
+        let ends = at.text == ";" || at.text == "," || is_batch_separator(tokens, after)
+            || starts_statement(tokens, after) || is_keyword_at(tokens, after, "IF")
+            || is_keyword_at(tokens, after, "BEGIN") || is_keyword_at(tokens, after, "END")
+            || is_keyword_at(tokens, after, "ELSE") || is_keyword_at(tokens, after, "SET")
+            || is_keyword_at(tokens, after, "PRINT");
+        if !ends { return false; }
+    }
+    assignments > 0
+}
+
 pub fn exec_dynamic_without_sp_executesql(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -929,6 +1298,10 @@ pub fn exec_dynamic_without_sp_executesql(ctx: &RuleCtx) -> Vec<Finding> {
         let Some(n2) = tokens.get(i + 2) else { continue };
         if n2.kind != TokKind::Word { continue; }
         if !n2.text.starts_with('@') { continue; }
+        // A variable only ever assigned a single constant literal carries no
+        // runtime value into the string: there is nothing to parameterize and
+        // nothing to inject into. `EXEC (@sql)` there is a plain batch.
+        if variable_only_holds_literal(tokens, n2.text) { continue; }
         out.push(finding(
             "hygiene.exec_string_no_sp_executesql",
             Severity::Error,
@@ -944,6 +1317,23 @@ pub fn exec_dynamic_without_sp_executesql(ctx: &RuleCtx) -> Vec<Finding> {
 /// A schema-qualified function call in the select list is almost always a scalar
 /// UDF, which executes row-by-row (RBAR) and (pre-2019) forces a serial plan.
 /// Heuristic: a `Word . Word (` call appearing between SELECT and the matching FROM.
+/// Does the SELECT at `select_idx` have a FROM clause of its own (a row source),
+/// as opposed to being a single-row assignment / constant select?
+fn select_has_from(tokens: &[Token<'_>], select_idx: usize) -> bool {
+    let mut j = select_idx + 1;
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; if depth < 0 { return false; } }
+        else if depth == 0 && (t.text == ";" || is_batch_separator(tokens, j)) { return false; }
+        else if depth == 0 && is_keyword_at(tokens, j, "FROM") { return true; }
+        else if depth == 0 && starts_statement(tokens, j) { return false; }
+        j += 1;
+    }
+    false
+}
+
 pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -961,7 +1351,10 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             in_proj = false;
             continue;
         }
-        if is_word(t, "SELECT") { in_proj = true; continue; }
+        // Only a SELECT with a row source runs its list once per row. A
+        // FROM-less `SELECT @x = dbo.fn(@p)` evaluates the function exactly
+        // once, so the RBAR claim would be false.
+        if is_word(t, "SELECT") { in_proj = select_has_from(tokens, i); continue; }
         if is_word(t, "FROM") { in_proj = false; continue; }
         if !in_proj || t.kind != TokKind::Word { continue; }
         // pattern: <schema> . <fn> (
@@ -975,16 +1368,26 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             // The condition above already proved `fname` is a Word token; bind
             // it instead of unwrapping so a future refactor can't panic here.
             let Some(fname) = fname else { continue };
-            let schema = t.text.to_ascii_lowercase();
+            let schema = bare_name(t);
             if matches!(schema.as_str(), "sys" | "information_schema") { continue; }
             // `col.value('...')`, `col.nodes(...)`, `xmlcol.query(...)` are XML
             // *methods* on a column, not schema-qualified scalar UDFs. They have
             // no schema, no UDF, and nothing to inline — this was the single
             // largest false-positive class on a real application schema.
-            let fname_lc = fname.text.to_ascii_lowercase();
+            // Compared bracket-stripped: `[c].[value](` is the same method.
+            // hierarchyid / geography / geometry instance methods are the same
+            // shape and equally not UDFs.
+            let fname_lc = bare_name(fname);
             if matches!(
                 fname_lc.as_str(),
                 "value" | "nodes" | "query" | "exist" | "modify"
+                    | "tostring" | "getlevel" | "getancestor" | "getdescendant"
+                    | "isdescendantof" | "getreparentedvalue" | "getroot"
+                    | "stastext" | "stasbinary" | "stdistance" | "stintersects"
+                    | "stbuffer" | "stcontains" | "stwithin" | "stlength" | "starea"
+                    | "stequals" | "stunion" | "stcentroid" | "stenvelope"
+                    | "stgeometrytype" | "stpointn" | "stsrid" | "stx" | "sty"
+                    | "lat" | "long" | "z" | "m" | "makevalid" | "reduce"
             ) {
                 continue;
             }
@@ -993,7 +1396,9 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             if i > 0 && tokens[i - 1].text == "." {
                 continue;
             }
-            if !seen.insert((t.start, t.text)) { continue; }
+            // One finding per function per line: the same call repeated across
+            // a long expression is one piece of advice, not four.
+            if !seen.insert((t.line, schema.clone(), fname_lc.clone())) { continue; }
             out.push(finding(
                 "hygiene.scalar_udf_in_select",
                 Severity::Warning,
@@ -1008,6 +1413,45 @@ pub fn scalar_udf_in_select(ctx: &RuleCtx) -> Vec<Finding> {
 
 /// `ORDER BY <ordinal>` (e.g. `ORDER BY 1, 2`). Ordering by column position is
 /// fragile: editing the SELECT list silently reorders the result.
+/// Does the SELECT that owns the ORDER BY at `order_idx` project exactly one
+/// expression (no top-level comma, no `*`)?
+fn select_list_is_single_expression(tokens: &[Token<'_>], order_idx: usize) -> bool {
+    // Walk back to the owning SELECT at paren depth 0.
+    let mut k = order_idx;
+    let mut depth = 0i32;
+    let mut select_at: Option<usize> = None;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" {
+            if depth == 0 { break; }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if t.text == ";" || is_batch_separator(tokens, k) { break; }
+            if is_keyword_at(tokens, k, "SELECT") { select_at = Some(k); break; }
+        }
+    }
+    let Some(s) = select_at else { return false };
+    let mut depth = 0i32;
+    let mut j = s + 1;
+    let mut saw_expr = false;
+    while j < order_idx {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 {
+            if is_keyword_at(tokens, j, "FROM") { break; }
+            if t.text == "," || t.text == "*" { return false; }
+            if t.kind != TokKind::Comment { saw_expr = true; }
+        }
+        j += 1;
+    }
+    saw_expr
+}
+
 pub fn order_by_ordinal(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -1017,6 +1461,10 @@ pub fn order_by_ordinal(ctx: &RuleCtx) -> Vec<Finding> {
         if !by.map(|b| is_word(b, "BY")).unwrap_or(false) { continue; }
         let first = tokens.get(i + 2);
         if first.map(|f| f.kind == TokKind::Number).unwrap_or(false) {
+            // `SELECT ',' + name FROM … ORDER BY 1` — a single-expression
+            // select list has exactly one position, so editing it cannot
+            // silently change the sort. Nothing to warn about.
+            if select_list_is_single_expression(tokens, i) { continue; }
             out.push(finding(
                 "hygiene.order_by_ordinal",
                 Severity::Warning,

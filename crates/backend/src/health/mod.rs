@@ -78,6 +78,11 @@ pub struct HealthReport {
     /// window: history that ended months ago is `None` here (see
     /// `last_capture_secs` for how old the newest sample actually is).
     pub monitoring_age_secs: Option<i64>,
+    /// `running` (newest capture within the last 15 min) | `stopped` (store
+    /// has history but the feed is dead) | `never` (nothing captured). The UI
+    /// must say "monitor stopped", not "monitoring for 86 days", when it is
+    /// `stopped` — `monitoring_age_secs` is `None` in that state.
+    pub monitor_state: String,
     /// Seconds since the NEWEST sentinel capture (`now - MAX(captured_at)`), or
     /// `None` when nothing was ever captured. This is the staleness signal:
     /// a monitor that stopped 86 days ago still has a 7-day "age", but its
@@ -237,6 +242,18 @@ pub struct SignalSummary {
     pub deadlock_count: i64,
     pub blocking_incidents: i64,
     pub regressed_queries: u32,
+    /// Indexes ≥ 30 % fragmented on ≥ 1,000 pages, or read-mostly with fill factor < 70.
+    #[serde(default)]
+    pub fragmented_indexes: u32,
+    /// Statistics objects flagged stale (see `dmv::stats_recs`).
+    #[serde(default)]
+    pub stale_statistics: u32,
+    /// text / ntext / image columns.
+    #[serde(default)]
+    pub deprecated_columns: u32,
+    /// Query-Store statements with parameter-sniffing skew.
+    #[serde(default)]
+    pub sniffing_queries: u32,
 }
 
 // ===========================================================================
@@ -470,6 +487,10 @@ fn merge_into(host: &mut Issue, other: Issue, what: &str) {
             value: format!("2 {what}"),
             source: Some(format!("{}:{}", other.source, other.kind)),
         }),
+    }
+    if other.source == "advisor" && host.kind == "fragmented_index" {
+        let n = host.metrics.iter().find(|m| m.label == "Merged").and_then(|m| m.value.split(' ').next()?.parse::<u32>().ok()).unwrap_or(2);
+        host.title = format!("Rebuild {n} indexes on {} (fragmentation / fill factor)", table_key(&host.affected_object));
     }
     if other.source == "advisor" && host.kind == "duplicate_index" {
         // Several redundant indexes on one table: say so in the headline.

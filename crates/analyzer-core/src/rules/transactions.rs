@@ -455,6 +455,26 @@ pub fn begin_tran_without_commit(ctx: &RuleCtx) -> Vec<Finding> {
 ///   * `SAVE TRAN sp; … ROLLBACK TRAN sp;` — rolling back to a *savepoint* the
 ///     batch declared is not a top-level close at all.
 /// Also refuses delimited identifiers (`[COMMIT]`, `[Rollback]` as column names).
+/// True if a `CREATE|ALTER TRIGGER` header precedes index `i` in the same
+/// batch (no `GO` in between).
+fn inside_trigger_body(tokens: &[Token<'_>], i: usize) -> bool {
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if is_kw(t, "GO") {
+            return false;
+        }
+        if is_kw(t, "TRIGGER") {
+            let p = k.checked_sub(1).map(|q| &tokens[q]);
+            if p.map(|p| is_kw(p, "CREATE") || is_kw(p, "ALTER")).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn commit_rollback_without_begin(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -480,6 +500,13 @@ pub fn commit_rollback_without_begin(ctx: &RuleCtx) -> Vec<Finding> {
             }
             // @@TRANCOUNT / XACT_STATE() guarded close is the documented idiom.
             if guarded_by_trancount(tokens, i) {
+                i += 1;
+                continue;
+            }
+            // ROLLBACK inside a trigger body is the documented way to reject
+            // the firing DML: a trigger always runs inside that statement's
+            // transaction, so there is no BEGIN TRAN by design.
+            if rollback && inside_trigger_body(tokens, i) {
                 i += 1;
                 continue;
             }

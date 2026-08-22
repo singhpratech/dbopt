@@ -1,0 +1,14 @@
+SET NOCOUNT ON;
+EXEC dbo.usp_OrderDetail $(OID);
+EXEC dbo.usp_CustomerOrderSummary $(CID);
+EXEC dbo.usp_CustomerByEmail 'user$(CID)@example$(E7).com';
+EXEC dbo.usp_ShipmentByTracking N'TRK$(TRK)A';
+EXEC dbo.usp_ShipmentByTrackingTyped 'TRK$(TRK)B';
+EXEC dbo.usp_LogOrderAction $(OID), 'UPDATE';
+EXEC dbo.usp_CategoryByName 'Category $(CAT)';
+EXEC dbo.usp_CategoryPriceStats $(CAT);
+EXEC dbo.usp_CategoryLowStock $(CAT);
+EXEC dbo.usp_ProductSales $(PID);
+EXEC dbo.usp_CustomerEvents $(CID);
+EXEC dbo.usp_TopProductsInCategory $(CAT);
+EXEC dbo.usp_AnnotateAudit $(AID), 'reviewed by ops: escalated to tier 2, customer contacted, refund authorised, shipment re-dispatched via alternate carrier, case closed';

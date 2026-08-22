@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "plan.merge_join_hint_pinned"
+  ],
+  "category": "joins",
+  "must_fire": [],
+  "must_not_fire": [
+    "joins.join_without_on"
+  ],
+  "server_version": 2022
+}

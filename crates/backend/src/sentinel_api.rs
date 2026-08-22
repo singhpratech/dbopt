@@ -506,6 +506,63 @@ pub fn attach_missing_index_history(bundle: &mut analyzer_core::dmv::DmvBundle, 
     bundle.missing_index_history = missing_index_history(&req.server, db, MISSING_INDEX_HISTORY_DAYS);
 }
 
+/// Days of index-usage history the advisor reads back for "never used" recs.
+pub const INDEX_USAGE_HISTORY_DAYS: i64 = 30;
+
+/// Fill `bundle.index_usage_history` from the monitor's store for the
+/// connection the bundle was pulled over. Indexes the monitor never saw a
+/// counter move on still get a row (days_observed, 0 reads, 0 writes) so the
+/// advisor can say "watched N days, never read" — but ONLY when the instance
+/// was actually captured; an unmonitored server leaves `[]`.
+pub fn attach_index_usage_history(bundle: &mut analyzer_core::dmv::DmvBundle, req: &ConnectReq) {
+    let db = if !bundle.scanned_database.is_empty() {
+        Some(bundle.scanned_database.as_str())
+    } else {
+        req.database.as_deref()
+    };
+    let path = SentinelConfig::default_db_path();
+    let Ok(storage) = Storage::open(&path) else { return };
+    let instance_id = match db {
+        Some(d) if !d.is_empty() => storage.get_instance_id_for_db(&req.server, d),
+        _ => storage.get_instance_id(&req.server),
+    };
+    let Some(instance_id) = instance_id else { return };
+    let rows = storage.index_usage_history(instance_id, INDEX_USAGE_HISTORY_DAYS).unwrap_or_default();
+    let Some(days_observed) = rows.first().map(|r| r.days_observed) else { return };
+    let mut out: Vec<analyzer_core::dmv::IndexUsageHistory> = rows
+        .into_iter()
+        .filter(|r| db.map(|d| r.db_name.eq_ignore_ascii_case(d)).unwrap_or(true))
+        .map(|r| analyzer_core::dmv::IndexUsageHistory {
+            schema_name: r.schema_name,
+            table_name: r.table_name,
+            index_name: r.index_name,
+            days_observed: r.days_observed.max(0) as u32,
+            days_with_reads: r.days_with_reads.max(0) as u32,
+            days_with_writes: r.days_with_writes.max(0) as u32,
+        })
+        .collect();
+    // Indexes with no delta row at all over the window were idle every day.
+    for u in &bundle.index_usage {
+        if u.is_heap() { continue; }
+        let seen = out.iter().any(|h| {
+            h.schema_name.eq_ignore_ascii_case(&u.schema_name)
+                && h.table_name.eq_ignore_ascii_case(&u.table_name)
+                && h.index_name.eq_ignore_ascii_case(&u.index_name)
+        });
+        if !seen {
+            out.push(analyzer_core::dmv::IndexUsageHistory {
+                schema_name: u.schema_name.clone(),
+                table_name: u.table_name.clone(),
+                index_name: u.index_name.clone(),
+                days_observed: days_observed.max(0) as u32,
+                days_with_reads: 0,
+                days_with_writes: 0,
+            });
+        }
+    }
+    bundle.index_usage_history = out;
+}
+
 pub fn build_report(window: TimeRange) -> WeeklyReport {
     let path = SentinelConfig::default_db_path();
     match Storage::open(&path) {

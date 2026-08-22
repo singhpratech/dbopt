@@ -1,0 +1,13 @@
+{
+  "also_fires": [
+    "joins.distinct_with_join_fanout",
+    "modern.missing_schema_prefix",
+    "sarg.function_on_column"
+  ],
+  "category": "joins",
+  "must_fire": [],
+  "must_not_fire": [
+    "joins.function_on_join_column"
+  ],
+  "server_version": 2022
+}

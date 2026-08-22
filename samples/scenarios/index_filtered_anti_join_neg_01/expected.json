@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "index.filtered_index_opportunity_soft_delete"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "index"
+}

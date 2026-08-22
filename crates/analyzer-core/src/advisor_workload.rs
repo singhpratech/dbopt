@@ -219,7 +219,7 @@ mod tests {
             included_columns: inc.iter().map(|s| s.to_string()).collect(),
             avg_user_impact: 90.0,
             user_seeks: 100,
-            avg_total_user_cost: 10.0,
+            avg_total_user_cost: 10.0, ..Default::default()
         }
     }
 

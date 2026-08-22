@@ -248,7 +248,31 @@ pub fn scalar_udf_in_computed_column(ctx: &RuleCtx) -> Vec<Finding> {
                 if a_is_ident && dot_ok && c_is_ident && lp_ok {
                     // Skip well-known builtins schemas.
                     let schema = a.text.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
-                    if !matches!(schema.as_str(), "sys" | "information_schema") {
+                    // `<column>.<Method>()` on a hierarchyid / geometry /
+                    // geography column (`DocumentNode.GetLevel()`) has the
+                    // same `ident.ident(` shape but is a built-in system-type
+                    // method, not a scalar UDF.
+                    let method = c.text.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
+                    let system_type_method = matches!(
+                        method.as_str(),
+                        "getlevel" | "getancestor" | "getdescendant" | "isdescendantof" | "getroot"
+                            | "getreparentedvalue" | "tostring" | "parse" | "read" | "write"
+                            | "stastext" | "stasbinary" | "stx" | "sty" | "lat" | "long" | "z" | "m"
+                            | "stdistance" | "starea" | "stlength" | "stintersects" | "stcontains"
+                            | "stwithin" | "stoverlaps" | "sttouches" | "stcrosses" | "stdisjoint"
+                            | "stequals" | "stbuffer" | "stcentroid" | "stenvelope" | "stboundary"
+                            | "stconvexhull" | "stdifference" | "stunion" | "stintersection"
+                            | "stsymdifference" | "stsrid" | "stdimension" | "stgeometrytype"
+                            | "stnumpoints" | "stpointn" | "ststartpoint" | "stendpoint"
+                            | "stisvalid" | "stisempty" | "stissimple" | "stisclosed" | "stisring"
+                            | "stnumgeometries" | "stgeometryn" | "stexteriorring"
+                            | "stnuminteriorring" | "stinteriorringn" | "stpointonsurface"
+                            | "makevalid" | "reduce" | "envelopeangle" | "envelopecenter"
+                            | "numrings" | "ringn" | "instanceof" | "bufferwithtolerance"
+                            | "bufferwithcurves" | "curvetolinewithtolerance" | "shortestlineto"
+                            | "aswkt" | "aswkb" | "asgml" | "astextzm" | "filter" | "hasz" | "hasm"
+                    );
+                    if !matches!(schema.as_str(), "sys" | "information_schema") && !system_type_method {
                         // Find column name: the Word immediately preceding AS.
                         let col_token = i.checked_sub(1).and_then(|ix| tokens.get(ix));
                         let col_name = col_token.map(|c| c.text).unwrap_or("<col>");
@@ -348,11 +372,11 @@ pub fn table_variable_large(ctx: &RuleCtx) -> Vec<Finding> {
 // 4. plan.option_recompile_overuse
 // ---------------------------------------------------------------------------
 
-pub fn option_recompile_overuse(ctx: &RuleCtx) -> Vec<Finding> {
-    let tokens = ctx.tokens;
-    let mut count = 0u32;
-    let mut first_loc = None;
-
+/// Token indexes of every `OPTION (... RECOMPILE ...)` hint. `WITH RECOMPILE`
+/// in a procedure header is a different (and much coarser) mechanism and is
+/// deliberately NOT collected here.
+fn option_recompile_hints(tokens: &[Token]) -> Vec<usize> {
+    let mut hints = Vec::new();
     let mut i = 0usize;
     while i < tokens.len() {
         let t = &tokens[i];
@@ -360,30 +384,49 @@ pub fn option_recompile_overuse(ctx: &RuleCtx) -> Vec<Finding> {
         let Some(open) = tokens.get(i + 1) else { i += 1; continue; };
         if open.text != "(" { i += 1; continue; }
         let Some(close) = match_paren(tokens, i + 1) else { i += 1; continue; };
-        let mut found = false;
-        let mut k = i + 2;
-        while k < close {
-            if is_word(&tokens[k], "RECOMPILE") { found = true; break; }
-            k += 1;
-        }
-        if found {
-            if first_loc.is_none() { first_loc = Some(make_loc(t)); }
-            count += 1;
+        if (i + 2..close).any(|k| is_word(&tokens[k], "RECOMPILE")) {
+            hints.push(i);
         }
         i = close + 1;
     }
+    hints
+}
 
-    if count >= 3 {
-        vec![finding(
-            "plan.option_recompile_overuse",
-            Severity::Warning,
-            format!("Found {} OPTION (RECOMPILE) hints in this batch — heavy recompile use defeats plan caching and burns CPU.", count),
-            first_loc,
-            Some("On 2022+ rely on Parameter Sensitive Plan optimization (PSP, compat 160) instead of sprinkling OPTION (RECOMPILE). On 2017-2019 prefer OPTION (OPTIMIZE FOR (@p = literal)) or split the proc.".into()),
-        )]
-    } else {
-        vec![]
+/// Rough query count for the density test: every SELECT/INSERT/UPDATE/DELETE/
+/// MERGE keyword (subqueries included — they are compiled work too).
+fn query_keyword_count(tokens: &[Token]) -> usize {
+    tokens
+        .iter()
+        .filter(|t| ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|k| is_word(t, k)))
+        .count()
+}
+
+/// "Heavy" RECOMPILE use is a DENSITY, not an absolute count. Three or five
+/// hints in a 4,000–10,000-line maintenance script are targeted fixes on a
+/// handful of statements; three hints on a three-query procedure mean every
+/// call compiles everything. We fire when at least 3 hints cover at least a
+/// third of the script's query keywords.
+fn recompile_overuse(tokens: &[Token], hints: &[usize]) -> bool {
+    hints.len() >= 3 && hints.len() * 3 >= query_keyword_count(tokens)
+}
+
+pub fn option_recompile_overuse(ctx: &RuleCtx) -> Vec<Finding> {
+    let tokens = ctx.tokens;
+    let hints = option_recompile_hints(tokens);
+    if !recompile_overuse(tokens, &hints) {
+        return vec![];
     }
+    vec![finding(
+        "plan.option_recompile_overuse",
+        Severity::Warning,
+        format!(
+            "Found {} OPTION (RECOMPILE) hints across {} queries in this batch — heavy recompile use defeats plan caching and burns CPU.",
+            hints.len(),
+            query_keyword_count(tokens)
+        ),
+        Some(make_loc(&tokens[hints[0]])),
+        Some("On 2022+ rely on Parameter Sensitive Plan optimization (PSP, compat 160) instead of sprinkling OPTION (RECOMPILE). On 2017-2019 prefer OPTION (OPTIMIZE FOR (@p = literal)) or split the proc.".into()),
+    )]
 }
 
 // ---------------------------------------------------------------------------
@@ -553,35 +596,53 @@ pub fn recompile_defeats_psp(ctx: &RuleCtx) -> Vec<Finding> {
     if ctx.server_version.unwrap_or(0) < 2022 { return out; }
     let tokens = ctx.tokens;
 
-    // Collect RECOMPILE hint occurrences. 3+ is the "overuse" rule's territory.
-    let recompiles: Vec<usize> = tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| is_word(t, "RECOMPILE"))
-        .map(|(i, _)| i)
-        .collect();
-    if recompiles.is_empty() || recompiles.len() >= 3 { return out; }
+    // Only OPTION (RECOMPILE) statement hints count — `WITH RECOMPILE` in a
+    // CREATE PROCEDURE header was previously matched by the bare keyword.
+    // Three or more hints in one batch is a deliberate recompile POLICY (DBA
+    // tooling does this on purpose, and `option_recompile_overuse` owns the
+    // density question); the PSP trade-off is worth raising only for a sparse,
+    // targeted hint.
+    let hints = option_recompile_hints(tokens);
+    if hints.is_empty() || hints.len() >= 3 { return out; }
 
-    // Require a parameter-driven equality predicate: `<ident> = @param`.
-    let mut param_eq = false;
-    for (i, t) in tokens.iter().enumerate() {
-        if t.text != "=" { continue; }
-        let left_ok = tokens
-            .get(i.wrapping_sub(1))
-            .map(|p| p.kind == TokKind::Word && !is_at_ident(p))
-            .unwrap_or(false);
-        let right_ok = tokens.get(i + 1).map(is_at_ident).unwrap_or(false);
-        if left_ok && right_ok { param_eq = true; break; }
+    for &h in &hints {
+        // The parameter-driven equality predicate must be in the SAME
+        // statement as the hint: walk back to the statement's start (the
+        // previous `;` / GO, or the depth-0 query keyword that begins it).
+        let mut start = 0usize;
+        let mut depth = 0i32;
+        let mut k = h;
+        while k > 0 {
+            k -= 1;
+            let t = &tokens[k];
+            if t.text == ")" {
+                depth += 1;
+            } else if t.text == "(" {
+                if depth == 0 { start = k + 1; break; }
+                depth -= 1;
+            } else if depth == 0 {
+                if t.text == ";" || is_word(t, "GO") { start = k + 1; break; }
+                if ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|kw| is_word(t, kw)) {
+                    start = k;
+                    break;
+                }
+            }
+        }
+        // `<column> = @param` — a bare column on the left (never a @variable,
+        // which would be an assignment) and a parameter on the right.
+        let param_eq = (start..h).any(|i| {
+            tokens[i].text == "="
+                && tokens.get(i.wrapping_sub(1)).map(|p| p.kind == TokKind::Word && !is_at_ident(p)).unwrap_or(false)
+                && tokens.get(i + 1).map(is_at_ident).unwrap_or(false)
+        });
+        if !param_eq { continue; }
+        out.push(finding(
+            "plan.recompile_defeats_psp",
+            Severity::Info,
+            "OPTION (RECOMPILE) on a parameter-driven equality predicate forces a fresh compile every execution and disables Parameter-Sensitive Plan optimization (SQL Server 2022+), which can cache a distinct plan per cardinality bucket automatically.",
+            Some(make_loc(&tokens[h])),
+            Some("On 2022+, evaluate removing OPTION (RECOMPILE) and letting PSP handle skewed parameter distributions; or use OPTIMIZE FOR / a filtered index when one plan clearly dominates. Reserve RECOMPILE for genuinely volatile schemas.".into()),
+        ));
     }
-    if !param_eq { return out; }
-
-    let at = &tokens[recompiles[0]];
-    out.push(finding(
-        "plan.recompile_defeats_psp",
-        Severity::Info,
-        "OPTION (RECOMPILE) on a parameter-driven equality predicate forces a fresh compile every execution and disables Parameter-Sensitive Plan optimization (SQL Server 2022+), which can cache a distinct plan per cardinality bucket automatically.",
-        Some(make_loc(at)),
-        Some("On 2022+, evaluate removing OPTION (RECOMPILE) and letting PSP handle skewed parameter distributions; or use OPTIMIZE FOR / a filtered index when one plan clearly dominates. Reserve RECOMPILE for genuinely volatile schemas.".into()),
-    ));
     out
 }

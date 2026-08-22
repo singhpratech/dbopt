@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "index.missing_index_from_predicate"
+  ],
+  "category": "tran",
+  "must_fire": [],
+  "must_not_fire": [
+    "tran.close_without_begin"
+  ],
+  "server_version": 2022
+}

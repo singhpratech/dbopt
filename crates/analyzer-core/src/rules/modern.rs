@@ -1,4 +1,5 @@
-use super::{finding, is_batch_separator, is_keyword, is_keyword_at, is_word, make_loc, RuleCtx};
+use super::{finding, is_batch_separator, is_keyword, is_keyword_at, is_word, make_loc,
+            next_significant, prev_significant, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -32,6 +33,39 @@ fn is_statement_head(t: &Token<'_>) -> bool {
         .any(|kw| is_keyword(t, kw))
 }
 
+/// Index of the `)` that closes the `(` at `open`.
+fn close_paren(tokens: &[Token<'_>], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut j = open;
+    while j < tokens.len() {
+        if tokens[j].text == "(" { depth += 1; }
+        else if tokens[j].text == ")" {
+            depth -= 1;
+            if depth == 0 { return Some(j); }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Is the word at `i` the name a CTE is being defined under?
+///
+/// Covers `WITH x AS (`, `, y AS (` and the column-list form
+/// `WITH x (a, b, c) AS (`, and looks past comments: a real-world
+/// `WITH /* walk the chain */ blockers (…) AS (` left `blockers` uncollected,
+/// so every later `FROM blockers` was reported as an unqualified table.
+fn is_cte_definition(tokens: &[Token<'_>], i: usize) -> bool {
+    let Some(mut a) = next_significant(tokens, i) else { return false };
+    if tokens[a].text == "(" {
+        // `name (col, col) AS (` — skip the column list.
+        let Some(close) = close_paren(tokens, a) else { return false };
+        let Some(after) = next_significant(tokens, close) else { return false };
+        a = after;
+    }
+    if !is_word(&tokens[a], "AS") { return false; }
+    next_significant(tokens, a).map(|k| tokens[k].text == "(").unwrap_or(false)
+}
+
 pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -46,9 +80,9 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     for (i, t) in tokens.iter().enumerate() {
         if is_batch_separator(tokens, i) { batch += 1; continue; }
         if t.kind != TokKind::Word { continue; }
-        let is_cte = tokens.get(i + 1).map(|n| is_word(n, "AS")).unwrap_or(false)
-            && tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false);
-        if is_cte { cte_names.insert((batch, t.text.to_ascii_lowercase())); }
+        if is_cte_definition(tokens, i) {
+            cte_names.insert((batch, t.text.to_ascii_lowercase()));
+        }
     }
     // Heuristic: after FROM / JOIN / UPDATE / INTO, expect schema.Object, not Object alone.
     let mut batch = 0u32;
@@ -153,7 +187,12 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
         // A trailing `(` means this is a table-valued function call, not a
         // table. The advice is the same (qualify it) but calling it a "table
         // reference" reads as a mistake to anyone who knows their own schema.
-        let kind = if tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false) {
+        // Only FROM / JOIN can name a table-valued function: after `INSERT
+        // INTO t (` or `UPDATE t (` the parenthesis opens a column list.
+        let after_from_or_join = is_word(t, "FROM") || is_word(t, "JOIN");
+        let kind = if after_from_or_join
+            && tokens.get(i + 2).map(|n| n.text == "(").unwrap_or(false)
+        {
             "Function"
         } else {
             "Table reference"
@@ -169,6 +208,26 @@ pub fn missing_schema_prefix(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// `CREATE PROCEDURE x ... AS EXTERNAL NAME asm.[ns.Class].Method` is a CLR
+/// procedure: it has no T-SQL body, so there is nowhere to put SET NOCOUNT ON.
+fn is_clr_procedure(tokens: &[Token<'_>], create_idx: usize) -> bool {
+    let mut j = create_idx + 1;
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && (t.text == ";" || is_batch_separator(tokens, j)) { return false; }
+        else if depth == 0 && is_keyword(t, "AS") {
+            let Some(n) = next_significant(tokens, j) else { return false };
+            return is_keyword(&tokens[n], "EXTERNAL")
+                && next_significant(tokens, n).map(|m| is_keyword(&tokens[m], "NAME")).unwrap_or(false);
+        }
+        j += 1;
+    }
+    false
+}
+
 pub fn missing_set_nocount(ctx: &RuleCtx) -> Vec<Finding> {
     // Only fires if this looks like a stored proc body (CREATE/ALTER PROC … AS) and SET NOCOUNT ON is absent
     let tokens = ctx.tokens;
@@ -178,7 +237,10 @@ pub fn missing_set_nocount(ctx: &RuleCtx) -> Vec<Finding> {
     for (i, t) in tokens.iter().enumerate() {
         if (is_word(t, "CREATE") || is_word(t, "ALTER")) && first_create.is_none() {
             if let (Some(n1), Some(n2)) = (tokens.get(i + 1), tokens.get(i + 2)) {
-                if (is_word(n1, "PROC") || is_word(n1, "PROCEDURE")) && n2.kind == TokKind::Word {
+                if (is_word(n1, "PROC") || is_word(n1, "PROCEDURE"))
+                    && n2.kind == TokKind::Word
+                    && !is_clr_procedure(tokens, i)
+                {
                     is_proc = true;
                     first_create = Some(make_loc(t));
                 }
@@ -209,16 +271,25 @@ pub fn exec_string_concat(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
     for (i, t) in tokens.iter().enumerate() {
-        if !(is_word(t, "EXEC") || is_word(t, "EXECUTE")) { continue; }
-        // EXEC (' …' + @var) is a classic injection + plan-cache-busting pattern
-        // crude: see if within the next ~12 tokens we hit '+' after a string
+        if !(is_keyword(t, "EXEC") || is_keyword(t, "EXECUTE")) { continue; }
+        // EXEC ('…' + @var) is the injection + plan-cache-busting pattern. The
+        // concatenation has to be *inside the EXEC's parentheses*: a flat
+        // look-ahead used to run past `EXEC sp_executesql @stmt` into the next
+        // statement's string-building and blame the call the rule itself
+        // recommends. `EXEC sp_executesql` / `EXEC @proc` never match.
+        let Some(open) = next_significant(tokens, i) else { continue };
+        if tokens[open].text != "(" { continue; }
+        let Some(close) = close_paren(tokens, open) else { continue };
         let mut saw_string = false;
         let mut saw_concat = false;
-        for k in 1..14 {
-            let Some(n) = tokens.get(i + k) else { break };
-            if n.text == ";" { break; }
+        for n in &tokens[open + 1..close] {
             if n.kind == TokKind::String { saw_string = true; }
             if n.text == "+" && saw_string { saw_concat = true; break; }
+        }
+        // `EXEC ('…') AT linked_server` runs on another instance; pass-through
+        // execution has no sp_executesql form, so there is nothing to rewrite to.
+        if next_significant(tokens, close).map(|k| is_keyword(&tokens[k], "AT")).unwrap_or(false) {
+            continue;
         }
         if saw_concat {
             out.push(finding(
@@ -231,6 +302,93 @@ pub fn exec_string_concat(ctx: &RuleCtx) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Is the `FOR XML PATH('')` at `for_idx` the CSV-building idiom STRING_AGG
+/// replaces, rather than a query that builds real XML?
+///
+/// The idiom is recognisable by its shape: the subquery is wrapped in
+/// `STUFF((...` or its select list starts with a separator literal
+/// (`',' + col`). A select list whose alias is `[processing-instruction(x)]`,
+/// or an element/attribute path (`[Database/Locks]`, `[Lock/@mode]`), is
+/// producing XML nodes — STRING_AGG cannot build those, so stay silent.
+fn is_csv_build_idiom(tokens: &[Token<'_>], for_idx: usize) -> bool {
+    // Walk back to the SELECT that owns this FOR XML, and to the `(` that
+    // encloses the subquery (if any).
+    let mut depth = 0i32;
+    let mut k = for_idx;
+    let mut select_idx: Option<usize> = None;
+    let mut enclosing_open: Option<usize> = None;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" {
+            if depth == 0 { enclosing_open = Some(k); break; }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if t.text == ";" || is_batch_separator(tokens, k) { break; }
+            if is_keyword(t, "SELECT") { select_idx = Some(k); break; }
+        }
+    }
+    let select_idx = match select_idx {
+        Some(s) => s,
+        None => {
+            // Enclosing paren found before a SELECT: the SELECT is just inside it.
+            match enclosing_open.and_then(|o| next_significant(tokens, o)) {
+                Some(s) if is_keyword(&tokens[s], "SELECT") => s,
+                _ => return false,
+            }
+        }
+    };
+    if enclosing_open.is_none() {
+        // Re-derive the enclosing paren from the SELECT for the STUFF test.
+        let mut d = 0i32;
+        let mut m = select_idx;
+        while m > 0 {
+            m -= 1;
+            if tokens[m].text == ")" { d += 1; }
+            else if tokens[m].text == "(" {
+                if d == 0 { enclosing_open = Some(m); break; }
+                d -= 1;
+            } else if d == 0 && (tokens[m].text == ";" || is_batch_separator(tokens, m)) { break; }
+        }
+    }
+    // STUFF((SELECT ...  — STUFF within two significant tokens before the paren.
+    let stuff_wrapped = enclosing_open
+        .and_then(|o| prev_significant(tokens, o))
+        .map(|p| {
+            is_keyword(&tokens[p], "STUFF")
+                || (tokens[p].text == "("
+                    && prev_significant(tokens, p).map(|q| is_keyword(&tokens[q], "STUFF")).unwrap_or(false))
+        })
+        .unwrap_or(false);
+
+    // Inspect the select list: SELECT .. FROM (depth 0).
+    let mut depth = 0i32;
+    let mut j = select_idx + 1;
+    let mut leading_separator = false;
+    while j < for_idx {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && is_keyword(t, "FROM") { break; }
+        if t.kind == TokKind::Word && t.text.starts_with('[') {
+            let lo = t.text.to_ascii_lowercase();
+            if lo.contains("processing-instruction") || lo.contains('/') || lo.contains('@') {
+                return false;
+            }
+        }
+        if t.kind == TokKind::String
+            && tokens.get(j + 1).map(|n| n.text == "+").unwrap_or(false)
+        {
+            leading_separator = true;
+        }
+        j += 1;
+    }
+    stuff_wrapped || leading_separator
 }
 
 pub fn string_agg_replaces_for_xml(ctx: &RuleCtx) -> Vec<Finding> {
@@ -251,6 +409,7 @@ pub fn string_agg_replaces_for_xml(ctx: &RuleCtx) -> Vec<Finding> {
         // hand the user code that won't compile. Unknown version still fires
         // (the app defaults targets to 2025).
         if matches!(ctx.server_version, Some(v) if v < 2017) { continue; }
+        if !is_csv_build_idiom(tokens, i) { continue; }
         out.push(finding(
             "modern.string_agg_replaces_for_xml",
             Severity::Info,
@@ -260,6 +419,100 @@ pub fn string_agg_replaces_for_xml(ctx: &RuleCtx) -> Vec<Finding> {
         ));
     }
     out
+}
+
+fn strip_brackets(s: &str) -> String {
+    s.trim_matches(|c| c == '[' || c == ']' || c == '"').to_ascii_lowercase()
+}
+
+/// The alias a `ROW_NUMBER() OVER (...)` is projected under: `... AS rn`,
+/// `... rn` or `rn = ROW_NUMBER() OVER (...)`. None when the window is part of
+/// a larger expression (`x - ROW_NUMBER() …`) or has no alias at all.
+fn row_number_alias(tokens: &[Token<'_>], rn_idx: usize, over_close: usize) -> Option<String> {
+    // `rn = ROW_NUMBER()` form.
+    if let Some(eq) = prev_significant(tokens, rn_idx) {
+        if tokens[eq].text == "=" {
+            if let Some(a) = prev_significant(tokens, eq) {
+                if tokens[a].kind == TokKind::Word && !tokens[a].text.starts_with('@') {
+                    return Some(strip_brackets(tokens[a].text));
+                }
+            }
+        }
+    }
+    let mut k = next_significant(tokens, over_close)?;
+    if is_keyword(&tokens[k], "AS") { k = next_significant(tokens, k)?; }
+    let t = &tokens[k];
+    if t.kind != TokKind::Word { return None; }
+    if ["FROM", "INTO", "AS"].iter().any(|kw| is_keyword(t, kw)) { return None; }
+    Some(strip_brackets(t.text))
+}
+
+/// From `start`, does a WHERE clause in the rest of this batch range-filter
+/// `alias` (`alias BETWEEN …`, `alias > @x`, `@y >= alias`, …)? Equality
+/// (`alias = 1`) is dedup, not pagination, and does not count.
+fn alias_is_range_filtered(tokens: &[Token<'_>], start: usize, alias: &str) -> bool {
+    let is_range_op = |t: &Token<'_>| t.kind == TokKind::Punct
+        && matches!(t.text, ">" | ">=" | "<" | "<=");
+    let mut j = start;
+    let mut in_where = false;
+    // Depth relative to the window's own query: the slicing WHERE sits in the
+    // *enclosing* query, one `)` out (derived table / CTE), so the scan follows
+    // closing parens outward but stops at the end of the statement. Without
+    // the bound, any `WHERE x < 5` later in the same batch vouched for a
+    // ranking column hundreds of lines above it.
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        let tk = &tokens[j];
+        if is_batch_separator(tokens, j) { break; }
+        if tk.text == "(" { depth += 1; }
+        else if tk.text == ")" { depth -= 1; }
+        if tk.text == ";" { break; }
+        if depth <= 0 && j > start && is_statement_head(tk) && !is_keyword(tk, "BEGIN") {
+            // `WITH p AS (… ROW_NUMBER() …) SELECT … FROM p WHERE rn BETWEEN`
+            // — the statement directly after a CTE's `)` is its consumer.
+            let cte_consumer = depth < 0
+                && prev_significant(tokens, j).map(|p| tokens[p].text == ")").unwrap_or(false);
+            if !cte_consumer { break; }
+        }
+        if is_keyword(tk, "WHERE") { in_where = true; }
+        else if is_keyword(tk, "GROUP") || is_keyword(tk, "ORDER") || is_keyword(tk, "HAVING") {
+            in_where = false;
+        }
+        // A window alias is only visible to an *outer* query's WHERE (depth
+        // below the window's own query). A same-level match is a different
+        // column that happens to share the name.
+        if in_where && depth < 0 && tk.kind == TokKind::Word && strip_brackets(tk.text) == alias {
+            // `rn > 1` / `rn >= 2` is the keep-one-per-group dedup idiom
+            // (delete the duplicates), not a page slice.
+            let is_dedup_bound = |op: &str, lit: &Token<'_>| {
+                lit.kind == TokKind::Number
+                    && ((op == ">" && lit.text == "1") || (op == ">=" && lit.text == "2"))
+            };
+            // Pagination needs a LOWER bound on the row number (`rn BETWEEN`,
+            // `rn > @offset`, `@start <= rn`). An upper bound alone
+            // (`rn <= 20`) is a top-N filter, not a page slice.
+            let next_ok = match next_significant(tokens, j) {
+                Some(n) if is_keyword(&tokens[n], "BETWEEN") => true,
+                Some(n) if is_range_op(&tokens[n]) && matches!(tokens[n].text, ">" | ">=") => {
+                    let lit = next_significant(tokens, n).map(|m| &tokens[m]);
+                    !lit.map(|l| is_dedup_bound(tokens[n].text, l)).unwrap_or(false)
+                }
+                _ => false,
+            };
+            let prev_ok = match prev_significant(tokens, j) {
+                Some(p) if is_range_op(&tokens[p]) && matches!(tokens[p].text, "<" | "<=") => {
+                    // `1 < rn` / `2 <= rn` mirror the dedup bound.
+                    let lit = prev_significant(tokens, p).map(|m| &tokens[m]);
+                    let mirrored = match tokens[p].text { "<" => ">", "<=" => ">=", o => o };
+                    !lit.map(|l| is_dedup_bound(mirrored, l)).unwrap_or(false)
+                }
+                _ => false,
+            };
+            if next_ok || prev_ok { return true; }
+        }
+        j += 1;
+    }
+    false
 }
 
 pub fn row_number_pagination(ctx: &RuleCtx) -> Vec<Finding> {
@@ -273,22 +526,20 @@ pub fn row_number_pagination(ctx: &RuleCtx) -> Vec<Finding> {
         if !(n2.kind == TokKind::Punct && n2.text == ")") { continue; }
         let Some(n3) = tokens.get(i + 3) else { continue };
         if !is_word(n3, "OVER") { continue; }
-        // scan forward up to GO or end for a WHERE containing BETWEEN / <= / >=.
-        let mut j = i + 4;
-        let mut found_where_filter = false;
-        let mut in_where = false;
-        while j < tokens.len() {
-            let tk = &tokens[j];
-            if is_word(tk, "GO") { break; }
-            if is_word(tk, "WHERE") { in_where = true; }
-            if in_where {
-                if is_word(tk, "BETWEEN") { found_where_filter = true; break; }
-                if tk.kind == TokKind::Punct && (tk.text == "<=" || tk.text == ">=") {
-                    found_where_filter = true; break;
-                }
-            }
-            j += 1;
-        }
+        // Pagination means an outer query slices on the row number: the window
+        // must be aliased (`AS rn` / `rn = ROW_NUMBER() …`) and a later WHERE
+        // must range-filter that alias. Ranking columns, `rn = 1` dedup and
+        // gaps-and-islands keys all use ROW_NUMBER() without such a filter, and
+        // a bare "any BETWEEN after any ROW_NUMBER" scan reported every one.
+        let Some(over_open) = next_significant(tokens, i + 3) else { continue };
+        if tokens[over_open].text != "(" { continue; }
+        let Some(over_close) = close_paren(tokens, over_open) else { continue };
+        // `PARTITION BY` numbers rows per group: that is dedup / ranking /
+        // gaps-and-islands, never a page over the result set.
+        if tokens[over_open..over_close].iter().any(|t| is_keyword(t, "PARTITION")) { continue; }
+        let alias = row_number_alias(tokens, i, over_close);
+        let Some(alias) = alias else { continue };
+        let found_where_filter = alias_is_range_filtered(tokens, over_close + 1, &alias);
         if found_where_filter {
             out.push(finding(
                 "modern.row_number_pagination_replaces_offset_fetch",
@@ -398,6 +649,79 @@ pub fn date_bucket_pattern(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// Is the recursive CTE body in `[start, end)` a numbers/tally generator?
+///
+/// Shape: anchor `SELECT <int literal>` with no FROM, `UNION ALL`, recursive
+/// member `SELECT n + 1 FROM <self> WHERE n < K` — no join, no string work,
+/// no function calls in the select list. Blocking-chain walks and recursive
+/// string splitters are recursive CTEs too, and GENERATE_SERIES replaces none
+/// of them.
+fn is_tally_cte_body(tokens: &[Token<'_>], start: usize, end: usize) -> bool {
+    // Locate the depth-0 UNION ALL.
+    let mut depth = 0i32;
+    let mut union_at: Option<usize> = None;
+    let mut j = start;
+    while j < end {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 && is_keyword(t, "UNION")
+            && next_significant(tokens, j).map(|n| is_keyword(&tokens[n], "ALL")).unwrap_or(false)
+        {
+            union_at = Some(j);
+            break;
+        }
+        j += 1;
+    }
+    let Some(union_at) = union_at else { return false };
+
+    // Anchor: SELECT with an integer literal and no FROM.
+    let anchor = &tokens[start..union_at];
+    let anchor_has_from = anchor.iter().any(|t| is_keyword(t, "FROM"));
+    let anchor_has_int = anchor.iter().any(|t| t.kind == TokKind::Number && !t.text.contains('.'));
+    if anchor_has_from || !anchor_has_int { return false; }
+
+    // Recursive member: SELECT <list> FROM <self> WHERE <pred>.
+    let mut sel: Option<usize> = None;
+    let mut from_at: Option<usize> = None;
+    let mut where_at: Option<usize> = None;
+    let mut depth = 0i32;
+    let mut j = union_at + 2;
+    while j < end {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; }
+        else if depth == 0 {
+            if sel.is_none() && is_keyword(t, "SELECT") { sel = Some(j); }
+            else if from_at.is_none() && is_keyword(t, "FROM") { from_at = Some(j); }
+            else if where_at.is_none() && is_keyword(t, "WHERE") { where_at = Some(j); }
+            else if is_keyword(t, "JOIN") || is_keyword(t, "APPLY") { return false; }
+        }
+        j += 1;
+    }
+    let (Some(sel), Some(from_at), Some(where_at)) = (sel, from_at, where_at) else { return false };
+    if !(sel < from_at && from_at < where_at) { return false; }
+
+    // Select list: `n + 1 [AS n]` — a plus followed by an integer literal, and
+    // nothing a splitter needs (parentheses, strings, extra columns).
+    let list = &tokens[sel + 1..from_at];
+    let plus_int = list.windows(2).any(|w| w[0].text == "+" && w[1].kind == TokKind::Number);
+    let busy = list.iter().any(|t| t.text == "(" || t.text == "," || t.kind == TokKind::String);
+    if !plus_int || busy { return false; }
+
+    // FROM lists exactly one source (no comma-joins).
+    if tokens[from_at + 1..where_at].iter().any(|t| t.text == "," || t.text == "(") { return false; }
+
+    // WHERE: `n < K` / `n <= K` on a bare column against a literal or variable.
+    let pred = &tokens[where_at + 1..end];
+    pred.windows(3).any(|w| {
+        w[0].kind == TokKind::Word
+            && !w[0].text.starts_with('@')
+            && matches!(w[1].text, "<" | "<=")
+            && (w[2].kind == TokKind::Number || w[2].text.starts_with('@'))
+    })
+}
+
 pub fn generate_series_recursive_cte(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     if ctx.server_version.unwrap_or(0) < 2022 { return out; }
@@ -430,7 +754,7 @@ pub fn generate_series_recursive_cte(ctx: &RuleCtx) -> Vec<Finding> {
             }
             j += 1;
         }
-        if saw_union_all && saw_self_ref {
+        if saw_union_all && saw_self_ref && is_tally_cte_body(tokens, i + 4, j) {
             out.push(finding(
                 "modern.generate_series_replaces_numbers_cte",
                 Severity::Info,

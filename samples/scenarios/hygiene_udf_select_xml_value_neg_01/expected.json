@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.scalar_udf_in_select"
+  ],
+  "also_fires": [
+    "modern.missing_schema_prefix"
+  ],
+  "server_version": 2022,
+  "category": "hygiene"
+}

@@ -1,0 +1,54 @@
+| rule | findings | sampled | TP | FP | NOISE | precision (TP only) | non-FP rate (TP+NOISE) |
+|---|---|---|---|---|---|---|---|
+| modern.missing_schema_prefix | 1072 | 15 | 1 | 0 | 14 | 0.07 | 1.00 |
+| sarg.leading_wildcard | 187 | 15 | 0 | 8 | 7 | 0.00 | 0.47 |
+| sarg.implicit_convert_unicode | 137 | 15 | 0 | 1 | 14 | 0.00 | 0.93 |
+| hygiene.exec_string_no_sp_executesql | 129 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| modern.sp_executesql_optimized_2025 | 102 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| sarg.function_on_column | 93 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| sarg.not_in_nullable | 63 | 15 | 9 | 0 | 6 | 0.60 | 1.00 |
+| tempdb.spill_risk_large_sort | 63 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| modern.string_agg_replaces_for_xml | 62 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| datatype.datetime_legacy | 54 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| hygiene.top_without_order_by | 48 | 15 | 2 | 0 | 13 | 0.13 | 1.00 |
+| ddl.varchar_max_overuse | 41 | 15 | 1 | 0 | 14 | 0.07 | 1.00 |
+| plan.table_variable_large | 40 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| antipattern.correlated_scalar_subquery_in_select | 35 | 15 | 14 | 0 | 1 | 0.93 | 1.00 |
+| antipattern.distinct_many_columns | 31 | 15 | 3 | 0 | 12 | 0.20 | 1.00 |
+| joins.distinct_with_join_fanout | 29 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| sarg.or_chain | 23 | 15 | 0 | 5 | 10 | 0.00 | 0.67 |
+| hygiene.scalar_udf_in_select | 22 | 15 | 12 | 0 | 3 | 0.80 | 1.00 |
+| datatype.implicit_string_length_cast | 21 | 15 | 1 | 0 | 14 | 0.07 | 1.00 |
+| hygiene.select_star | 19 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| hygiene.cursor | 16 | 15 | 0 | 2 | 13 | 0.00 | 0.87 |
+| modern.exec_string_concat | 16 | 15 | 0 | 0 | 15 | 0.00 | 1.00 |
+| modern.missing_set_nocount | 16 | 15 | 1 | 0 | 14 | 0.07 | 1.00 |
+| locking.set_transaction_isolation_read_uncommitted | 13 | 13 | 0 | 0 | 13 | 0.00 | 1.00 |
+| antipattern.count_for_existence | 10 | 10 | 5 | 0 | 5 | 0.50 | 1.00 |
+| hygiene.heap_table | 10 | 10 | 8 | 0 | 2 | 0.80 | 1.00 |
+| plan.merge_join_hint_pinned | 9 | 9 | 0 | 0 | 9 | 0.00 | 1.00 |
+| antipattern.union_should_be_union_all | 8 | 8 | 1 | 7 | 0 | 0.12 | 0.12 |
+| datatype.sysname_general_string | 8 | 8 | 1 | 0 | 7 | 0.12 | 1.00 |
+| ddl.nullable_columns_should_be_explicit | 8 | 8 | 8 | 0 | 0 | 1.00 | 1.00 |
+| security.xp_cmdshell | 7 | 7 | 3 | 0 | 4 | 0.43 | 1.00 |
+| hygiene.global_temp_table | 6 | 6 | 0 | 0 | 6 | 0.00 | 1.00 |
+| joins.comma_cross_join | 5 | 5 | 5 | 0 | 0 | 1.00 | 1.00 |
+| deprecated.lob_legacy_types | 4 | 4 | 4 | 0 | 0 | 1.00 | 1.00 |
+| joins.right_outer_join_readability | 3 | 3 | 2 | 0 | 1 | 0.67 | 1.00 |
+| modern.row_number_pagination_replaces_offset_fetch | 3 | 3 | 0 | 3 | 0 | 0.00 | 0.00 |
+| sarg.scalar_udf_in_predicate | 3 | 3 | 0 | 1 | 2 | 0.00 | 0.67 |
+| config.recovery_model_simple | 2 | 2 | 0 | 0 | 2 | 0.00 | 1.00 |
+| deprecated.sp_dboption | 2 | 2 | 2 | 0 | 0 | 1.00 | 1.00 |
+| index.missing_index_from_predicate | 2 | 2 | 0 | 0 | 2 | 0.00 | 1.00 |
+| joins.function_on_join_column | 2 | 2 | 0 | 0 | 2 | 0.00 | 1.00 |
+| joins.outer_join_filtered_to_inner | 2 | 2 | 0 | 2 | 0 | 0.00 | 0.00 |
+| sarg.string_concat_in_predicate | 2 | 2 | 1 | 1 | 0 | 0.50 | 0.50 |
+| hygiene.at_at_identity | 1 | 1 | 1 | 0 | 0 | 1.00 | 1.00 |
+| hygiene.unbounded_dml | 1 | 1 | 0 | 0 | 1 | 0.00 | 1.00 |
+| index.filtered_index_opportunity_soft_delete | 1 | 1 | 1 | 0 | 0 | 1.00 | 1.00 |
+| plan.option_recompile_overuse | 1 | 1 | 0 | 0 | 1 | 0.00 | 1.00 |
+| sarg.arithmetic_on_column | 1 | 1 | 0 | 0 | 1 | 0.00 | 1.00 |
+| tran.begin_without_try_catch | 1 | 1 | 1 | 0 | 0 | 1.00 | 1.00 |
+| tran.missing_xact_abort | 1 | 1 | 1 | 0 | 0 | 1.00 | 1.00 |
+
+Overall (weighted by findings, 2435 findings, 461 sampled): strict precision (TP only) = 0.091; non-FP rate (TP+NOISE) = 0.946; FP rate = 0.054

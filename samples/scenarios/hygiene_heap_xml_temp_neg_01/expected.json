@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.heap_table"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "hygiene"
+}

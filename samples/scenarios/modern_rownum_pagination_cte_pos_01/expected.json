@@ -1,0 +1,11 @@
+{
+  "must_fire": [
+    "modern.row_number_pagination_replaces_offset_fetch"
+  ],
+  "must_not_fire": [],
+  "also_fires": [
+    "tempdb.spill_risk_large_sort"
+  ],
+  "server_version": 2022,
+  "category": "modern"
+}

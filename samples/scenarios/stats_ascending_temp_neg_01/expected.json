@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "stats.ascending_key_hotspot"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "stats"
+}

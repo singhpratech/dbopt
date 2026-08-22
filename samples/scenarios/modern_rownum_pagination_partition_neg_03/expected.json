@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "modern.row_number_pagination_replaces_offset_fetch"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "modern"
+}

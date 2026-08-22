@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "ddl.varchar_max_overuse"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "ddl"
+}

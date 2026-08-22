@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "antipattern.count_for_existence"
+  ],
+  "also_fires": [
+    "sarg.leading_wildcard"
+  ],
+  "server_version": 2022,
+  "category": "antipattern"
+}

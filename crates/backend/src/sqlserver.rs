@@ -1,6 +1,6 @@
 use crate::routes::ConnectReq;
 use analyzer_core::advisor_workload::QueryWorkloadStat;
-use analyzer_core::dmv::{DmvBundle, IndexUsage, IndexMeta, MissingIndex, PartitionStats};
+use analyzer_core::dmv::{DeprecatedColumn, DmvBundle, IndexMeta, IndexPhysical, IndexUsage, MissingIndex, PartitionStats, QuerySkew, StatsProperties};
 use std::time::Duration;
 use tiberius::{AuthMethod, Client, Config};
 use tokio::net::TcpStream;
@@ -468,6 +468,74 @@ pub struct QueryStoreTopQuery {
     pub max_duration_ms: f64,
     pub avg_cpu_ms: f64,
     pub avg_logical_reads: i64,
+    /// executions × avg CPU — the workload's real cost, not a one-off's size.
+    pub total_cpu_ms: f64,
+    /// executions × avg duration.
+    pub total_duration_ms: f64,
+    /// executions × avg logical reads.
+    pub total_logical_reads: i64,
+    /// `schema.module` when the statement belongs to a stored module.
+    pub object_name: Option<String>,
+}
+
+/// Sort keys `/api/qstore/top` accepts. The default is TOTAL CPU: a one-off
+/// 5-second data load out-ranks every stored procedure on average duration,
+/// which is how the real workload used to hide below the fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopQuerySort {
+    TotalCpu,
+    TotalReads,
+    TotalDuration,
+    AvgDuration,
+    Executions,
+}
+
+impl Default for TopQuerySort {
+    fn default() -> Self { TopQuerySort::TotalCpu }
+}
+
+impl TopQuerySort {
+    fn order_by(self) -> &'static str {
+        match self {
+            TopQuerySort::TotalCpu => "m.total_cpu_ms DESC",
+            TopQuerySort::TotalReads => "m.total_reads DESC",
+            TopQuerySort::TotalDuration => "m.total_ms DESC",
+            TopQuerySort::AvgDuration => "m.avg_ms DESC",
+            TopQuerySort::Executions => "m.execs DESC",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            TopQuerySort::TotalCpu => "total_cpu",
+            TopQuerySort::TotalReads => "total_reads",
+            TopQuerySort::TotalDuration => "total_duration",
+            TopQuerySort::AvgDuration => "avg_duration",
+            TopQuerySort::Executions => "executions",
+        }
+    }
+}
+
+/// True for a statement that ran once and is a DDL / bulk-load shape — a
+/// CREATE INDEX or a data-load INSERT that will never run again and belongs
+/// in the change log, not the workload top list.
+pub fn is_one_off_ddl_or_bulk(executions: i64, sql_text: &str) -> bool {
+    if executions > 1 {
+        return false;
+    }
+    // Query Store stores a module statement with a leading parameter list
+    // ("(@p int)…"); strip it so the verb check sees the statement.
+    let t = sql_text.trim_start();
+    let t = if t.starts_with('(') {
+        t.find(')').map(|i| t[i + 1..].trim_start()).unwrap_or(t)
+    } else {
+        t
+    };
+    let upper: String = t.chars().take(40).collect::<String>().to_ascii_uppercase();
+    const VERBS: &[&str] = &[
+        "CREATE ", "ALTER ", "DROP ", "TRUNCATE ", "BULK ", "INSERT ", "MERGE ", "DBCC ", "UPDATE STATISTICS", "BACKUP ", "RESTORE ",
+    ];
+    VERBS.iter().any(|v| upper.starts_with(v)) || (upper.starts_with("SELECT") && upper.contains(" INTO "))
 }
 
 /// Read the connected database's top long-running queries from Query Store,
@@ -479,29 +547,38 @@ pub struct QueryStoreTopQuery {
 pub async fn query_store_top_queries(
     req: &ConnectReq,
     limit: u32,
+    sort: TopQuerySort,
 ) -> anyhow::Result<Vec<QueryStoreTopQuery>> {
     let limit = limit.clamp(1, 200);
     let mut client = open(req).await?;
+    // Over-fetch so dropping one-off DDL / bulk statements still fills `limit`.
+    let fetch = (limit * 2).clamp(1, 400);
     let sql = format!(
-        "SELECT TOP ({limit}) m.query_id, m.execs, m.avg_ms, m.max_ms, m.avg_cpu_ms, m.avg_reads,
+        "SELECT TOP ({fetch}) m.query_id, m.execs, m.avg_ms, m.max_ms, m.avg_cpu_ms, m.avg_reads,
+                m.total_cpu_ms, m.total_ms, m.total_reads, m.schema_name, m.object_name,
                 CAST(LEFT(qt.query_sql_text, 2000) AS NVARCHAR(2000)) AS sql_text
          FROM (
            SELECT q.query_id,
+                  OBJECT_SCHEMA_NAME(q.object_id) AS schema_name, OBJECT_NAME(q.object_id) AS object_name,
                   CAST(SUM(rs.count_executions) AS BIGINT) AS execs,
                   CAST(SUM(rs.avg_duration * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) / 1000.0 AS FLOAT) AS avg_ms,
                   CAST(MAX(rs.max_duration) / 1000.0 AS FLOAT) AS max_ms,
                   CAST(SUM(rs.avg_cpu_time * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) / 1000.0 AS FLOAT) AS avg_cpu_ms,
                   CAST(SUM(rs.avg_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) AS BIGINT) AS avg_reads,
+                  CAST(SUM(rs.avg_cpu_time * rs.count_executions) / 1000.0 AS FLOAT) AS total_cpu_ms,
+                  CAST(SUM(rs.avg_duration * rs.count_executions) / 1000.0 AS FLOAT) AS total_ms,
+                  CAST(SUM(rs.avg_logical_io_reads * rs.count_executions) AS BIGINT) AS total_reads,
                   MIN(q.query_text_id) AS query_text_id
            FROM sys.query_store_runtime_stats rs
            JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id
            JOIN sys.query_store_query q ON q.query_id = p.query_id
-           GROUP BY q.query_id
+           GROUP BY q.query_id, q.object_id
          ) m
          JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id
          WHERE {probe_filter}
-         ORDER BY m.avg_ms DESC",
-        probe_filter = sentinel::probes::not_own_probe_sql("qt.query_sql_text")
+         ORDER BY {order}",
+        probe_filter = sentinel::probes::not_own_probe_sql("qt.query_sql_text"),
+        order = sort.order_by(),
     );
     let stream = client.simple_query(probe(sql.as_str())).await?;
     let rows = stream.into_first_result().await?;
@@ -511,15 +588,30 @@ pub async fn query_store_top_queries(
         if sentinel::probes::is_own_probe(&sql_text) {
             continue;
         }
+        let executions = r.get::<i64, _>("execs").unwrap_or(0);
+        if is_one_off_ddl_or_bulk(executions, &sql_text) {
+            continue;
+        }
+        let object_name = match (r.get::<&str, _>("schema_name"), r.get::<&str, _>("object_name")) {
+            (Some(s), Some(o)) if !o.is_empty() => Some(format!("{s}.{o}")),
+            _ => None,
+        };
         out.push(QueryStoreTopQuery {
             query_id: r.get::<i64, _>("query_id").unwrap_or(0),
-            executions: r.get::<i64, _>("execs").unwrap_or(0),
+            executions,
             avg_duration_ms: r.get::<f64, _>("avg_ms").unwrap_or(0.0),
             max_duration_ms: r.get::<f64, _>("max_ms").unwrap_or(0.0),
             avg_cpu_ms: r.get::<f64, _>("avg_cpu_ms").unwrap_or(0.0),
             avg_logical_reads: r.get::<i64, _>("avg_reads").unwrap_or(0),
+            total_cpu_ms: r.get::<f64, _>("total_cpu_ms").unwrap_or(0.0),
+            total_duration_ms: r.get::<f64, _>("total_ms").unwrap_or(0.0),
+            total_logical_reads: r.get::<i64, _>("total_reads").unwrap_or(0),
+            object_name,
             sql_text,
         });
+        if out.len() >= limit as usize {
+            break;
+        }
     }
     Ok(out)
 }
@@ -1070,7 +1162,193 @@ async fn current_database(
     }
 }
 
+/// What `pull_dmv_bundle_with` collects beyond the catalog + usage core.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PullOpts {
+    /// Stop after index metadata, usage and partition stats — the cheap
+    /// catalog shape the DB-wide scan needs to check suggestions against
+    /// real indexes and row counts. No physical stats, no Query Store.
+    pub catalog_only: bool,
+}
+
+/// Upper bound on the `sys.dm_db_index_physical_stats` pass. Past it the
+/// advisor reports fragmentation as "not measured" rather than stalling.
+pub const PHYSICAL_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Full bundle for the advise / health paths.
 pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
+    pull_dmv_bundle_with(req, PullOpts::default()).await
+}
+
+/// Catalog shape only (indexes, usage, partition stats): what the DB-wide
+/// static scan consults so its text-derived index advice is checked against
+/// what already exists.
+pub async fn pull_catalog_shape(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
+    pull_dmv_bundle_with(req, PullOpts { catalog_only: true }).await
+}
+
+/// Leaf-level rows of `sys.dm_db_index_physical_stats` for the objects worth
+/// measuring. See the call site for the mode/threshold rationale.
+async fn pull_physical_stats(
+    client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
+) -> anyhow::Result<Vec<IndexPhysical>> {
+    let mut out = Vec::new();
+    // Indexes (index_id ≥ 1) on tables whose reserved size is ≥ 1,000 pages.
+    let q_idx = r#"
+        SELECT s.name, t.name, i.name, CAST(ps.index_id AS INT),
+               CAST(ps.page_count AS BIGINT), CAST(ps.avg_fragmentation_in_percent AS FLOAT),
+               CAST(i.fill_factor AS INT)
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        JOIN (SELECT object_id FROM sys.dm_db_partition_stats GROUP BY object_id HAVING SUM(reserved_page_count) >= 1000) big
+          ON big.object_id = t.object_id
+        CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), t.object_id, NULL, NULL, 'LIMITED') ps
+        JOIN sys.indexes i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+        WHERE t.is_ms_shipped = 0 AND ps.index_id >= 1 AND ps.index_level = 0
+          AND ps.alloc_unit_type_desc = 'IN_ROW_DATA' AND ps.page_count >= 1000
+    "#;
+    let rows = client.simple_query(probe(q_idx)).await?.into_first_result().await?;
+    for r in rows {
+        out.push(IndexPhysical {
+            schema_name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+            table_name:  r.get::<&str, _>(1).unwrap_or("").to_string(),
+            index_name:  r.get::<&str, _>(2).map(|s| s.to_string()),
+            index_id:    r.get::<i32, _>(3).unwrap_or(0),
+            page_count:  r.get::<i64, _>(4).unwrap_or(0).max(0) as u64,
+            avg_fragmentation_pct: r.get::<f64, _>(5).unwrap_or(0.0),
+            avg_page_space_used_pct: None,
+            forwarded_record_count: None,
+            fill_factor: r.get::<i32, _>(6).unwrap_or(0).clamp(0, 100) as u8,
+        });
+    }
+    // Heaps ≥ 128 pages: SAMPLED for forwarded_record_count + density.
+    // Two steps on purpose: a CROSS APPLY of dm_db_index_physical_stats(…, 0, …)
+    // over sys.tables is evaluated before the heap filter can prune it, and the
+    // function raises "Cannot find a row in the system catalog with the index
+    // ID 0" on any table that has a clustered index — which threw away every
+    // index row collected above. So list the heaps first, then probe each one.
+    let q_heaps = r#"
+        SELECT s.name, t.name, CAST(t.object_id AS INT)
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id = 0
+        JOIN (SELECT object_id FROM sys.dm_db_partition_stats WHERE index_id = 0 GROUP BY object_id HAVING SUM(reserved_page_count) >= 128) big
+          ON big.object_id = t.object_id
+        WHERE t.is_ms_shipped = 0
+    "#;
+    let heaps: Vec<(String, String, i32)> = match client.simple_query(probe(q_heaps)).await {
+        Ok(stream) => stream
+            .into_first_result()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| {
+                Some((
+                    r.get::<&str, _>(0)?.to_string(),
+                    r.get::<&str, _>(1)?.to_string(),
+                    r.get::<i32, _>(2)?,
+                ))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(target: "advisor", "heap list unavailable ({e}); forwarded records not measured");
+            Vec::new()
+        }
+    };
+    for (schema_name, table_name, object_id) in heaps {
+        let q_heap = format!(
+            r#"
+            SELECT CAST(ps.page_count AS BIGINT),
+                   CAST(ps.avg_fragmentation_in_percent AS FLOAT),
+                   CAST(ps.avg_page_space_used_in_percent AS FLOAT),
+                   CAST(ps.forwarded_record_count AS BIGINT)
+            FROM sys.dm_db_index_physical_stats(DB_ID(), {object_id}, 0, NULL, 'SAMPLED') ps
+            WHERE ps.index_id = 0 AND ps.alloc_unit_type_desc = 'IN_ROW_DATA'
+            "#
+        );
+        let rows = match client.simple_query(probe(&q_heap)).await {
+            Ok(stream) => stream.into_first_result().await.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(target: "advisor", "physical stats for heap {schema_name}.{table_name} unavailable ({e})");
+                continue;
+            }
+        };
+        for r in rows {
+            out.push(IndexPhysical {
+                schema_name: schema_name.clone(),
+                table_name: table_name.clone(),
+                index_name: None,
+                index_id: 0,
+                page_count: r.get::<i64, _>(0).unwrap_or(0).max(0) as u64,
+                avg_fragmentation_pct: r.get::<f64, _>(1).unwrap_or(0.0),
+                avg_page_space_used_pct: r.get::<f64, _>(2),
+                forwarded_record_count: r.get::<i64, _>(3).map(|n| n.max(0) as u64),
+                fill_factor: 0,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Query-Store queries with ≥ 2 plans whose max logical reads are ≥ 10× the
+/// average — the parameter-sniffing signature. Names the owning module when
+/// there is one. READ-ONLY over `sys.query_store_*`; `[]` when Query Store
+/// is off (the views are empty) and an error only when they are unreadable.
+pub async fn query_store_skew(req: &ConnectReq) -> anyhow::Result<Vec<QuerySkew>> {
+    let mut client = open(req).await?;
+    let sql = format!(
+        "SELECT TOP (25) m.query_id, m.schema_name, m.object_name, m.plans, m.execs, m.avg_reads, m.max_reads, m.avg_ms, m.max_ms,
+                CAST(LEFT(qt.query_sql_text, 400) AS NVARCHAR(400)) AS sql_text
+         FROM (
+           SELECT q.query_id,
+                  OBJECT_SCHEMA_NAME(q.object_id) AS schema_name, OBJECT_NAME(q.object_id) AS object_name,
+                  COUNT(DISTINCT p.plan_id) AS plans,
+                  CAST(SUM(rs.count_executions) AS BIGINT) AS execs,
+                  CAST(SUM(rs.avg_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) AS BIGINT) AS avg_reads,
+                  CAST(MAX(rs.max_logical_io_reads) AS BIGINT) AS max_reads,
+                  CAST(SUM(rs.avg_duration * rs.count_executions) / NULLIF(SUM(rs.count_executions),0) / 1000.0 AS FLOAT) AS avg_ms,
+                  CAST(MAX(rs.max_duration) / 1000.0 AS FLOAT) AS max_ms,
+                  MIN(q.query_text_id) AS query_text_id
+           FROM sys.query_store_runtime_stats rs
+           JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id
+           JOIN sys.query_store_query q ON q.query_id = p.query_id
+           GROUP BY q.query_id, q.object_id
+           HAVING COUNT(DISTINCT p.plan_id) >= 2
+              AND SUM(rs.count_executions) >= 50
+              AND MAX(rs.max_logical_io_reads) >= 10 * (SUM(rs.avg_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions),0))
+         ) m
+         JOIN sys.query_store_query_text qt ON qt.query_text_id = m.query_text_id
+         WHERE {probe_filter}
+         ORDER BY m.max_reads DESC",
+        probe_filter = sentinel::probes::not_own_probe_sql("qt.query_sql_text")
+    );
+    let rows = client.simple_query(probe(&sql)).await?.into_first_result().await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let sql_text = r.get::<&str, _>("sql_text").unwrap_or("").to_string();
+        if sentinel::probes::is_own_probe(&sql_text) {
+            continue;
+        }
+        let object_name = match (r.get::<&str, _>("schema_name"), r.get::<&str, _>("object_name")) {
+            (Some(s), Some(o)) if !o.is_empty() => Some(format!("{s}.{o}")),
+            _ => None,
+        };
+        out.push(QuerySkew {
+            query_id: r.get::<i64, _>("query_id").unwrap_or(0),
+            object_name,
+            plan_count: r.get::<i32, _>("plans").unwrap_or(0).max(0) as u32,
+            executions: r.get::<i64, _>("execs").unwrap_or(0).max(0) as u64,
+            avg_logical_reads: r.get::<i64, _>("avg_reads").unwrap_or(0).max(0) as u64,
+            max_logical_reads: r.get::<i64, _>("max_reads").unwrap_or(0).max(0) as u64,
+            avg_duration_ms: r.get::<f64, _>("avg_ms").unwrap_or(0.0),
+            max_duration_ms: r.get::<f64, _>("max_ms").unwrap_or(0.0),
+            sql_text,
+        });
+    }
+    Ok(out)
+}
+
+pub async fn pull_dmv_bundle_with(req: &ConnectReq, opts: PullOpts) -> anyhow::Result<DmvBundle> {
     let mut client = open(req).await?;
 
     let mut bundle = DmvBundle::default();
@@ -1111,7 +1389,8 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                ISNULL(u.user_scans, 0) AS user_scans,
                ISNULL(u.user_lookups, 0) AS user_lookups,
                ISNULL(u.user_updates, 0) AS user_updates,
-               CAST(CASE WHEN u.index_id IS NULL THEN 1 ELSE 0 END AS BIT) AS no_stats_row
+               CAST(CASE WHEN u.index_id IS NULL THEN 1 ELSE 0 END AS BIT) AS no_stats_row,
+               CAST(i.index_id AS INT) AS index_id
         FROM sys.indexes i
         JOIN sys.tables t ON t.object_id = i.object_id
         JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -1132,6 +1411,7 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 user_lookups:  r.get::<i64, _>(6).unwrap_or(0) as u64,
                 user_updates:  r.get::<i64, _>(7).unwrap_or(0) as u64,
                 no_stats_row:  r.get::<bool, _>(8).unwrap_or(false),
+                index_id:      r.get::<i32, _>(9),
             });
         }
     }
@@ -1159,7 +1439,23 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                       JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
                       WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
                       ORDER BY ic.key_ordinal
-                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '') AS inc_cols
+                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '') AS inc_cols,
+               STUFF((SELECT ',' + ty.name
+                      FROM sys.index_columns ic
+                      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                      JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                      ORDER BY ic.key_ordinal
+                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '') AS key_types,
+               (SELECT CAST(SUM(CASE WHEN c.max_length < 0 THEN 8000 ELSE c.max_length END) AS INT)
+                      FROM sys.index_columns ic
+                      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0) AS key_bytes,
+               CAST(CASE WHEN EXISTS (
+                      SELECT 1 FROM sys.index_columns ic
+                      JOIN sys.default_constraints dc ON dc.parent_object_id = ic.object_id AND dc.parent_column_id = ic.column_id
+                      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                        AND LOWER(dc.definition) LIKE '%newid()%') THEN 1 ELSE 0 END AS BIT) AS has_newid_default
         FROM sys.indexes i
         JOIN sys.tables t ON t.object_id = i.object_id
         JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -1178,6 +1474,9 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 is_clustered:     r.get::<bool, _>(5).unwrap_or(false),
                 key_columns:      split(r.get::<&str, _>(6)),
                 included_columns: split(r.get::<&str, _>(7)),
+                key_column_types: split(r.get::<&str, _>(8)),
+                key_bytes:        r.get::<i32, _>(9).map(|b| b.max(0) as u32),
+                has_newid_default: r.get::<bool, _>(10).unwrap_or(false),
             });
         }
     }
@@ -1217,19 +1516,24 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
     }
 
     // Partition stats (size)
+    // Rows are counted from the IN_ROW_DATA allocation unit only: a partition
+    // with a LOB column has a second (LOB_DATA) unit, and joining allocation
+    // units doubled every row count on such tables (Shipments 300,000 →
+    // "600,000"). Space still sums across every unit.
     let q_size = r#"
         SELECT s.name, t.name, i.name,
-               SUM(p.rows) AS row_count,
+               SUM(CASE WHEN au.type = 1 THEN p.rows ELSE 0 END) AS row_count,
                SUM(au.total_pages) * 8 AS reserved_kb,
                SUM(au.used_pages) * 8 AS used_kb,
-               SUM(au.data_pages) * 8 AS data_kb
+               SUM(au.data_pages) * 8 AS data_kb,
+               CAST(i.index_id AS INT) AS index_id
         FROM sys.tables t
         JOIN sys.schemas s ON s.schema_id = t.schema_id
         JOIN sys.indexes i ON i.object_id = t.object_id
         JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id = i.index_id
         JOIN sys.allocation_units au ON au.container_id = p.partition_id
         WHERE t.is_ms_shipped = 0
-        GROUP BY s.name, t.name, i.name
+        GROUP BY s.name, t.name, i.name, i.index_id
     "#;
     if let Ok(stream) = client.simple_query(probe(q_size)).await {
         let rows = stream.into_first_result().await.unwrap_or_default();
@@ -1242,8 +1546,106 @@ pub async fn pull_dmv_bundle(req: &ConnectReq) -> anyhow::Result<DmvBundle> {
                 reserved_kb: r.get::<i64, _>(4).unwrap_or(0) as u64,
                 used_kb:     r.get::<i64, _>(5).unwrap_or(0) as u64,
                 data_kb:     r.get::<i64, _>(6).unwrap_or(0) as u64,
+                index_id:    r.get::<i32, _>(7),
             });
         }
+    }
+
+    if opts.catalog_only {
+        return Ok(bundle);
+    }
+
+    // Deprecated LOB column types (text / ntext / image). Catalog-only, cheap.
+    let q_deprecated = r#"
+        SELECT s.name, t.name, c.name, ty.name, c.is_nullable
+        FROM sys.columns c
+        JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+        JOIN sys.tables t ON t.object_id = c.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE t.is_ms_shipped = 0 AND ty.name IN ('text', 'ntext', 'image')
+    "#;
+    if let Ok(stream) = client.simple_query(probe(q_deprecated)).await {
+        let rows = stream.into_first_result().await.unwrap_or_default();
+        for r in rows {
+            bundle.deprecated_columns.push(DeprecatedColumn {
+                schema_name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                table_name:  r.get::<&str, _>(1).unwrap_or("").to_string(),
+                column_name: r.get::<&str, _>(2).unwrap_or("").to_string(),
+                type_name:   r.get::<&str, _>(3).unwrap_or("").to_string(),
+                is_nullable: r.get::<bool, _>(4).unwrap_or(true),
+            });
+        }
+    }
+
+    // Statistics freshness. dm_db_stats_properties is 2008 R2 SP2+/2012+.
+    // Only stats objects whose histogram covers ≥ 1,000 rows — smaller ones
+    // auto-refresh on the next compile and are not worth a card.
+    let table_rows = analyzer_core::dmv::table_row_counts(&bundle.partition_stats);
+    let q_stats = r#"
+        SELECT s.name, t.name, st.name,
+               CAST(CASE WHEN i.index_id IS NOT NULL THEN 1 ELSE 0 END AS BIT) AS is_index_stat,
+               st.no_recompute,
+               CAST(sp.rows AS BIGINT), CAST(sp.rows_sampled AS BIGINT), CAST(sp.modification_counter AS BIGINT),
+               CONVERT(VARCHAR(33), sp.last_updated, 127) AS last_updated
+        FROM sys.stats st
+        JOIN sys.tables t ON t.object_id = st.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        CROSS APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) sp
+        LEFT JOIN sys.indexes i ON i.object_id = st.object_id AND i.name = st.name
+        WHERE t.is_ms_shipped = 0 AND sp.rows >= 1000
+    "#;
+    if let Ok(stream) = client.simple_query(probe(q_stats)).await {
+        let rows = stream.into_first_result().await.unwrap_or_default();
+        for r in rows {
+            let schema_name = r.get::<&str, _>(0).unwrap_or("").to_string();
+            let table_name = r.get::<&str, _>(1).unwrap_or("").to_string();
+            let key = format!("{schema_name}.{table_name}").to_ascii_lowercase();
+            bundle.stats.push(StatsProperties {
+                table_rows: table_rows.get(&key).copied(),
+                schema_name,
+                table_name,
+                stats_name:   r.get::<&str, _>(2).unwrap_or("").to_string(),
+                is_index_stat: r.get::<bool, _>(3).unwrap_or(false),
+                no_recompute: r.get::<bool, _>(4).unwrap_or(false),
+                rows:         r.get::<i64, _>(5).unwrap_or(0).max(0) as u64,
+                rows_sampled: r.get::<i64, _>(6).unwrap_or(0).max(0) as u64,
+                modification_counter: r.get::<i64, _>(7).unwrap_or(0).max(0) as u64,
+                last_updated: r.get::<&str, _>(8).map(|s| s.to_string()),
+            });
+        }
+    }
+
+    // Physical shape — ONLY on the advise/health path (never the live poller),
+    // restricted to objects big enough to matter, and time-boxed so a huge
+    // database degrades to "not measured" instead of hanging the report.
+    //   * indexes ≥ 1,000 pages: LIMITED mode (reads the parent level only)
+    //   * heaps ≥ 128 pages: SAMPLED mode, the cheapest mode that returns
+    //     forwarded_record_count (LIMITED returns NULL for it)
+    let physical_started = std::time::Instant::now();
+    bundle.physical = match tokio::time::timeout(PHYSICAL_STATS_TIMEOUT, pull_physical_stats(&mut client)).await {
+        Ok(Ok(rows)) => {
+            tracing::info!(target: "advisor", "index physical stats: {} row(s) in {:?}", rows.len(), physical_started.elapsed());
+            rows
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(target: "advisor", "index physical stats unavailable ({e}); fragmentation not measured");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "advisor",
+                "index physical stats exceeded {:?}; fragmentation not measured on this scan",
+                PHYSICAL_STATS_TIMEOUT
+            );
+            Vec::new()
+        }
+    };
+
+    // Parameter-sniffing skew from Query Store (gated: the views are empty /
+    // unreadable when Query Store is off, and we emit nothing).
+    match query_store_skew(req).await {
+        Ok(skew) => bundle.query_skew = skew,
+        Err(e) => tracing::warn!(target: "advisor", "Query Store skew scan unavailable ({e})"),
     }
 
     // Query-Store workload grounding: credit each user table we have index

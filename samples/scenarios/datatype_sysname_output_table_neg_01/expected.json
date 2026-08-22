@@ -1,0 +1,7 @@
+{
+  "also_fires": [],
+  "category": "datatype",
+  "must_fire": [],
+  "must_not_fire": ["datatype.sysname_general_string"],
+  "server_version": 2022
+}

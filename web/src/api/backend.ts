@@ -180,7 +180,11 @@ export type RecommendationKind =
   | "create_index"
   | "drop_index"
   | "merge_index"
-  | "columnstore_candidate";
+  | "columnstore_candidate"
+  | "rebuild_index"
+  | "update_statistics"
+  | "alter_column_type"
+  | "parameter_sniffing";
 
 export type RecommendationPriority = "high" | "medium" | "low";
 
@@ -567,6 +571,12 @@ export type SlowQuery = {
   max_duration_ms: number;
   avg_cpu_ms: number;
   avg_logical_reads: number;
+  /** Additive (0.4.4+): executions × avg — the ranking keys. */
+  total_cpu_ms?: number;
+  total_duration_ms?: number;
+  total_logical_reads?: number;
+  /** schema.module when the statement belongs to a stored module. */
+  object_name?: string | null;
 };
 
 /** Top long-running queries from the engine's captured workload history,

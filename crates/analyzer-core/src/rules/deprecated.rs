@@ -90,38 +90,110 @@ pub fn sp_dboption(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// True if the Word token is a keyword that can precede an expression or a
+/// column NAME — i.e. a position where a following `text` is an identifier,
+/// never a data type.
+fn precedes_identifier(t: &crate::tokens::Token) -> bool {
+    const KW: &[&str] = &[
+        "SELECT", "DISTINCT", "TOP", "FROM", "WHERE", "AND", "OR", "NOT", "ON", "BY", "SET",
+        "INTO", "INSERT", "UPDATE", "DELETE", "THEN", "ELSE", "WHEN", "CASE", "END", "LIKE",
+        "IN", "IS", "BETWEEN", "HAVING", "EXISTS", "OVER", "PARTITION", "OUTPUT", "VALUES",
+        "PRINT", "RETURN", "IF", "WHILE", "WITH", "USING", "MATCHED", "ALL", "ANY", "SOME",
+        "ESCAPE", "COLLATE", "APPLY", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS",
+        "ASC", "DESC", "NULLS", "FOR", "TABLE", "VIEW", "INDEX", "COLUMN", "ADD", "DROP",
+        "ALTER", "CREATE", "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "EXEC", "EXECUTE",
+        "GO", "UNION", "EXCEPT", "INTERSECT", "ROWS", "RANGE", "PRECEDING", "FOLLOWING",
+        "LOAD",
+    ];
+    KW.iter().any(|k| is_word(t, k))
+}
+
 pub fn text_image_ntext(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
-    for t in ctx.tokens {
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
         if t.kind != TokKind::Word { continue; }
+        // `[text]` / `"text"` is a delimited identifier — a column named text
+        // (sys.dm_exec_sql_text exposes exactly that), never the type.
+        if t.text.starts_with('[') || t.text.starts_with('"') { continue; }
         let u = t.text.to_ascii_uppercase();
-        if matches!(u.as_str(), "TEXT" | "NTEXT" | "IMAGE") {
-            // try to avoid matching `WITH (TEXTIMAGE_ON = …)` etc — check it's not preceded by "WITH" or "_"
-            out.push(finding(
-                "deprecated.lob_legacy_types",
-                Severity::Warning,
-                format!("{} is a deprecated LOB type and will be removed in a future SQL Server release.", u),
-                Some(make_loc(t)),
-                Some("Migrate to VARCHAR(MAX), NVARCHAR(MAX), or VARBINARY(MAX). Many functions (LEN, SUBSTRING, indexing) work properly on (MAX) types only.".into()),
-            ));
-        }
+        if !matches!(u.as_str(), "TEXT" | "NTEXT" | "IMAGE") { continue; }
+        // The word must sit in a TYPE position: after the thing being typed —
+        // a column name (`Payload text NULL`), a variable/parameter (`DECLARE
+        // @x text`, `@p text OUTPUT`), `RETURNS text`, `ALTER COLUMN c text`,
+        // or `CAST(x AS text)`. Every other occurrence of the bare word —
+        // `st.text`, `SELECT text, ...`, `WHERE text LIKE`, `ORDER BY text`,
+        // `text AS sql_text` — is a COLUMN named text. A `.` on either side
+        // is decisive: types are never qualified and never have members.
+        let prev = i.checked_sub(1).map(|k| &tokens[k]);
+        let next = tokens.get(i + 1);
+        if prev.map(|p| p.text == ".").unwrap_or(true) { continue; }
+        if next.map(|n| n.text == "." || n.text == "(").unwrap_or(false) { continue; }
+        let prev = prev.unwrap();
+        let type_position = if is_word(prev, "AS") {
+            // CAST(expr AS text) — the type closes the call.
+            next.map(|n| n.text == ")").unwrap_or(false)
+        } else if is_word(prev, "RETURNS") {
+            true
+        } else {
+            // Column / variable / parameter name directly before the type.
+            prev.kind == TokKind::Word && !precedes_identifier(prev)
+        };
+        if !type_position { continue; }
+        // What follows a type in DDL / DECLARE: a column option, the list
+        // separator, the closing paren, a parameter direction, or a statement
+        // end. A following `,` or `)` is also what follows a column NAME in a
+        // select list (`SELECT text, ...`) — but those were already excluded
+        // by the keyword/`.` checks on the previous token.
+        let follows_ok = match next {
+            None => true,
+            Some(n) => {
+                n.kind == TokKind::Comment
+                    || matches!(n.text, "," | ")" | ";" | "=")
+                    || ["NULL", "NOT", "DEFAULT", "COLLATE", "IDENTITY", "CONSTRAINT", "PRIMARY",
+                        "UNIQUE", "CHECK", "REFERENCES", "SPARSE", "FILESTREAM", "ROWGUIDCOL",
+                        "OUTPUT", "OUT", "READONLY", "AS", "WITH", "BEGIN", "RETURN", "GO",
+                        "DECLARE", "SET", "SELECT", "INSERT", "INDEX", "TEXTIMAGE_ON",
+                        "MASKED", "PERSISTED", "ENCRYPTED", "GENERATED", "HIDDEN"]
+                        .iter()
+                        .any(|k| is_word(n, k))
+            }
+        };
+        if !follows_ok { continue; }
+        out.push(finding(
+            "deprecated.lob_legacy_types",
+            Severity::Warning,
+            format!("{} is a deprecated LOB type and will be removed in a future SQL Server release.", u),
+            Some(make_loc(t)),
+            Some("Migrate to VARCHAR(MAX), NVARCHAR(MAX), or VARBINARY(MAX). Many functions (LEN, SUBSTRING, indexing) work properly on (MAX) types only.".into()),
+        ));
     }
     out
 }
 
 pub fn hash_temp_unsuffixed(ctx: &RuleCtx) -> Vec<Finding> {
-    // double-hash global temp tables — a non-obvious correctness footgun
+    // Double-hash global temp tables — a non-obvious correctness footgun.
+    // Report the CREATION site only (`CREATE TABLE ##x` / `SELECT ... INTO
+    // ##x`): every later INSERT/SELECT/DROP of the same table is the same
+    // decision, and reporting each reference turned one design choice into
+    // hundreds of findings per script.
     let mut out = Vec::new();
-    for t in ctx.tokens {
-        if t.kind == TokKind::Word && t.text.starts_with("##") {
-            out.push(finding(
-                "hygiene.global_temp_table",
-                Severity::Warning,
-                "Global temp table (##name): visible to every session on the instance. Concurrent jobs collide silently.",
-                Some(make_loc(t)),
-                Some("Use a session-scoped temp table (#name) unless the cross-session visibility is intentional and documented. For passing data between sessions, prefer a permanent table with a clear retention strategy.".into()),
-            ));
-        }
+    let tokens = ctx.tokens;
+    for (i, t) in tokens.iter().enumerate() {
+        if !(t.kind == TokKind::Word && t.text.starts_with("##")) { continue; }
+        let prev = match i.checked_sub(1) { Some(k) => &tokens[k], None => continue };
+        let prev2 = i.checked_sub(2).map(|k| &tokens[k]);
+        let is_create = is_word(prev, "TABLE") && prev2.map(|p| is_word(p, "CREATE")).unwrap_or(false);
+        // SELECT ... INTO ##x creates; INSERT INTO ##x only fills.
+        let is_select_into = is_word(prev, "INTO") && !prev2.map(|p| is_word(p, "INSERT")).unwrap_or(false);
+        if !(is_create || is_select_into) { continue; }
+        out.push(finding(
+            "hygiene.global_temp_table",
+            Severity::Warning,
+            "Global temp table (##name): visible to every session on the instance. Concurrent jobs collide silently.",
+            Some(make_loc(t)),
+            Some("Use a session-scoped temp table (#name) unless the cross-session visibility is intentional and documented. For passing data between sessions, prefer a permanent table with a clear retention strategy.".into()),
+        ));
     }
     out
 }

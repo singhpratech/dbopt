@@ -1,0 +1,9 @@
+{
+  "must_fire": [
+    "ddl.fillfactor_default_zero_on_random_inserts"
+  ],
+  "must_not_fire": [],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "ddl"
+}

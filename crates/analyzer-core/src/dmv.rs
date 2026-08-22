@@ -45,6 +45,106 @@ pub struct DmvBundle {
     /// defaults to `[]` (unmonitored server → no claim either way).
     #[serde(default)]
     pub missing_index_history: Vec<MissingIndexHistory>,
+    /// Per-index read/write persistence from the monitor's usage-delta
+    /// captures (see `sentinel::poll::index_usage`). Lets a "never used since
+    /// restart" rec be promoted once the monitor has watched the index stay
+    /// idle for days. ADDITIVE: defaults to `[]` (unmonitored → no claim).
+    #[serde(default)]
+    pub index_usage_history: Vec<IndexUsageHistory>,
+    /// Physical shape of the larger indexes/heaps from
+    /// `sys.dm_db_index_physical_stats` (LIMITED for indexes, SAMPLED for
+    /// heaps). Collected only on the advise/health path and time-boxed; `[]`
+    /// when skipped, which the advisor treats as "not measured", never as 0 %.
+    #[serde(default)]
+    pub physical: Vec<IndexPhysical>,
+    /// Statistics freshness from `sys.dm_db_stats_properties` (rows ≥ 1,000).
+    #[serde(default)]
+    pub stats: Vec<StatsProperties>,
+    /// Columns declared with a deprecated LOB type (`text` / `ntext` / `image`).
+    #[serde(default)]
+    pub deprecated_columns: Vec<DeprecatedColumn>,
+    /// Query-Store queries whose per-execution cost swings by ≥ 10× across
+    /// ≥ 2 cached plans — the parameter-sniffing signature. `[]` when Query
+    /// Store is off or the catalog views are unreadable.
+    #[serde(default)]
+    pub query_skew: Vec<QuerySkew>,
+}
+
+/// Days the monitor watched an index and how many of those days it was read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexUsageHistory {
+    pub schema_name: String,
+    pub table_name: String,
+    pub index_name: String,
+    /// Distinct capture days the monitor has index-usage deltas for on this instance.
+    pub days_observed: u32,
+    /// Distinct capture days on which this index recorded any seek/scan/lookup.
+    pub days_with_reads: u32,
+    /// Distinct capture days on which this index recorded any write.
+    pub days_with_writes: u32,
+}
+
+/// One leaf-level row of `sys.dm_db_index_physical_stats` for an index or heap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexPhysical {
+    pub schema_name: String,
+    pub table_name: String,
+    /// `None` for the heap (index_id 0).
+    pub index_name: Option<String>,
+    pub index_id: i32,
+    pub page_count: u64,
+    pub avg_fragmentation_pct: f64,
+    /// Leaf page density; `None` in LIMITED mode (not measured).
+    pub avg_page_space_used_pct: Option<f64>,
+    /// Heap forward pointers; `None` when not measured (LIMITED mode / not a heap).
+    pub forwarded_record_count: Option<u64>,
+    /// `sys.indexes.fill_factor` (0 = server default = 100).
+    pub fill_factor: u8,
+}
+
+/// One statistics object with its freshness counters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StatsProperties {
+    pub schema_name: String,
+    pub table_name: String,
+    pub stats_name: String,
+    /// True when the stats object backs an index of the same name.
+    pub is_index_stat: bool,
+    pub no_recompute: bool,
+    /// Rows the histogram was built from (`dm_db_stats_properties.rows`).
+    pub rows: u64,
+    pub rows_sampled: u64,
+    pub modification_counter: u64,
+    /// RFC 3339 of `last_updated`, when known.
+    pub last_updated: Option<String>,
+    /// Current table row count from partition stats, when the collector had it.
+    pub table_rows: Option<u64>,
+}
+
+/// A column declared with a deprecated LOB type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeprecatedColumn {
+    pub schema_name: String,
+    pub table_name: String,
+    pub column_name: String,
+    /// `text` | `ntext` | `image`
+    pub type_name: String,
+    pub is_nullable: bool,
+}
+
+/// A Query-Store query whose logical-read cost swings widely across plans.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QuerySkew {
+    pub query_id: i64,
+    /// `schema.proc` when the query belongs to a module, else `None` (ad hoc).
+    pub object_name: Option<String>,
+    pub plan_count: u32,
+    pub executions: u64,
+    pub avg_logical_reads: u64,
+    pub max_logical_reads: u64,
+    pub avg_duration_ms: f64,
+    pub max_duration_ms: f64,
+    pub sql_text: String,
 }
 
 /// How persistently the missing-index DMV has suggested an index on a table
@@ -91,6 +191,7 @@ pub fn apply_counter_age(recs: &mut [Recommendation], counter_age_secs: Option<i
     let since = counters_since.map(|s| format!(" ({s})")).unwrap_or_default();
     let young = age < COUNTER_AGE_YOUNG_SECS;
     for r in recs.iter_mut() {
+        if !r.kind.is_usage_based() { continue; }
         let mut suffix = format!(" Usage {phrase}{since}");
         if young {
             suffix.push_str("; under 24 h of counters is a sample, not a verdict — re-check after a representative window");
@@ -104,7 +205,7 @@ pub fn apply_counter_age(recs: &mut [Recommendation], counter_age_secs: Option<i
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexUsage {
     pub database_name: String,
     pub schema_name: String,
@@ -119,9 +220,20 @@ pub struct IndexUsage {
     /// zero-filled row is "not observed since restart", not "measured 0".
     #[serde(default)]
     pub no_stats_row: bool,
+    /// `sys.indexes.index_id` (0 = heap, 1 = clustered). Optional on the wire;
+    /// when absent the `(heap)` name convention identifies the heap row.
+    #[serde(default)]
+    pub index_id: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl IndexUsage {
+    /// True for the heap row (index_id 0 / `(heap)` placeholder name).
+    pub fn is_heap(&self) -> bool {
+        self.index_id == Some(0) || self.index_name.eq_ignore_ascii_case("(heap)") || self.index_name.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexMeta {
     pub schema_name: String,
     pub table_name: String,
@@ -136,9 +248,20 @@ pub struct IndexMeta {
     pub is_clustered: bool,
     pub key_columns: Vec<String>,
     pub included_columns: Vec<String>,
+    /// Declared type of each key column, parallel to `key_columns` (e.g.
+    /// `uniqueidentifier`). ADDITIVE: `[]` on older bundles.
+    #[serde(default)]
+    pub key_column_types: Vec<String>,
+    /// Sum of the key columns' declared max byte length (`-1`/MAX counted as
+    /// 8000). `None` when not collected.
+    #[serde(default)]
+    pub key_bytes: Option<u32>,
+    /// True when a key column carries a `NEWID()` default (random GUID inserts).
+    #[serde(default)]
+    pub has_newid_default: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MissingIndex {
     pub schema_name: String,
     pub table_name: String,
@@ -150,7 +273,7 @@ pub struct MissingIndex {
     pub avg_total_user_cost: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartitionStats {
     pub schema_name: String,
     pub table_name: String,
@@ -159,6 +282,35 @@ pub struct PartitionStats {
     pub reserved_kb: u64,
     pub used_kb: u64,
     pub data_kb: u64,
+    /// `sys.indexes.index_id`; only 0 (heap) and 1 (clustered) carry the
+    /// table's row count — nonclustered rows are locators, not table rows.
+    #[serde(default)]
+    pub index_id: Option<i32>,
+}
+
+/// Table row counts from partition stats, keyed on lower-cased `schema.table`.
+/// Counts ONLY the heap / clustered partitions (index_id 0 or 1) when the
+/// bundle says which they are; older bundles without `index_id` fall back to
+/// the max across the table's indexes (every index holds one row per table
+/// row, so max is right and sum is wrong — summing once reported a 300,000-row
+/// table as 600,000).
+pub fn table_row_counts(partition_stats: &[PartitionStats]) -> BTreeMap<String, u64> {
+    let mut out: BTreeMap<String, u64> = BTreeMap::new();
+    let mut base: BTreeMap<String, u64> = BTreeMap::new();
+    for p in partition_stats {
+        let key = format!("{}.{}", p.schema_name, p.table_name).to_ascii_lowercase();
+        let e = out.entry(key.clone()).or_insert(0);
+        *e = (*e).max(p.row_count);
+        match p.index_id {
+            Some(0) | Some(1) => { *base.entry(key).or_insert(0) += p.row_count; }
+            None if p.index_name.is_none() => { *base.entry(key).or_insert(0) += p.row_count; }
+            _ => {}
+        }
+    }
+    for (k, v) in base {
+        out.insert(k, v);
+    }
+    out
 }
 
 pub struct Advice {
@@ -183,8 +335,10 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
         let e = size_by_table
             .entry(format!("{}.{}", p.schema_name, p.table_name).to_ascii_lowercase())
             .or_insert((0, 0));
-        e.0 = e.0.max(p.row_count);
         e.1 += p.reserved_kb;
+    }
+    for (k, rows) in table_row_counts(&bundle.partition_stats) {
+        size_by_table.entry(k).or_insert((0, 0)).0 = rows;
     }
     // Build an ObjectRef, attaching measured size when we have it. Never
     // invents a size: an object missing from partition stats stays `None`,
@@ -214,8 +368,11 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
             updates: u.user_updates,
             score: total_reads as i64 - u.user_updates as i64,
         });
-        // Unused index: many writes, no reads, and not the PK/clustered
-        if total_reads == 0 && u.user_updates > 100 && !u.index_name.eq_ignore_ascii_case("PK") {
+        // Unused index: many writes, no reads, and not the PK/clustered. A heap
+        // (index_id 0) is the table itself, not an index: "0 reads, 10,370
+        // writes" on a heap is an insert-only table, and `DROP INDEX [(heap)]`
+        // does not compile.
+        if total_reads == 0 && u.user_updates > 100 && !u.is_heap() && !u.index_name.eq_ignore_ascii_case("PK") {
             findings.push(Finding {
                 rule: RuleId("dmv.unused_index".into()),
                 severity: Severity::Warning,
@@ -245,17 +402,28 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 let b = &list[j];
                 if a.key_columns.is_empty() || b.key_columns.is_empty() { continue; }
                 if a.key_columns[0].eq_ignore_ascii_case(&b.key_columns[0]) {
-                    // partial or full dup
-                    let same = a.key_columns.len() == b.key_columns.len()
-                        && a.key_columns.iter().zip(&b.key_columns).all(|(x, y)| x.eq_ignore_ascii_case(y));
-                    let sev = if same { Severity::Error } else { Severity::Info };
+                    // Exact duplicate = same key AND same INCLUDE set. Same key
+                    // with different INCLUDEs is two indexes serving two
+                    // different queries — an overlap to consider merging, not
+                    // "one is pure overhead".
+                    let same_key = same_columns(&a.key_columns, &b.key_columns);
+                    let same_inc = same_key && same_column_set(&a.included_columns, &b.included_columns);
+                    let (sev, verdict) = if same_inc {
+                        (Severity::Error, "Keys and INCLUDE columns are identical — one of them is pure overhead.".to_string())
+                    } else if same_key {
+                        (Severity::Info, format!(
+                            "Same key, different INCLUDE columns ({} vs {}) — overlapping indexes that each cover their own queries; consider merging into one index with the union of the INCLUDEs.",
+                            fmt_cols(&a.included_columns), fmt_cols(&b.included_columns)
+                        ))
+                    } else {
+                        (Severity::Info, "Partial overlap — review whether one can be dropped or merged with INCLUDE.".to_string())
+                    };
                     findings.push(Finding {
                         rule: RuleId("dmv.duplicate_or_overlapping_index".into()),
                         severity: sev,
                         message: format!(
                             "Indexes {} and {} on {}.{} share leading key column `{}`. {}",
-                            a.index_name, b.index_name, schema, table, a.key_columns[0],
-                            if same { "Keys are identical — one of them is pure overhead." } else { "Partial overlap — review whether one can be dropped or merged with INCLUDE." }
+                            a.index_name, b.index_name, schema, table, a.key_columns[0], verdict
                         ),
                         location: None,
                         recommendation: Some("Compare INCLUDE columns and uniqueness. Keep the unique/PK one, merge needed includes into a single covering index, drop the rest.".into()),
@@ -268,6 +436,11 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
 
     // Missing indexes (DMV-suggested)
     for m in &bundle.missing_indexes {
+        // A 20-row, 1-page table is read in one logical read whatever the
+        // predicate; an index there is noise. Only suppress when size is KNOWN.
+        if let Some((rows, _)) = size_by_table.get(&format!("{}.{}", m.schema_name, m.table_name).to_ascii_lowercase()) {
+            if *rows < SMALL_TABLE_ROWS { continue; }
+        }
         let cols = m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect::<Vec<_>>().join(", ");
         let inc = if m.included_columns.is_empty() { String::new() } else { format!(" INCLUDE ({})", m.included_columns.join(", ")) };
         findings.push(Finding {
@@ -290,17 +463,28 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
     // false-positive noise that erodes DBA trust.
     {
         use std::collections::BTreeSet;
+        let true_rows = table_row_counts(&bundle.partition_stats);
         let mut rows_by_table: BTreeMap<(String, String), u64> = BTreeMap::new();
         let mut heap_rows: BTreeMap<(String, String), u64> = BTreeMap::new();
         for p in &bundle.partition_stats {
             let key = (p.schema_name.clone(), p.table_name.clone());
-            let e = rows_by_table.entry(key.clone()).or_insert(0);
-            *e = (*e).max(p.row_count);
-            if p.index_name.is_none() {
-                let h = heap_rows.entry(key).or_insert(0);
-                *h = (*h).max(p.row_count);
+            let rows = true_rows
+                .get(&format!("{}.{}", p.schema_name, p.table_name).to_ascii_lowercase())
+                .copied()
+                .unwrap_or(p.row_count);
+            rows_by_table.insert(key.clone(), rows);
+            if p.index_name.is_none() || p.index_id == Some(0) {
+                heap_rows.insert(key, rows);
             }
         }
+        // Heap forward pointers measured by dm_db_index_physical_stats, when
+        // the physical pass ran (it is skipped on the cheap paths).
+        let forwarded: BTreeMap<(String, String), u64> = bundle
+            .physical
+            .iter()
+            .filter(|p| p.index_id == 0)
+            .filter_map(|p| p.forwarded_record_count.map(|f| ((p.schema_name.clone(), p.table_name.clone()), f)))
+            .collect();
         let mut has_pk: BTreeSet<(String, String)> = BTreeSet::new();
         for ix in &bundle.indexes {
             if ix.is_primary_key {
@@ -314,10 +498,19 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
             let sev = if *rows >= 1_000_000 { Severity::Error }
                       else if *rows >= 100_000 { Severity::Warning }
                       else { Severity::Info };
+            let fwd = forwarded.get(&(schema.clone(), table.clone())).copied().unwrap_or(0);
+            // Measured forward pointers are the proof the heap is already
+            // hurting reads: every forwarded row costs an extra page read.
+            let sev = if fwd >= 1000 && sev == Severity::Info { Severity::Warning } else { sev };
+            let fwd_note = if fwd > 0 {
+                format!(" sys.dm_db_index_physical_stats counts {} forwarded records on it — rows that grew on UPDATE and now cost an extra page read each.", commas(fwd))
+            } else {
+                String::new()
+            };
             findings.push(Finding {
                 rule: RuleId("structure.heap_table".into()),
                 severity: sev,
-                message: format!("{schema}.{table} is a heap (no clustered index) holding {rows} rows."),
+                message: format!("{schema}.{table} is a heap (no clustered index) holding {rows} rows.{fwd_note}"),
                 location: None,
                 recommendation: Some("Heaps fragment over time, can't be range-seeked, and accumulate forward pointers on UPDATE that slow every read. Add a clustered index — usually the primary key, or a narrow ever-increasing surrogate. Deliberate staging / bulk-load heaps are fine, but document them.".into()),
                 object: obj(schema, table),
@@ -337,21 +530,92 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
                 object: obj(schema, table),
             });
         }
-        // Over-wide clustered / primary key inflates every nonclustered index.
+        // Over-wide or random clustered key inflates every nonclustered index
+        // (each carries the clustered key as its row locator) and, for a
+        // random GUID, fragments on every insert.
         for ix in &bundle.indexes {
-            if ix.is_primary_key && ix.key_columns.len() >= 5 {
+            // Clustered when flagged, or the PK on a non-heap table (SQL
+            // Server clusters the PK by default) for bundles without the flag.
+            let table_key = (ix.schema_name.clone(), ix.table_name.clone());
+            let clustered = ix.is_clustered || (ix.is_primary_key && !heap_rows.contains_key(&table_key));
+            if !clustered || ix.key_columns.is_empty() { continue; }
+            let guid_col = ix.key_columns.iter().zip(ix.key_column_types.iter())
+                .find(|(_, t)| t.eq_ignore_ascii_case("uniqueidentifier"))
+                .map(|(c, _)| c.clone());
+            let rows = rows_by_table.get(&table_key).copied();
+            let nc_count = bundle.indexes.iter()
+                .filter(|o| o.schema_name.eq_ignore_ascii_case(&ix.schema_name) && o.table_name.eq_ignore_ascii_case(&ix.table_name) && !o.is_clustered && o.index_name != ix.index_name)
+                .count();
+            if let Some(col) = guid_col {
+                let sev = match rows { Some(r) if r >= 1_000_000 => Severity::Warning, Some(r) if r < 1000 => Severity::Info, _ => Severity::Warning };
+                let newid = if ix.has_newid_default { " with a NEWID() default, so every insert lands at a random position" } else { "" };
+                findings.push(Finding {
+                    rule: RuleId("structure.guid_clustered_key".into()),
+                    severity: sev,
+                    message: format!(
+                        "{}.{} is clustered on uniqueidentifier column {} ({}){}. A random 16-byte clustered key fragments the table on every insert and is copied into all {} nonclustered index(es) as the row locator, bloating each of them.",
+                        ix.schema_name, ix.table_name, col, ix.index_name, newid, nc_count
+                    ),
+                    location: None,
+                    recommendation: Some(format!(
+                        "Cluster on a narrow, ever-increasing key (an IDENTITY or a (date, id) pair) and keep {} as a NONCLUSTERED UNIQUE constraint — or, if the GUID must stay clustered, use NEWSEQUENTIALID() and a lower fill factor to slow the fragmentation. Re-check sys.dm_db_index_physical_stats after: random-GUID clustered tables typically sit at 90 %+ fragmentation.",
+                        col
+                    )),
+                    object: obj(&ix.schema_name, &ix.table_name),
+                });
+                continue;
+            }
+            let wide_cols = ix.key_columns.len() > 3;
+            let wide_bytes = ix.key_bytes.map(|b| b > 16).unwrap_or(false);
+            if wide_cols || wide_bytes {
+                let why = match (wide_cols, ix.key_bytes) {
+                    (true, Some(b)) => format!("spans {} columns, {} bytes", ix.key_columns.len(), b),
+                    (true, None) => format!("spans {} columns", ix.key_columns.len()),
+                    (false, Some(b)) => format!("is {} bytes wide", b),
+                    (false, None) => "is wide".to_string(),
+                };
                 findings.push(Finding {
                     rule: RuleId("structure.wide_clustered_key".into()),
                     severity: Severity::Info,
                     message: format!(
-                        "{}.{} primary key spans {} columns ({}). Every nonclustered index stores the full key as its row locator, so a wide key inflates all of them.",
-                        ix.schema_name, ix.table_name, ix.key_columns.len(), ix.key_columns.join(", ")
+                        "{}.{} clustered key {} {} ({}). Every nonclustered index stores the full clustered key as its row locator, so a wide key inflates all {} of them and every lookup.",
+                        ix.schema_name, ix.table_name, ix.index_name, why, ix.key_columns.join(", "), nc_count
                     ),
                     location: None,
                     recommendation: Some("Keep the clustered key narrow, static, and ever-increasing — often a surrogate INT/BIGINT IDENTITY. Enforce the wide natural key with a separate UNIQUE constraint if you still need it.".into()),
                     object: obj(&ix.schema_name, &ix.table_name),
                 });
             }
+        }
+
+        // Deprecated LOB column types: text / ntext / image have been
+        // deprecated since SQL Server 2005 and block many operations (no
+        // ORDER BY/DISTINCT, no online rebuild of the column, no string
+        // functions). ALTER COLUMN to the (n)varchar(max) / varbinary(max)
+        // equivalent is an in-place, metadata-plus-data change.
+        for c in &bundle.deprecated_columns {
+            let (replacement, sev) = match c.type_name.to_ascii_lowercase().as_str() {
+                "text" => ("varchar(max)", Severity::Warning),
+                "ntext" => ("nvarchar(max)", Severity::Warning),
+                "image" => ("varbinary(max)", Severity::Warning),
+                _ => continue,
+            };
+            let rows = rows_by_table.get(&(c.schema_name.clone(), c.table_name.clone())).copied();
+            findings.push(Finding {
+                rule: RuleId("structure.deprecated_lob_type".into()),
+                severity: sev,
+                message: format!(
+                    "{}.{}.{} is declared {} — a deprecated LOB type (since SQL Server 2005) that string functions, ORDER BY/DISTINCT and many tools cannot use.{}",
+                    c.schema_name, c.table_name, c.column_name, c.type_name,
+                    rows.map(|r| format!(" ({} rows)", commas(r))).unwrap_or_default()
+                ),
+                location: None,
+                recommendation: Some(format!(
+                    "Convert in place (rewrites the LOB data; run in a maintenance window on large tables):\n\n{}",
+                    deprecated_column_ddl(c, replacement)
+                )),
+                object: obj(&c.schema_name, &c.table_name),
+            });
         }
     }
 
@@ -373,6 +637,33 @@ pub fn analyze(bundle: &DmvBundle) -> Advice {
     Advice { findings, index_heatmap, size_treemap }
 }
 
+/// Tables with fewer rows than this get no missing-index / table-scan advice
+/// from the connected path: a one-page table is one logical read however it
+/// is accessed, and an index on it is pure maintenance cost.
+pub const SMALL_TABLE_ROWS: u64 = 1_000;
+
+fn same_columns(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| unbr(x).eq_ignore_ascii_case(&unbr(y)))
+}
+
+/// Order-insensitive column-set equality (INCLUDE order is irrelevant).
+fn same_column_set(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| unbr(x).eq_ignore_ascii_case(&unbr(y))))
+}
+
+fn fmt_cols(cols: &[String]) -> String {
+    if cols.is_empty() { "none".to_string() } else { cols.join(", ") }
+}
+
+/// `ALTER TABLE … ALTER COLUMN … <replacement>` for a deprecated LOB column.
+pub fn deprecated_column_ddl(c: &DeprecatedColumn, replacement: &str) -> String {
+    format!(
+        "ALTER TABLE {}.{} ALTER COLUMN {} {} {};",
+        br(&c.schema_name), br(&c.table_name), br(&c.column_name), replacement,
+        if c.is_nullable { "NULL" } else { "NOT NULL" }
+    )
+}
+
 #[allow(dead_code)]
 pub fn empty_charts() -> ChartData { ChartData::default() }
 
@@ -389,6 +680,23 @@ pub enum RecKind {
     DropIndex,
     MergeIndex,
     ColumnstoreCandidate,
+    /// Rebuild/reorganize a fragmented or under-filled index (physical stats).
+    RebuildIndex,
+    /// Refresh stale statistics (`dm_db_stats_properties`).
+    UpdateStatistics,
+    /// Convert a deprecated text/ntext/image column to its (n)varchar(max) twin.
+    AlterColumnType,
+    /// Parameter-sniffing skew seen in Query Store: same query, ≥ 2 plans, cost swings ≥ 10×.
+    ParameterSniffing,
+}
+
+impl RecKind {
+    /// Kinds whose evidence is a `sys.dm_db_*_stats` usage counter that resets
+    /// on restart (and therefore carry the counter-age stamp). Physical,
+    /// statistics, column-type and Query-Store recs are measured directly.
+    pub fn is_usage_based(self) -> bool {
+        matches!(self, RecKind::CreateIndex | RecKind::DropIndex | RecKind::MergeIndex | RecKind::ColumnstoreCandidate)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +758,7 @@ fn priority_rank(p: &str) -> u8 { match p { "high" => 0, "medium" => 1, _ => 2 }
 
 /// Generate ranked, prescriptive recommendations from a DMV bundle.
 pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
+    use std::collections::BTreeSet;
     let mut recs: Vec<Recommendation> = Vec::new();
 
     // ---- CreateIndex: from SQL Server's own missing-index DMV --------------
@@ -460,10 +769,41 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     // duplication this advisor is meant to prevent). `consolidate_missing_indexes`
     // folds prefix-related suggestions into one superset index (widest key,
     // unioned INCLUDEs) before we emit any DDL. See its docs for the merge rule.
-    let consolidated = consolidate_missing_indexes(&bundle.missing_indexes);
-    for m in &consolidated {
+    let consolidated = consolidate_missing_indexes_traced(&bundle.missing_indexes);
+    let true_rows = table_row_counts(&bundle.partition_stats);
+    let young_counters = bundle.counter_age_secs.map(|a| a < COUNTER_AGE_YOUNG_SECS).unwrap_or(false);
+    // Names already taken on each table, and the catalog rows themselves, so
+    // a CREATE INDEX never collides with an existing name and a suggestion that
+    // merely WIDENS an existing key becomes a DROP_EXISTING rebuild of it.
+    let mut taken_names: BTreeSet<(String, String)> = BTreeSet::new();
+    for ix in &bundle.indexes {
+        taken_names.insert((format!("{}.{}", ix.schema_name, ix.table_name).to_ascii_lowercase(), ix.index_name.to_ascii_lowercase()));
+    }
+    for (m, seek_parts) in &consolidated {
         let keys: Vec<String> = m.equality_columns.iter().chain(m.inequality_columns.iter()).cloned().collect();
         if keys.is_empty() { continue; }
+        let table_lc = format!("{}.{}", m.schema_name, m.table_name).to_ascii_lowercase();
+        // A table under SMALL_TABLE_ROWS is one page: no index will change
+        // its cost, whatever the DMV's impact score says. Only when measured.
+        if let Some(rows) = true_rows.get(&table_lc) {
+            if *rows < SMALL_TABLE_ROWS { continue; }
+        }
+        // Existing index on the same table that this suggestion widens or
+        // duplicates: same key (exactly), non-constraint.
+        let existing_same_key = bundle.indexes.iter().find(|ix| {
+            ix.schema_name.eq_ignore_ascii_case(&m.schema_name)
+                && ix.table_name.eq_ignore_ascii_case(&m.table_name)
+                && !ix.is_primary_key && !ix.is_unique && !ix.is_clustered
+                && same_columns(&ix.key_columns, &keys)
+        });
+        if let Some(ix) = existing_same_key {
+            // Already covered: the existing index has this key and every
+            // requested INCLUDE. The DMV row predates it or the plan is cached;
+            // there is nothing to create.
+            if m.included_columns.iter().all(|c| ix.included_columns.iter().chain(ix.key_columns.iter()).any(|e| col_eq(e, c))) {
+                continue;
+            }
+        }
         // SQL Server's standard "improvement measure" — the raw benefit signal.
         let base_score = m.avg_total_user_cost * (m.avg_user_impact / 100.0) * (m.user_seeks.max(1) as f64);
         // Write-cost + workload grounding: down-rank sprawling indexes by their
@@ -474,16 +814,66 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         let ranking = crate::advisor_workload::rank_candidate(m, base_score, &bundle.workload);
         let score = ranking.adjusted_score;
         let write_cost = ranking.write_cost;
-        let workload_phrase = crate::advisor_workload::workload_phrase(ranking.executions_per_day);
+        // Workload phrase: a per-day rate is only honest once a full day of
+        // Query-Store capture AND a full day of counters exist. Under that,
+        // say what was measured ("2,062 executions in 0.9 h of capture") —
+        // never "×/day" extrapolated from fifty minutes.
+        let busiest = crate::advisor_workload::busiest_for(&bundle.workload, &m.schema_name, &m.table_name);
+        let (workload_phrase, runs_chip): (Option<String>, Option<(String, String)>) = match busiest {
+            Some(w) if w.execution_count > 0 => {
+                let extrapolate = w.window_hours >= 24.0 && !young_counters;
+                if extrapolate {
+                    let per_day = w.executions_per_day();
+                    let rendered = if per_day >= 1.0 { format!("{:.0}", per_day.round()) } else { format!("{per_day:.1}") };
+                    (
+                        Some(format!("helps the busiest query on this table, which runs ~{rendered}×/day ({} executions over {:.0} h of Query Store capture)", commas(w.execution_count), w.window_hours)),
+                        Some(("Query runs".into(), format!("~{rendered}×/day (busiest query on table)"))),
+                    )
+                } else {
+                    (
+                        Some(format!("helps the busiest query on this table: {} executions in {:.1} h of Query Store capture (too short to project a daily rate)", commas(w.execution_count), w.window_hours)),
+                        Some(("Query runs".into(), format!("{} in {:.1} h of capture (busiest query on table)", commas(w.execution_count), w.window_hours))),
+                    )
+                }
+            }
+            _ => (None, None),
+        };
         let key_list = keys.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
-        let inc_list = m.included_columns.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
-        let inc_clause = if m.included_columns.is_empty() { String::new() } else { format!("\n  INCLUDE ({})", inc_list) };
-        let mut name = format!("IX_{}_{}", idfrag(&m.table_name), keys.iter().map(|c| idfrag(c)).collect::<Vec<_>>().join("_"));
-        name.truncate(120);
-        let ddl = format!(
-            "CREATE NONCLUSTERED INDEX [{}]\n  ON {}.{} ({}){};",
-            name, br(&m.schema_name), br(&m.table_name), key_list, inc_clause
-        );
+        // Widening an existing same-key index: union its INCLUDEs with the
+        // request and rebuild it in place under its own name.
+        let (name, widen_of, inc_cols): (String, Option<&IndexMeta>, Vec<String>) = match existing_same_key {
+            Some(ix) => {
+                let mut inc = ix.included_columns.clone();
+                union_includes(&mut inc, &m.included_columns);
+                (ix.index_name.clone(), Some(ix), inc)
+            }
+            None => {
+                let mut name = format!("IX_{}_{}", idfrag(&m.table_name), keys.iter().map(|c| idfrag(c)).collect::<Vec<_>>().join("_"));
+                name.truncate(120);
+                // Never propose a name the table already uses (the CREATE
+                // would fail with "already exists"): suffix until free.
+                let base = name.clone();
+                let mut n = 2;
+                while taken_names.contains(&(table_lc.clone(), name.to_ascii_lowercase())) {
+                    name = format!("{base}_{n}");
+                    n += 1;
+                }
+                (name, None, m.included_columns.clone())
+            }
+        };
+        taken_names.insert((table_lc.clone(), name.to_ascii_lowercase()));
+        let inc_list = inc_cols.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
+        let inc_clause = if inc_cols.is_empty() { String::new() } else { format!("\n  INCLUDE ({})", inc_list) };
+        let ddl = match widen_of {
+            Some(ix) => format!(
+                "-- {} already exists on ({}); this rebuilds it in place with the extra INCLUDE columns.\nCREATE NONCLUSTERED INDEX [{}]\n  ON {}.{} ({}){}\n  WITH (DROP_EXISTING = ON);",
+                ix.index_name, ix.key_columns.join(", "), name, br(&m.schema_name), br(&m.table_name), key_list, inc_clause
+            ),
+            None => format!(
+                "CREATE NONCLUSTERED INDEX [{}]\n  ON {}.{} ({}){};",
+                name, br(&m.schema_name), br(&m.table_name), key_list, inc_clause
+            ),
+        };
         let priority = if score >= 10.0 { "high" } else if score >= 1.0 { "medium" } else { "low" };
         // Compose rationale: DMV evidence + write-cost note + (optional) workload.
         let write_cost_note = match write_cost {
@@ -509,9 +899,26 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ),
             None => String::new(),
         };
+        let merged_note = if seek_parts.len() > 1 {
+            format!(
+                " ({} DMV groups with the same key merged into this one index; seeks summed: {}.)",
+                seek_parts.len(),
+                seek_parts.iter().map(|n| commas(*n)).collect::<Vec<_>>().join(" + ")
+            )
+        } else {
+            String::new()
+        };
+        let seeks_phrase = match bundle.counter_age_secs {
+            Some(age) => format!("{} seeks in {:.1} h since restart would benefit", commas(m.user_seeks), age.max(0) as f64 / 3600.0),
+            None => format!("{} seeks would benefit", commas(m.user_seeks)),
+        };
+        let widen_note = match widen_of {
+            Some(ix) => format!(" {} already exists with this key ({}) but not these INCLUDE columns — widen it in place rather than adding a second index on the same key.", ix.index_name, ix.key_columns.join(", ")),
+            None => String::new(),
+        };
         let rationale = format!(
-            "SQL Server's missing-index DMV: {} seeks would benefit, avg query cost {:.2}, estimated improvement {:.0}%.{}{}{} Order key columns by selectivity and consolidate with existing indexes before applying.",
-            m.user_seeks, m.avg_total_user_cost, m.avg_user_impact, write_cost_note, workload_note, history_note
+            "SQL Server's missing-index DMV: {}, avg query cost {:.2}, estimated improvement {:.0}%.{}{}{}{}{} Order key columns by selectivity and consolidate with existing indexes before applying.",
+            seeks_phrase, m.avg_total_user_cost, m.avg_user_impact, merged_note, widen_note, write_cost_note, workload_note, history_note
         );
         let mut metrics = vec![
             ("Seeks that benefit".into(), commas(m.user_seeks)),
@@ -519,18 +926,23 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             ("Avg query cost".into(), format!("{:.2}", m.avg_total_user_cost)),
             ("Write cost".into(), write_cost.label().to_string()),
         ];
+        if seek_parts.len() > 1 {
+            metrics.push(("DMV groups merged".into(), format!("{}", seek_parts.len())));
+        }
         if let Some(h) = history {
             metrics.push(("Seen (days)".into(), format!("{} of {}", h.days_seen, h.days_observed)));
         }
-        if let Some(per_day) = ranking.executions_per_day {
-            if per_day > 0.0 {
-                metrics.push(("Query runs".into(), format!("~{}×/day", if per_day >= 1.0 { format!("{:.0}", per_day.round()) } else { format!("{per_day:.1}") })));
-            }
+        if let Some(chip) = runs_chip {
+            metrics.push(chip);
         }
+        let title = match widen_of {
+            Some(ix) => format!("Widen {} on {}.{} to cover ({})", ix.index_name, m.schema_name, m.table_name, inc_cols.join(", ")),
+            None => format!("Create covering index on {}.{}", m.schema_name, m.table_name),
+        };
         recs.push(Recommendation {
             kind: RecKind::CreateIndex,
             priority: priority.into(),
-            title: format!("Create covering index on {}.{}", m.schema_name, m.table_name),
+            title,
             object: format!("{}.{}", m.schema_name, m.table_name),
             rationale,
             ddl,
@@ -542,7 +954,6 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     }
 
     // ---- DropIndex: write-only indexes (reads=0, many updates) -------------
-    use std::collections::BTreeMap;
     let mut meta: BTreeMap<(String, String, String), &IndexMeta> = BTreeMap::new();
     for ix in &bundle.indexes {
         meta.insert(
@@ -584,36 +995,105 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             _ => (vec![("Reads".into(), "no usage recorded since restart".into())], "estimated"),
         }
     };
+    let age_hours = bundle.counter_age_secs.map(|a| a.max(0) as f64 / 3600.0);
+    let history_for = |schema: &str, table: &str, index: &str| -> Option<&IndexUsageHistory> {
+        bundle.index_usage_history.iter().find(|h| {
+            h.schema_name.eq_ignore_ascii_case(schema) && h.table_name.eq_ignore_ascii_case(table) && h.index_name.eq_ignore_ascii_case(index)
+        })
+    };
     for u in &bundle.index_usage {
         let reads = u.user_seeks + u.user_scans + u.user_lookups;
-        if reads != 0 || u.user_updates <= 100 { continue; }
+        if reads != 0 { continue; }
+        // A heap is the table, not an index — never a drop candidate, and
+        // `DROP INDEX [(heap)]` does not compile.
+        if u.is_heap() { continue; }
         let key = (u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase());
-        // Never drop a PK or unique constraint index, or an obvious PK by name.
+        // Never drop a PK, unique constraint, or clustered index, or an obvious PK by name.
         if let Some(ix) = meta.get(&key) {
-            if ix.is_primary_key || ix.is_unique { continue; }
+            if ix.is_primary_key || ix.is_unique || ix.is_clustered { continue; }
         }
         if u.index_name.to_lowercase().starts_with("pk_") || u.index_name.eq_ignore_ascii_case("PK") { continue; }
-        let priority = if u.user_updates >= 100_000 { "high" } else if u.user_updates >= 10_000 { "medium" } else { "low" };
         let reserved_kb = reserved_by_index.get(&key).copied().unwrap_or(0);
-        recs.push(Recommendation {
-            kind: RecKind::DropIndex,
-            priority: priority.into(),
-            title: format!("Drop unused index {} on {}.{}", u.index_name, u.schema_name, u.table_name),
-            object: format!("{}.{}.{}", u.schema_name, u.table_name, u.index_name),
-            rationale: format!(
-                "{} updates and 0 reads since the last stats reset — the index is pure write tax (every INSERT/UPDATE/DELETE maintains it for no read benefit). Confirm across a representative window first (DMV counters reset on restart).",
-                u.user_updates
-            ),
-            ddl: format!("DROP INDEX {} ON {}.{};", br(&u.index_name), br(&u.schema_name), br(&u.table_name)),
-            impact_score: u.user_updates as f64,
-            metrics: vec![
-                ("Writes maintained".into(), commas(u.user_updates)),
-                ("Reads".into(), "0".into()),
-                ("Storage reclaimed".into(), format!("~{} MB", kb_to_mb(reserved_kb))),
-            ],
-            // Counters are measured directly from sys.dm_db_index_usage_stats.
-            confidence: "observed".into(),
-        });
+        let hist = history_for(&u.schema_name, &u.table_name, &u.index_name);
+        // Monitor-backed silence: watched ≥ 7 days and never read on any of them.
+        let idle_days = hist.filter(|h| h.days_observed >= 7 && h.days_with_reads == 0).map(|h| h.days_observed);
+        let since = match age_hours {
+            Some(h) => format!("since restart ({h:.1} h)"),
+            None => "since the last counter reset".to_string(),
+        };
+        if u.user_updates > 100 {
+            // Write-only: pays on every write, never read.
+            let mut priority = if u.user_updates >= 100_000 { "high" } else if u.user_updates >= 10_000 { "medium" } else { "low" };
+            if young_counters && priority == "high" { priority = "medium"; }
+            let title = if young_counters {
+                format!("Review write-only index {} on {}.{} (0 reads {since})", u.index_name, u.schema_name, u.table_name)
+            } else {
+                format!("Drop unused index {} on {}.{}", u.index_name, u.schema_name, u.table_name)
+            };
+            let idle_note = match idle_days {
+                Some(d) => format!(" The monitor has watched it for {d} days without a single read."),
+                None => String::new(),
+            };
+            recs.push(Recommendation {
+                kind: RecKind::DropIndex,
+                priority: priority.into(),
+                title,
+                object: format!("{}.{}.{}", u.schema_name, u.table_name, u.index_name),
+                rationale: format!(
+                    "{} updates and 0 reads {since} — the index is pure write tax (every INSERT/UPDATE/DELETE maintains it for no read benefit).{} Confirm across a representative window first (DMV counters reset on restart).",
+                    commas(u.user_updates), idle_note
+                ),
+                ddl: drop_index_ddl(&u.schema_name, &u.table_name, &u.index_name, young_counters, age_hours),
+                impact_score: u.user_updates as f64,
+                metrics: vec![
+                    ("Writes maintained".into(), commas(u.user_updates)),
+                    ("Reads".into(), "0".into()),
+                    ("Storage reclaimed".into(), format!("~{} MB", kb_to_mb(reserved_kb))),
+                ],
+                // Counters are measured directly from sys.dm_db_index_usage_stats.
+                confidence: "observed".into(),
+            });
+        } else if u.user_updates == 0 {
+            // Never touched at all: not read, not written. On an idle table
+            // that is expected; the signal is "nothing has asked for this
+            // index since the counters began". Low until the monitor has
+            // watched it idle for a week.
+            let priority = if idle_days.is_some() { "medium" } else { "low" };
+            let observed = if u.no_stats_row {
+                format!("No usage row exists for it in sys.dm_db_index_usage_stats {since}: no seek, scan, lookup or write has touched it")
+            } else {
+                format!("0 reads and 0 writes {since}")
+            };
+            let idle_note = match idle_days {
+                Some(d) => format!(" The monitor has watched it for {d} days without a read — promoted to medium."),
+                None if young_counters => " Under 24 h of counters is a sample, not a verdict: re-check after a representative window (or let the monitor watch it for a week).".to_string(),
+                None => String::new(),
+            };
+            recs.push(Recommendation {
+                kind: RecKind::DropIndex,
+                priority: priority.into(),
+                title: format!("Index {} on {}.{} never used {since}", u.index_name, u.schema_name, u.table_name),
+                object: format!("{}.{}.{}", u.schema_name, u.table_name, u.index_name),
+                rationale: format!(
+                    "{}. It still occupies ~{} MB and will be maintained by the first write that arrives.{}",
+                    observed, kb_to_mb(reserved_kb), idle_note
+                ),
+                ddl: drop_index_ddl(&u.schema_name, &u.table_name, &u.index_name, young_counters && idle_days.is_none(), age_hours),
+                impact_score: reserved_kb as f64 / 1024.0,
+                metrics: {
+                    let mut m = vec![
+                        ("Reads".into(), "0".into()),
+                        ("Writes".into(), "0".into()),
+                        ("Storage".into(), format!("~{} MB", kb_to_mb(reserved_kb))),
+                    ];
+                    if let Some(h) = hist {
+                        m.push(("Monitored (days)".into(), format!("{} read on {} of {}", if h.days_with_reads == 0 { "never" } else { "read" }, h.days_with_reads, h.days_observed)));
+                    }
+                    m
+                },
+                confidence: if young_counters { "estimated".into() } else { "observed".into() },
+            });
+        }
     }
 
     // ---- MergeIndex: exact-duplicate key columns on the same table ---------
@@ -621,48 +1101,105 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
     for ix in &bundle.indexes {
         by_table.entry((ix.schema_name.clone(), ix.table_name.clone())).or_default().push(ix);
     }
+    let reads_of = |schema: &str, table: &str, index: &str| -> Option<u64> {
+        usage_by_index
+            .get(&(schema.to_lowercase(), table.to_lowercase(), index.to_lowercase()))
+            .filter(|u| !u.no_stats_row)
+            .map(|u| u.user_seeks + u.user_scans + u.user_lookups)
+    };
     for ((schema, table), list) in &by_table {
         for i in 0..list.len() {
             for j in (i + 1)..list.len() {
                 let (a, b) = (list[i], list[j]);
-                let same = !a.key_columns.is_empty()
-                    && a.key_columns.len() == b.key_columns.len()
-                    && a.key_columns.iter().zip(&b.key_columns).all(|(x, y)| x.eq_ignore_ascii_case(y));
-                if !same { continue; }
-                // Keep the unique/PK one; drop the other.
-                let (keep, drop) = if a.is_primary_key || a.is_unique { (a, b) }
-                    else if b.is_primary_key || b.is_unique { (b, a) }
-                    else { (a, b) };
-                if drop.is_primary_key || drop.is_unique { continue; }
+                let same_key = !a.key_columns.is_empty() && same_columns(&a.key_columns, &b.key_columns);
+                if !same_key { continue; }
+                let same_inc = same_column_set(&a.included_columns, &b.included_columns);
+                if same_inc {
+                    // Exact duplicate: keep the unique/PK one; drop the other.
+                    let (keep, drop) = if a.is_primary_key || a.is_unique { (a, b) }
+                        else if b.is_primary_key || b.is_unique { (b, a) }
+                        else { (a, b) };
+                    if drop.is_primary_key || drop.is_unique { continue; }
+                    let drop_reserved_kb = reserved_by_index
+                        .get(&(schema.to_lowercase(), table.to_lowercase(), drop.index_name.to_lowercase()))
+                        .copied()
+                        .unwrap_or(0);
+                    let (drop_chips, drop_conf) = usage_chips(schema, table, &drop.index_name);
+                    recs.push(Recommendation {
+                        kind: RecKind::MergeIndex,
+                        priority: merge_priority(drop_reserved_kb).into(),
+                        title: format!("Merge duplicate indexes on {}.{}", schema, table),
+                        object: format!("{}.{}.{}", schema, table, drop.index_name),
+                        rationale: format!(
+                            "Indexes {} and {} have identical key columns ({}) and identical INCLUDE columns ({}). One is redundant — every write maintains both. Drop {}.",
+                            keep.index_name, drop.index_name, drop.key_columns.join(", "), fmt_cols(&drop.included_columns), drop.index_name
+                        ),
+                        ddl: format!(
+                            "-- {} is an exact duplicate of {} (same key, same INCLUDE):\nDROP INDEX {} ON {}.{};",
+                            drop.index_name, keep.index_name, br(&drop.index_name), br(schema), br(table)
+                        ),
+                        // Rank within kind by what the drop reclaims (+1 so an
+                        // exact duplicate edges a prefix-redundant one of equal size).
+                        impact_score: drop_reserved_kb as f64 + 1.0,
+                        metrics: {
+                            let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
+                            m.extend(drop_chips);
+                            m
+                        },
+                        confidence: drop_conf.into(),
+                    });
+                    continue;
+                }
+                // Same key, different INCLUDEs: two indexes each covering their
+                // own queries. Not a duplicate — an overlap worth merging into
+                // one index with the union of INCLUDEs. The index to retire is
+                // the one with FEWER reads; never the one doing the work.
+                if a.is_primary_key || a.is_unique || b.is_primary_key || b.is_unique { continue; }
+                let ra = reads_of(schema, table, &a.index_name);
+                let rb = reads_of(schema, table, &b.index_name);
+                let (keep, drop) = match (ra, rb) {
+                    (Some(x), Some(y)) if y > x => (b, a),
+                    (None, Some(y)) if y > 0 => (b, a),
+                    _ => (a, b),
+                };
+                let mut inc = keep.included_columns.clone();
+                union_includes(&mut inc, &drop.included_columns);
+                let inc_list = inc.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
+                let key_list = keep.key_columns.iter().map(|c| br(c)).collect::<Vec<_>>().join(", ");
                 let drop_reserved_kb = reserved_by_index
                     .get(&(schema.to_lowercase(), table.to_lowercase(), drop.index_name.to_lowercase()))
                     .copied()
                     .unwrap_or(0);
-                let (drop_chips, drop_conf) = usage_chips(schema, table, &drop.index_name);
+                let reads_note = |name: &str, r: Option<u64>| match r {
+                    Some(n) => format!("{name}: {} reads", commas(n)),
+                    None => format!("{name}: no usage recorded since restart"),
+                };
+                let (keep_reads, drop_reads) = if std::ptr::eq(keep, a) { (ra, rb) } else { (rb, ra) };
                 recs.push(Recommendation {
                     kind: RecKind::MergeIndex,
-                    priority: merge_priority(drop_reserved_kb).into(),
-                    title: format!("Merge duplicate indexes on {}.{}", schema, table),
+                    priority: "low".into(),
+                    title: format!("Overlapping indexes {} and {} on {}.{} — consider merging", keep.index_name, drop.index_name, schema, table),
                     object: format!("{}.{}.{}", schema, table, drop.index_name),
                     rationale: format!(
-                        "Indexes {} and {} have identical key columns ({}). One is redundant — every write maintains both. Fold any unique INCLUDE columns into {} and drop {}.",
-                        keep.index_name, drop.index_name, drop.key_columns.join(", "), keep.index_name, drop.index_name
+                        "{} and {} share the key ({}) but carry different INCLUDE columns ({} vs {}), so each serves its own queries — neither is redundant today ({}; {}). Merging them into one index with the union of INCLUDEs halves the write maintenance on this key at the cost of a slightly wider index. Low priority: only worth doing if {}.{} is write-heavy.",
+                        keep.index_name, drop.index_name, keep.key_columns.join(", "),
+                        fmt_cols(&keep.included_columns), fmt_cols(&drop.included_columns),
+                        reads_note(&keep.index_name, keep_reads), reads_note(&drop.index_name, drop_reads),
+                        schema, table
                     ),
                     ddl: format!(
-                        "-- Merge needed INCLUDE columns into {} first, then:\nDROP INDEX {} ON {}.{};",
-                        br(&keep.index_name), br(&drop.index_name), br(schema), br(table)
+                        "-- Optional merge: widen {} to carry both INCLUDE sets, then retire {} (the one with fewer reads).\nCREATE NONCLUSTERED INDEX {} ON {}.{} ({})\n  INCLUDE ({})\n  WITH (DROP_EXISTING = ON);\nDROP INDEX {} ON {}.{};",
+                        keep.index_name, drop.index_name,
+                        br(&keep.index_name), br(schema), br(table), key_list, inc_list,
+                        br(&drop.index_name), br(schema), br(table)
                     ),
-                    // Rank within kind by what the drop reclaims (+1 so an
-                    // exact duplicate edges a prefix-redundant one of equal size).
-                    impact_score: drop_reserved_kb as f64 + 1.0,
-                    metrics: {
-                        let mut m = vec![("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb)))];
-                        m.extend(drop_chips);
-                        m
-                    },
-                    // Identical key columns are read directly from catalog metadata;
-                    // the Reads/Writes chips are only "observed" when a usage row exists.
-                    confidence: drop_conf.into(),
+                    impact_score: drop_reserved_kb as f64,
+                    metrics: vec![
+                        ("Storage".into(), format!("~{} MB", kb_to_mb(drop_reserved_kb))),
+                        (format!("Reads {}", keep.index_name), keep_reads.map(commas).unwrap_or_else(|| "none recorded".into())),
+                        (format!("Reads {}", drop.index_name), drop_reads.map(commas).unwrap_or_else(|| "none recorded".into())),
+                    ],
+                    confidence: if keep_reads.is_some() && drop_reads.is_some() { "observed".into() } else { "estimated".into() },
                 });
             }
         }
@@ -772,8 +1309,14 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
         }
     }
 
-    // Every rec above is built from counters that only exist since the last
-    // restart — say so on each one, and don't call a ten-minute sample "observed".
+    recs.extend(physical_recs(bundle));
+    recs.extend(stats_recs(bundle));
+    recs.extend(deprecated_column_recs(bundle));
+    recs.extend(sniffing_recs(bundle));
+
+    // Every usage-based rec above is built from counters that only exist since
+    // the last restart — say so on each one, and don't call a ten-minute
+    // sample "observed".
     apply_counter_age(&mut recs, bundle.counter_age_secs, bundle.counters_since.as_deref());
 
     // Rank: priority bucket first, then impact within the bucket.
@@ -782,6 +1325,246 @@ pub fn advise(bundle: &DmvBundle) -> Vec<Recommendation> {
             .then(b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal))
     });
     recs
+}
+
+/// `DROP INDEX` DDL for a usage-based drop rec. Under 24 h of counters the
+/// statement is shipped behind a comment that says why it must not be run
+/// yet — a ten-minute "0 reads" is a sample, and the copy-paste promise cuts
+/// both ways.
+fn drop_index_ddl(schema: &str, table: &str, index: &str, hold: bool, age_hours: Option<f64>) -> String {
+    let stmt = format!("DROP INDEX {} ON {}.{};", br(index), br(schema), br(table));
+    if hold {
+        let age = age_hours.map(|h| format!("{h:.1} h")).unwrap_or_else(|| "under 24 h".to_string());
+        format!(
+            "-- NOT YET: usage counters cover only {age} since restart. Re-check after ≥ 24 h (or a monitored week) before running:\n-- {stmt}"
+        )
+    } else {
+        stmt
+    }
+}
+
+/// Physical-shape recs from `sys.dm_db_index_physical_stats`:
+///   * ≥ 30 % fragmentation on ≥ 1,000 leaf pages → REBUILD (≥ 30 %) / REORGANIZE (10–30 % is NOT flagged — below the rebuild threshold it is noise on modern storage);
+///   * fill factor < 70 on an index that is read far more than written → rebuild at 90–100.
+/// Heap forward pointers are folded into the heap finding in `analyze`, not repeated here.
+pub fn physical_recs(bundle: &DmvBundle) -> Vec<Recommendation> {
+    const FRAG_PCT: f64 = 30.0;
+    const MIN_PAGES: u64 = 1_000;
+    let mut out = Vec::new();
+    let mut usage: BTreeMap<(String, String, String), &IndexUsage> = BTreeMap::new();
+    for u in &bundle.index_usage {
+        usage.insert((u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase()), u);
+    }
+    for p in &bundle.physical {
+        let Some(index_name) = &p.index_name else { continue };
+        if p.index_id <= 0 || p.page_count < MIN_PAGES { continue; }
+        let key = (p.schema_name.to_lowercase(), p.table_name.to_lowercase(), index_name.to_lowercase());
+        let u = usage.get(&key).filter(|u| !u.no_stats_row);
+        let reads = u.map(|u| u.user_seeks + u.user_scans + u.user_lookups);
+        let writes = u.map(|u| u.user_updates);
+        let mb = p.page_count as f64 * 8.0 / 1024.0;
+        if p.avg_fragmentation_pct >= FRAG_PCT {
+            let priority = if p.avg_fragmentation_pct >= 70.0 && p.page_count >= 10_000 { "high" } else if p.page_count >= 10_000 { "medium" } else { "low" };
+            let density = p.avg_page_space_used_pct.map(|d| format!(", {d:.0} % page density")).unwrap_or_default();
+            out.push(Recommendation {
+                kind: RecKind::RebuildIndex,
+                priority: priority.into(),
+                title: format!("Rebuild {} on {}.{} ({:.0} % fragmented, {} pages)", index_name, p.schema_name, p.table_name, p.avg_fragmentation_pct, commas(p.page_count)),
+                object: format!("{}.{}.{}", p.schema_name, p.table_name, index_name),
+                rationale: format!(
+                    "sys.dm_db_index_physical_stats (LIMITED) measures {:.1} % logical fragmentation across {} leaf pages (~{:.0} MB){}. Range scans and read-ahead on this index touch pages out of order and read more of them than the data needs; a rebuild puts the leaf level back in key order and reclaims the half-empty pages. If the key is a random GUID or the table is hot-inserted, expect it to fragment again — fix the key or use a lower fill factor.",
+                    p.avg_fragmentation_pct, commas(p.page_count), mb, density
+                ),
+                ddl: format!(
+                    "-- Online when the edition allows it; otherwise drop ONLINE = ON.\nALTER INDEX {} ON {}.{} REBUILD WITH (ONLINE = ON, SORT_IN_TEMPDB = ON);",
+                    br(index_name), br(&p.schema_name), br(&p.table_name)
+                ),
+                impact_score: p.avg_fragmentation_pct * p.page_count as f64 / 100.0,
+                metrics: vec![
+                    ("Fragmentation".into(), format!("{:.1} %", p.avg_fragmentation_pct)),
+                    ("Leaf pages".into(), commas(p.page_count)),
+                    ("Size".into(), format!("~{mb:.0} MB")),
+                ],
+                confidence: "observed".into(),
+            });
+        }
+        // Low fill factor on a read-mostly index: pages are deliberately kept
+        // part-empty for inserts that never come, so every scan reads ~2×.
+        if p.fill_factor > 0 && p.fill_factor < 70 {
+            let read_mostly = match (reads, writes) {
+                (Some(r), Some(w)) => r > 0 && w * 10 <= r,
+                _ => false,
+            };
+            if read_mostly {
+                let density = p.avg_page_space_used_pct.map(|d| format!(" (measured page density {d:.0} %)")).unwrap_or_default();
+                out.push(Recommendation {
+                    kind: RecKind::RebuildIndex,
+                    priority: (if p.page_count >= 10_000 { "medium" } else { "low" }).into(),
+                    title: format!("Raise fill factor on {} ({}) on {}.{} — read-mostly index", index_name, p.fill_factor, p.schema_name, p.table_name),
+                    object: format!("{}.{}.{}", p.schema_name, p.table_name, index_name),
+                    rationale: format!(
+                        "FILLFACTOR = {} leaves every leaf page {} % empty{}, so the index occupies ~{} pages (~{:.0} MB) where ~{} would hold the same rows. Usage since restart is {} reads vs {} writes — the free space is reserved for inserts that are not arriving. Rebuild at 90–100 and let the next measurement confirm the page count roughly halves.",
+                        p.fill_factor, 100 - p.fill_factor as u32, density, commas(p.page_count), mb,
+                        commas((p.page_count as f64 * p.fill_factor as f64 / 100.0).round() as u64),
+                        reads.map(commas).unwrap_or_default(), writes.map(commas).unwrap_or_default()
+                    ),
+                    ddl: format!(
+                        "ALTER INDEX {} ON {}.{} REBUILD WITH (FILLFACTOR = 100, ONLINE = ON, SORT_IN_TEMPDB = ON);",
+                        br(index_name), br(&p.schema_name), br(&p.table_name)
+                    ),
+                    impact_score: (100 - p.fill_factor as u32) as f64 * p.page_count as f64 / 100.0,
+                    metrics: vec![
+                        ("Fill factor".into(), format!("{}", p.fill_factor)),
+                        ("Leaf pages".into(), commas(p.page_count)),
+                        ("Reads / writes".into(), format!("{} / {}", reads.map(commas).unwrap_or_default(), writes.map(commas).unwrap_or_default())),
+                    ],
+                    confidence: "observed".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Stale-statistics recs from `sys.dm_db_stats_properties`:
+///   * `no_recompute = 1` with modifications ≥ 10 % of the histogram's rows —
+///     auto-update is OFF, so nothing will ever refresh it;
+///   * modifications ≥ 20 % of rows on a ≥ 100k-row table — large enough that
+///     the auto-update threshold lagging costs real estimate error (small
+///     tables auto-refresh on the next compile; not worth a card).
+pub fn stats_recs(bundle: &DmvBundle) -> Vec<Recommendation> {
+    let mut out = Vec::new();
+    for st in &bundle.stats {
+        if st.rows == 0 { continue; }
+        let pct = st.modification_counter as f64 * 100.0 / st.rows as f64;
+        let norecompute_stale = st.no_recompute && pct >= 10.0 && st.modification_counter >= 1_000;
+        let big_stale = !st.no_recompute && st.rows >= 100_000 && pct >= 20.0;
+        if !norecompute_stale && !big_stale { continue; }
+        let current = st.table_rows.map(|r| format!(" The table now holds {} rows.", commas(r))).unwrap_or_default();
+        let priority = if st.no_recompute && pct >= 50.0 { "high" } else if st.no_recompute || pct >= 50.0 { "medium" } else { "low" };
+        let norecompute_ddl = if st.no_recompute {
+            if st.is_index_stat {
+                format!(
+                    "\n-- Re-enable auto-update on the index statistics (NORECOMPUTE was ON):\nALTER INDEX {} ON {}.{} SET (STATISTICS_NORECOMPUTE = OFF);",
+                    br(&st.stats_name), br(&st.schema_name), br(&st.table_name)
+                )
+            } else {
+                "\n-- Running UPDATE STATISTICS without NORECOMPUTE re-enables auto-update for this statistic.".to_string()
+            }
+        } else {
+            String::new()
+        };
+        out.push(Recommendation {
+            kind: RecKind::UpdateStatistics,
+            priority: priority.into(),
+            title: format!(
+                "Refresh stale statistics {} on {}.{} ({} modifications vs {} rows{})",
+                st.stats_name, st.schema_name, st.table_name, commas(st.modification_counter), commas(st.rows),
+                if st.no_recompute { ", auto-update OFF" } else { "" }
+            ),
+            object: format!("{}.{}.{}", st.schema_name, st.table_name, st.stats_name),
+            rationale: format!(
+                "sys.dm_db_stats_properties: the histogram was built from {} rows ({} sampled){} and {} modifications ({:.0} %) have landed since.{} The optimizer estimates row counts from this histogram, so date ranges and values it never saw get the density fallback — wrong join orders, wrong memory grants, spills. Refresh with FULLSCAN{}.",
+                commas(st.rows), commas(st.rows_sampled),
+                st.last_updated.as_deref().map(|d| format!(" on {d}")).unwrap_or_default(),
+                commas(st.modification_counter), pct, current,
+                if st.no_recompute { " and drop NORECOMPUTE so auto-update can keep it fresh" } else { "" }
+            ),
+            ddl: format!(
+                "UPDATE STATISTICS {}.{} {} WITH FULLSCAN;{}",
+                br(&st.schema_name), br(&st.table_name), br(&st.stats_name), norecompute_ddl
+            ),
+            impact_score: st.modification_counter as f64,
+            metrics: vec![
+                ("Modifications".into(), commas(st.modification_counter)),
+                ("Histogram rows".into(), commas(st.rows)),
+                ("Modified".into(), format!("{pct:.0} %")),
+                ("Auto-update".into(), if st.no_recompute { "OFF (NORECOMPUTE)".into() } else { "on".into() }),
+            ],
+            confidence: "observed".into(),
+        });
+    }
+    out
+}
+
+/// One rec per deprecated text/ntext/image column, with the ALTER COLUMN DDL.
+pub fn deprecated_column_recs(bundle: &DmvBundle) -> Vec<Recommendation> {
+    let rows = table_row_counts(&bundle.partition_stats);
+    let mut out = Vec::new();
+    for c in &bundle.deprecated_columns {
+        let replacement = match c.type_name.to_ascii_lowercase().as_str() {
+            "text" => "varchar(max)",
+            "ntext" => "nvarchar(max)",
+            "image" => "varbinary(max)",
+            _ => continue,
+        };
+        let n = rows.get(&format!("{}.{}", c.schema_name, c.table_name).to_ascii_lowercase()).copied();
+        out.push(Recommendation {
+            kind: RecKind::AlterColumnType,
+            priority: "low".into(),
+            title: format!("Convert deprecated {} column {}.{}.{} to {}", c.type_name, c.schema_name, c.table_name, c.column_name, replacement),
+            object: format!("{}.{}", c.schema_name, c.table_name),
+            rationale: format!(
+                "sys.columns declares {} as {} — deprecated since SQL Server 2005 and slated for removal. It cannot be used with most string functions, ORDER BY/DISTINCT, or in-row storage, and every access goes through the old text-pointer path. {} is the drop-in replacement with the same 2 GB limit.{}",
+                c.column_name, c.type_name, replacement,
+                n.map(|r| format!(" The table holds {} rows; the ALTER rewrites the LOB data, so schedule it.", commas(r))).unwrap_or_default()
+            ),
+            ddl: deprecated_column_ddl(c, replacement),
+            impact_score: n.unwrap_or(0) as f64,
+            metrics: vec![
+                ("Column type".into(), c.type_name.clone()),
+                ("Replacement".into(), replacement.into()),
+            ],
+            confidence: "observed".into(),
+        });
+    }
+    out
+}
+
+/// Parameter-sniffing recs from Query Store: same query_id, ≥ 2 plans, and a
+/// max-vs-average logical-read swing of ≥ 10×. Names the module when the
+/// query belongs to one and shows the measured numbers.
+pub fn sniffing_recs(bundle: &DmvBundle) -> Vec<Recommendation> {
+    let mut out = Vec::new();
+    for q in &bundle.query_skew {
+        if q.plan_count < 2 || q.avg_logical_reads == 0 || q.executions < 50 { continue; }
+        let ratio = q.max_logical_reads as f64 / q.avg_logical_reads as f64;
+        if ratio < 10.0 { continue; }
+        let subject = q.object_name.clone().unwrap_or_else(|| format!("query {}", q.query_id));
+        let priority = if q.max_logical_reads >= 1_000_000 { "high" } else if q.max_logical_reads >= 100_000 { "medium" } else { "low" };
+        let snippet: String = q.sql_text.chars().take(160).collect();
+        out.push(Recommendation {
+            kind: RecKind::ParameterSniffing,
+            priority: priority.into(),
+            title: format!("Parameter-sniffing skew in {subject}: {} plans, reads swing {:.0}× (avg {} → max {})", q.plan_count, ratio, commas(q.avg_logical_reads), commas(q.max_logical_reads)),
+            object: subject.clone(),
+            rationale: format!(
+                "Query Store (query_id {}) holds {} distinct plans for this statement over {} executions; logical reads average {} but peak at {} — a {:.0}× swing, the signature of a plan compiled for a selective parameter value and reused for a non-selective one (or vice versa). Avg duration {:.0} ms, max {:.0} ms. Options, cheapest first: OPTION (RECOMPILE) on the statement (compile per call; fine under ~100 calls/s), OPTIMIZE FOR a representative value or UNKNOWN, a covering index that makes both shapes a seek, or Query Store plan forcing once you know which plan is right. Statement: {}",
+                q.query_id, q.plan_count, commas(q.executions), commas(q.avg_logical_reads), commas(q.max_logical_reads), ratio,
+                q.avg_duration_ms, q.max_duration_ms, snippet
+            ),
+            ddl: match &q.object_name {
+                Some(m) => format!(
+                    "-- Inside {m}: add to the skewed statement\n--   ... OPTION (RECOMPILE);\n-- or pin a typical value:\n--   ... OPTION (OPTIMIZE FOR (@param = <typical value>));\n-- or force the good plan from Query Store once identified:\n-- EXEC sp_query_store_force_plan @query_id = {}, @plan_id = <good plan_id>;",
+                    q.query_id
+                ),
+                None => format!(
+                    "-- Ad hoc statement (query_id {}): add OPTION (RECOMPILE) or OPTIMIZE FOR, or force the good plan:\n-- EXEC sp_query_store_force_plan @query_id = {}, @plan_id = <good plan_id>;",
+                    q.query_id, q.query_id
+                ),
+            },
+            impact_score: q.max_logical_reads as f64,
+            metrics: vec![
+                ("Plans".into(), format!("{}", q.plan_count)),
+                ("Executions".into(), commas(q.executions)),
+                ("Avg reads".into(), commas(q.avg_logical_reads)),
+                ("Max reads".into(), commas(q.max_logical_reads)),
+                ("Swing".into(), format!("{ratio:.0}×")),
+            ],
+            confidence: "observed".into(),
+        });
+    }
+    out
 }
 
 /// Priority of a merge/drop-redundant rec by the storage the drop reclaims.
@@ -909,6 +1692,14 @@ fn union_includes(into: &mut Vec<String>, extra: &[String]) {
 /// merely overlap without a prefix relationship are left separate, because
 /// reordering key columns can change selectivity and we will not guess.
 pub fn consolidate_missing_indexes(missing: &[MissingIndex]) -> Vec<MissingIndex> {
+    consolidate_missing_indexes_traced(missing).into_iter().map(|(m, _)| m).collect()
+}
+
+/// [`consolidate_missing_indexes`] that also returns, per survivor, the seek
+/// counts of every DMV group folded into it — so a rec can say "2 groups
+/// merged; seeks summed: 1,485 + 1,485" instead of presenting 2,970 as one
+/// measurement.
+pub fn consolidate_missing_indexes_traced(missing: &[MissingIndex]) -> Vec<(MissingIndex, Vec<u64>)> {
     // The DMV builds the index key as equality columns first, then inequality
     // columns. Compare on that full ordered key.
     fn full_key(m: &MissingIndex) -> Vec<String> {
@@ -916,16 +1707,16 @@ pub fn consolidate_missing_indexes(missing: &[MissingIndex]) -> Vec<MissingIndex
     }
 
     // Group by (schema, table), case-insensitively, preserving input order.
-    let mut groups: BTreeMap<(String, String), Vec<MissingIndex>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), Vec<(MissingIndex, Vec<u64>)>> = BTreeMap::new();
     for m in missing {
         if full_key(m).is_empty() { continue; }
         groups
             .entry((m.schema_name.to_lowercase(), m.table_name.to_lowercase()))
             .or_default()
-            .push(m.clone());
+            .push((m.clone(), vec![m.user_seeks]));
     }
 
-    let mut out: Vec<MissingIndex> = Vec::new();
+    let mut out: Vec<(MissingIndex, Vec<u64>)> = Vec::new();
     for (_, mut list) in groups {
         // Greedy fixpoint merge: repeatedly fold any pair in a prefix relation
         // into the wider one until no more merges are possible. O(n^2) per
@@ -936,8 +1727,8 @@ pub fn consolidate_missing_indexes(missing: &[MissingIndex]) -> Vec<MissingIndex
             'outer: for i in 0..list.len() {
                 for j in 0..list.len() {
                     if i == j { continue; }
-                    let ki = full_key(&list[i]);
-                    let kj = full_key(&list[j]);
+                    let ki = full_key(&list[i].0);
+                    let kj = full_key(&list[j].0);
                     // Merge j INTO i when j's key is a (possibly equal) prefix of
                     // i's key — i is the superset and survives. When the keys are
                     // identical, `i < j` ensures we pick a single survivor and
@@ -948,14 +1739,15 @@ pub fn consolidate_missing_indexes(missing: &[MissingIndex]) -> Vec<MissingIndex
                         // Absorb j into i: widest key already on i; union INCLUDEs
                         // (also pull j's KEY columns beyond i's into i's INCLUDE?
                         // No — j is a prefix, so it has no columns i lacks).
-                        let absorbed = list.remove(j);
+                        let (absorbed, parts) = list.remove(j);
                         // Index i may have shifted if j < i.
                         let i2 = if j < i { i - 1 } else { i };
-                        union_includes(&mut list[i2].included_columns, &absorbed.included_columns);
+                        union_includes(&mut list[i2].0.included_columns, &absorbed.included_columns);
                         // Aggregate evidence onto the survivor.
-                        list[i2].avg_user_impact = list[i2].avg_user_impact.max(absorbed.avg_user_impact);
-                        list[i2].avg_total_user_cost = list[i2].avg_total_user_cost.max(absorbed.avg_total_user_cost);
-                        list[i2].user_seeks = list[i2].user_seeks.saturating_add(absorbed.user_seeks);
+                        list[i2].0.avg_user_impact = list[i2].0.avg_user_impact.max(absorbed.avg_user_impact);
+                        list[i2].0.avg_total_user_cost = list[i2].0.avg_total_user_cost.max(absorbed.avg_total_user_cost);
+                        list[i2].0.user_seeks = list[i2].0.user_seeks.saturating_add(absorbed.user_seeks);
+                        list[i2].1.extend(parts);
                         changed = true;
                         break 'outer;
                     }
@@ -1060,10 +1852,10 @@ pub fn unused_existing_indexes(
     let mut out = Vec::new();
     for u in usage {
         let reads = u.user_seeks + u.user_scans + u.user_lookups;
-        if reads != 0 || u.user_updates <= min_updates { continue; }
+        if reads != 0 || u.user_updates <= min_updates || u.is_heap() { continue; }
         let key = (u.schema_name.to_lowercase(), u.table_name.to_lowercase(), u.index_name.to_lowercase());
         if let Some(ix) = meta.get(&key) {
-            if ix.is_primary_key || ix.is_unique { continue; }
+            if ix.is_primary_key || ix.is_unique || ix.is_clustered { continue; }
         }
         if u.index_name.to_lowercase().starts_with("pk_") || u.index_name.eq_ignore_ascii_case("PK") { continue; }
         out.push(UnusedIndexFinding {
@@ -1089,7 +1881,7 @@ mod dedup_tests {
             included_columns: inc.iter().map(|s| s.to_string()).collect(),
             avg_user_impact: impact,
             user_seeks: seeks,
-            avg_total_user_cost: cost,
+            avg_total_user_cost: cost, ..Default::default()
         }
     }
 
@@ -1102,7 +1894,7 @@ mod dedup_tests {
             is_primary_key: pk,
             is_clustered: false,
             key_columns: keys.iter().map(|s| s.to_string()).collect(),
-            included_columns: vec![],
+            included_columns: vec![], ..Default::default()
         }
     }
 
@@ -1116,7 +1908,7 @@ mod dedup_tests {
             user_scans: scans,
             user_lookups: lookups,
             user_updates: updates,
-            no_stats_row: false,
+            no_stats_row: false, ..Default::default()
         }
     }
 
@@ -1375,7 +2167,7 @@ mod dedup_tests {
             row_count: rows,
             reserved_kb,
             used_kb: reserved_kb,
-            data_kb: reserved_kb,
+            data_kb: reserved_kb, ..Default::default()
         }
     }
 
@@ -1461,7 +2253,7 @@ mod dedup_tests {
                 row_count: 5_000_000,
                 reserved_kb: 2_000_000,
                 used_kb: 2_000_000,
-                data_kb: 1_900_000,
+                data_kb: 1_900_000, ..Default::default()
             }],
             ..Default::default()
         }
@@ -1690,7 +2482,7 @@ mod dedup_tests {
             row_count: if kb == 0 { 0 } else { 1000 },
             reserved_kb: kb,
             used_kb: kb,
-            data_kb: kb,
+            data_kb: kb, ..Default::default()
         };
         let b = DmvBundle {
             indexes: vec![

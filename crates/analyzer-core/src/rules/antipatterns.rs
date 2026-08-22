@@ -58,6 +58,197 @@ fn skip_comments(tokens: &[Token], mut i: usize) -> usize {
 /// * `[UNION]` / `"UNION"` delimited identifiers are *not* the keyword (the
 ///   shared `is_word` would wrongly match them — see [`kw`]).
 /// * `UNION ALL` is already correct and never fires.
+/// Bounds of the SELECT branch immediately before the UNION at `union_idx`:
+/// the index of its SELECT and whether it has a depth-0 FROM. Stops at the
+/// enclosing `(` or a statement boundary.
+fn branch_before(tokens: &[Token], union_idx: usize) -> Option<(usize, bool)> {
+    let mut k = union_idx;
+    let mut depth = 0i32;
+    let mut has_from = false;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" {
+            depth += 1;
+            continue;
+        }
+        if t.text == "(" {
+            if depth == 0 {
+                return None;
+            }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if kw(t, "FROM") {
+                has_from = true;
+            }
+            if kw(t, "SELECT") {
+                return Some((k, has_from));
+            }
+            if t.text == ";" || kw(t, "UNION") {
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Does the SELECT branch after the UNION at `union_idx` have a depth-0 FROM?
+fn branch_after_has_from(tokens: &[Token], union_idx: usize) -> bool {
+    let mut j = union_idx + 1;
+    let mut depth = 0i32;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" {
+            depth += 1;
+        } else if t.text == ")" {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+        } else if depth == 0 {
+            if kw(t, "FROM") {
+                return true;
+            }
+            if t.text == ";" || kw(t, "UNION") || kw(t, "ORDER") {
+                return false;
+            }
+        }
+        j += 1;
+    }
+    false
+}
+
+/// Both branches around this UNION are FROM-less scalar selects.
+fn union_branches_are_scalar(tokens: &[Token], union_idx: usize) -> bool {
+    match branch_before(tokens, union_idx) {
+        Some((_, has_from)) => !has_from && !branch_after_has_from(tokens, union_idx),
+        None => false,
+    }
+}
+
+/// Normalised (select-list, from-source) of the SELECT at `select_idx`,
+/// ignoring `TOP (…)`/`DISTINCT` and comments. `None` when the branch has no
+/// depth-0 FROM.
+fn branch_signature(tokens: &[Token], select_idx: usize) -> Option<(String, String)> {
+    let mut j = select_idx + 1;
+    let mut depth = 0i32;
+    let mut list: Vec<String> = Vec::new();
+    let mut src: Vec<String> = Vec::new();
+    let mut in_from = false;
+    let mut skip_top = false;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.kind == TokKind::Comment { j += 1; continue; }
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" {
+            depth -= 1;
+            if depth < 0 { break; }
+        }
+        if depth == 0 {
+            if !in_from && (t.text == ";" || kw(t, "UNION") || kw(t, "ORDER")) { return None; }
+            if in_from && (t.text == ";" || kw(t, "UNION") || kw(t, "WHERE") || kw(t, "ORDER")
+                || kw(t, "GROUP") || kw(t, "HAVING") || kw(t, "OPTION"))
+            {
+                break;
+            }
+            if !in_from && kw(t, "FROM") { in_from = true; j += 1; continue; }
+        }
+        if !in_from {
+            // `TOP (@n)` / `TOP 10` / `DISTINCT` are not part of the projection.
+            if depth == 0 && kw(t, "TOP") { skip_top = true; j += 1; continue; }
+            if skip_top {
+                // consume `(…)` or a single number/variable
+                if t.text == "(" { j += 1; continue; }
+                if t.text == ")" && depth == 0 { skip_top = false; j += 1; continue; }
+                if depth == 0 { skip_top = false; j += 1; continue; }
+                j += 1; continue;
+            }
+            if depth == 0 && kw(t, "DISTINCT") { j += 1; continue; }
+            list.push(t.text.to_ascii_lowercase());
+        } else {
+            src.push(t.text.to_ascii_lowercase());
+        }
+        j += 1;
+    }
+    if !in_from || src.is_empty() { return None; }
+    Some((list.join(" "), src.join(" ")))
+}
+
+/// Are the two branches around this UNION the same projection over the same
+/// FROM source? Then they can overlap and the implicit DISTINCT is intended.
+fn union_branches_same_source_and_projection(tokens: &[Token], union_idx: usize) -> bool {
+    let Some((before_sel, _)) = branch_before(tokens, union_idx) else { return false };
+    let mut n = skip_comments(tokens, union_idx + 1);
+    while tokens.get(n).map(|t| t.text == "(").unwrap_or(false) { n = skip_comments(tokens, n + 1); }
+    if !tokens.get(n).map(|t| kw(t, "SELECT")).unwrap_or(false) { return false; }
+    match (branch_signature(tokens, before_sel), branch_signature(tokens, n)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Is this UNION inside a derived table `FROM (…) x` whose consuming SELECT
+/// list is a COUNT(...) / DISTINCT aggregate?
+fn union_feeds_distinct_aggregate(tokens: &[Token], union_idx: usize) -> bool {
+    // Enclosing `(` at depth 0.
+    let mut k = union_idx;
+    let mut depth = 0i32;
+    let mut open: Option<usize> = None;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" {
+            depth += 1;
+        } else if t.text == "(" {
+            if depth == 0 {
+                open = Some(k);
+                break;
+            }
+            depth -= 1;
+        } else if depth == 0 && t.text == ";" {
+            return false;
+        }
+    }
+    let Some(open) = open else { return false };
+    let Some(from_at) = prev_sig(tokens, open) else { return false };
+    if !kw(&tokens[from_at], "FROM") {
+        return false;
+    }
+    // Walk back from FROM to its SELECT, checking the list for COUNT/DISTINCT.
+    let mut k = from_at;
+    let mut depth = 0i32;
+    let mut saw_agg = false;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" {
+            depth += 1;
+            continue;
+        }
+        if t.text == "(" {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if kw(t, "COUNT") || kw(t, "COUNT_BIG") || kw(t, "DISTINCT") {
+                saw_agg = true;
+            }
+            if kw(t, "SELECT") {
+                return saw_agg;
+            }
+            if t.text == ";" {
+                return false;
+            }
+        }
+    }
+    false
+}
+
 pub fn union_should_be_union_all(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -68,6 +259,26 @@ pub fn union_should_be_union_all(ctx: &RuleCtx) -> Vec<Finding> {
         // Next non-comment token: if it's ALL, this is already UNION ALL.
         let n = skip_comments(tokens, i + 1);
         if tokens.get(n).map(|x| kw(x, "ALL")).unwrap_or(false) {
+            continue;
+        }
+        // `SELECT @a UNION SELECT @b UNION SELECT @c` — FROM-less scalar
+        // branches exist to build a distinct value list; the dedupe IS the
+        // point. Likewise a UNION derived table consumed by COUNT(...) /
+        // DISTINCT is counting distinct values, and UNION ALL would change
+        // the answer.
+        if union_branches_are_scalar(tokens, i) || union_feeds_distinct_aggregate(tokens, i) {
+            continue;
+        }
+        // `SELECT TOP (n) k FROM t ORDER BY a UNION SELECT TOP (n) k FROM t
+        // ORDER BY b`: same source, same projection, no literal to tell the
+        // branches apart — the rows are guaranteed to overlap and the dedupe
+        // is the point. (Differing literals — `'Customers'` vs `'Suppliers'`
+        // — make the branches provably disjoint and keep the finding.)
+        if union_branches_same_source_and_projection(tokens, i) {
+            continue;
+        }
+        // Three branches on one line are one piece of advice, not two.
+        if out.iter().any(|f: &Finding| f.location.as_ref().map(|l| l.line) == Some(t.line)) {
             continue;
         }
         out.push(finding(
@@ -116,6 +327,12 @@ pub fn count_for_existence(ctx: &RuleCtx) -> Vec<Finding> {
         if tokens.get(rp).map(|x| x.text == ")").unwrap_or(false) == false {
             continue;
         }
+        // `GROUP BY … HAVING COUNT(*) > 0` is a per-group predicate, never an
+        // existence test — every group has at least one row, and EXISTS has
+        // no HAVING form to rewrite to.
+        if count_is_in_having(tokens, i) {
+            continue;
+        }
 
         // The comparison applies to the COUNT scalar, which is frequently
         // wrapped in a scalar subquery: `(SELECT COUNT(*) FROM … WHERE …) > 0`.
@@ -127,6 +344,11 @@ pub fn count_for_existence(ctx: &RuleCtx) -> Vec<Finding> {
         let after = forward_compare_pos(tokens, rp);
         if let Some((op, lit)) = read_op_then_number(tokens, after) {
             if is_existence_boundary(&op, &lit) {
+                // `CASE WHEN (SELECT COUNT(*) …) > 0 THEN (SELECT COUNT(*) …)`
+                // returns the count itself, so it has to be computed anyway.
+                if count_is_also_returned(tokens, i, after) {
+                    continue;
+                }
                 push_count_existence(&mut out, t);
                 continue;
             }
@@ -143,6 +365,85 @@ pub fn count_for_existence(ctx: &RuleCtx) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Is the COUNT at `count_idx` inside a HAVING clause of the same query
+/// (walking back at paren depth 0, before reaching the owning SELECT)?
+fn count_is_in_having(tokens: &[Token], count_idx: usize) -> bool {
+    let mut k = count_idx;
+    let mut depth = 0i32;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" {
+            depth += 1;
+            continue;
+        }
+        if t.text == "(" {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if kw(t, "HAVING") {
+                return true;
+            }
+            if kw(t, "SELECT") || kw(t, "WHERE") || t.text == ";" {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// For the wrapped form `(SELECT COUNT(*) …) <op> <n>` read at `cmp_at`: is the
+/// very same subquery returned as a value right after (`THEN (SELECT COUNT(*) …)`)?
+fn count_is_also_returned(tokens: &[Token], count_idx: usize, cmp_at: usize) -> bool {
+    // The wrapping subquery: walk back from COUNT to its `(`.
+    let Some(sel) = prev_sig(tokens, count_idx) else { return false };
+    if !kw(&tokens[sel], "SELECT") {
+        return false;
+    }
+    let Some(open) = prev_sig(tokens, sel) else { return false };
+    if tokens[open].text != "(" {
+        return false;
+    }
+    let Some(close) = matching_paren(tokens, open) else { return false };
+    let sub: Vec<String> = tokens[open..=close]
+        .iter()
+        .filter(|t| t.kind != TokKind::Comment)
+        .map(|t| t.text.to_ascii_lowercase())
+        .collect();
+    // Past the operator and literal: expect THEN, then the same token run.
+    let mut j = cmp_at;
+    while j < tokens.len() && tokens[j].kind == TokKind::Punct && matches!(tokens[j].text, ">" | "<" | "=" | "!") {
+        j += 1;
+    }
+    j = skip_comments(tokens, j);
+    if tokens.get(j).map(|t| t.kind != TokKind::Number).unwrap_or(true) {
+        return false;
+    }
+    j = skip_comments(tokens, j + 1);
+    if !tokens.get(j).map(|t| kw(t, "THEN")).unwrap_or(false) {
+        return false;
+    }
+    j = skip_comments(tokens, j + 1);
+    let mut m = 0usize;
+    while m < sub.len() {
+        let Some(t) = tokens.get(j) else { return false };
+        if t.kind == TokKind::Comment {
+            j += 1;
+            continue;
+        }
+        if t.text.to_ascii_lowercase() != sub[m] {
+            return false;
+        }
+        m += 1;
+        j += 1;
+    }
+    true
 }
 
 fn push_count_existence(out: &mut Vec<Finding>, t: &Token) {
@@ -442,6 +743,12 @@ pub fn correlated_scalar_subquery_in_select(ctx: &RuleCtx) -> Vec<Finding> {
             i += 1;
             continue;
         }
+        // A SELECT that is itself the body of a CROSS/OUTER APPLY is already
+        // the rewrite this rule recommends.
+        if select_is_apply_body(tokens, i) {
+            i += 1;
+            continue;
+        }
         // Find the projection's matching top-level FROM (end of the projection).
         let mut j = i + 1;
         let mut depth = 0i32;
@@ -480,7 +787,13 @@ pub fn correlated_scalar_subquery_in_select(ctx: &RuleCtx) -> Vec<Finding> {
                 if tokens.get(inner).map(|x| kw(x, "SELECT")).unwrap_or(false) {
                     // Find the matching close paren for this subquery.
                     if let Some(close) = matching_paren(tokens, k) {
-                        if subquery_is_correlated(tokens, inner, close) {
+                        // `CASE WHEN NOT EXISTS (SELECT 1 …)` in the select
+                        // list is a semi-join predicate, not a scalar lookup;
+                        // and a `FOR XML` subquery (STUFF/CSV idiom, nested
+                        // element builders) has no OUTER APPLY equivalent.
+                        let skip = paren_is_exists(tokens, k)
+                            || subquery_builds_xml(tokens, inner, close);
+                        if !skip && subquery_is_correlated(tokens, inner, close) {
                             out.push(finding(
                                 "antipattern.correlated_scalar_subquery_in_select",
                                 Severity::Warning,
@@ -501,6 +814,59 @@ pub fn correlated_scalar_subquery_in_select(ctx: &RuleCtx) -> Vec<Finding> {
         i = proj_end.max(i + 1);
     }
     out
+}
+
+/// Index of the previous non-comment token before `i`.
+fn prev_sig(tokens: &[Token], i: usize) -> Option<usize> {
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        if tokens[k].kind != TokKind::Comment {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Is the `(` at `open` the argument of `EXISTS` / `NOT EXISTS`?
+fn paren_is_exists(tokens: &[Token], open: usize) -> bool {
+    let mut at = open;
+    loop {
+        let Some(p) = prev_sig(tokens, at) else { return false };
+        if tokens[p].text == "(" {
+            at = p;
+            continue;
+        }
+        return kw(&tokens[p], "EXISTS");
+    }
+}
+
+/// Does the subquery body `[inner, close)` end in a `FOR XML` clause (at any
+/// nesting)? Such subqueries build strings or XML nodes, not scalar lookups.
+fn subquery_builds_xml(tokens: &[Token], inner: usize, close: usize) -> bool {
+    let mut j = inner;
+    while j + 1 < close {
+        if kw(&tokens[j], "FOR") {
+            let n = skip_comments(tokens, j + 1);
+            if n < close && kw(&tokens[n], "XML") {
+                return true;
+            }
+        }
+        j += 1;
+    }
+    false
+}
+
+/// Is the SELECT at `i` the first token inside a `CROSS APPLY (` /
+/// `OUTER APPLY (` derived table?
+fn select_is_apply_body(tokens: &[Token], i: usize) -> bool {
+    let Some(open) = prev_sig(tokens, i) else { return false };
+    if tokens[open].text != "(" {
+        return false;
+    }
+    prev_sig(tokens, open)
+        .map(|p| kw(&tokens[p], "APPLY"))
+        .unwrap_or(false)
 }
 
 /// Index of the `)` matching the `(` at `open`.

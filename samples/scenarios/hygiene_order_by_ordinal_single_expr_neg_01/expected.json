@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.order_by_ordinal"
+  ],
+  "also_fires": [
+    "modern.string_agg_replaces_for_xml"
+  ],
+  "server_version": 2022,
+  "category": "hygiene"
+}

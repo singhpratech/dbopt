@@ -156,20 +156,20 @@ fn advisor_emits_ranked_recommendations_with_ddl() {
     let bundle = DmvBundle {
         index_usage: vec![
             // write-only → DropIndex
-            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), user_seeks: 0, user_scans: 0, user_lookups: 0, user_updates: 250_000, no_stats_row: false },
+            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), user_seeks: 0, user_scans: 0, user_lookups: 0, user_updates: 250_000, no_stats_row: false, ..Default::default() },
             // big scan-heavy low-churn → ColumnstoreCandidate (on Facts)
-            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Facts".into(), index_name: "IX_facts".into(), user_seeks: 10, user_scans: 50_000, user_lookups: 0, user_updates: 100, no_stats_row: false },
+            IndexUsage { database_name: "db".into(), schema_name: "dbo".into(), table_name: "Facts".into(), index_name: "IX_facts".into(), user_seeks: 10, user_scans: 50_000, user_lookups: 0, user_updates: 100, no_stats_row: false, ..Default::default() },
         ],
         indexes: vec![
-            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["Status".into()], included_columns: vec![] },
-            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupA".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["CustomerId".into()], included_columns: vec![] },
-            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupB".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["CustomerId".into()], included_columns: vec![] },
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_writeonly".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["Status".into()], included_columns: vec![], ..Default::default() },
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupA".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["CustomerId".into()], included_columns: vec![], ..Default::default() },
+            IndexMeta { schema_name: "dbo".into(), table_name: "Orders".into(), index_name: "IX_dupB".into(), is_unique: false, is_primary_key: false, is_clustered: false, key_columns: vec!["CustomerId".into()], included_columns: vec![], ..Default::default() },
         ],
         missing_indexes: vec![
-            MissingIndex { schema_name: "dbo".into(), table_name: "Orders".into(), equality_columns: vec!["CustomerId".into()], inequality_columns: vec!["OrderDate".into()], included_columns: vec!["Total".into()], avg_user_impact: 92.5, user_seeks: 4200, avg_total_user_cost: 18.3 },
+            MissingIndex { schema_name: "dbo".into(), table_name: "Orders".into(), equality_columns: vec!["CustomerId".into()], inequality_columns: vec!["OrderDate".into()], included_columns: vec!["Total".into()], avg_user_impact: 92.5, user_seeks: 4200, avg_total_user_cost: 18.3, ..Default::default() },
         ],
         partition_stats: vec![
-            PartitionStats { schema_name: "dbo".into(), table_name: "Facts".into(), index_name: None, row_count: 50_000_000, reserved_kb: 2_200_000, used_kb: 2_000_000, data_kb: 1_900_000 },
+            PartitionStats { schema_name: "dbo".into(), table_name: "Facts".into(), index_name: None, row_count: 50_000_000, reserved_kb: 2_200_000, used_kb: 2_000_000, data_kb: 1_900_000, ..Default::default() },
         ],
         ..Default::default()
     };

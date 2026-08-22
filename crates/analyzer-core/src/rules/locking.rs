@@ -1,4 +1,5 @@
 use super::{finding, is_word, make_loc, RuleCtx};
+use super::index_design::{all_sources_non_indexable, batch_ids, cte_name_set, statement_end};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{TokKind, Token};
 
@@ -109,6 +110,8 @@ fn classify_comparison(tokens: &[Token], p: usize) -> Option<Cmp> {
 pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let ctes = cte_name_set(tokens);
+    let batches = batch_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
         let is_update = is_word(t, "UPDATE");
         let is_delete = is_word(t, "DELETE");
@@ -189,8 +192,11 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         let mut negation_predicate = false;
         let mut equality_predicate = false;
         let mut depth = 0i32;
+        // Scripts that never use `;` would otherwise let a range predicate from
+        // a *later* statement be attributed to this UPDATE.
+        let stmt_end = statement_end(tokens, i);
         let mut p = j + 1;
-        while p < tokens.len() {
+        while p < stmt_end {
             let tk = &tokens[p];
             if tk.text == "(" {
                 depth += 1;
@@ -231,7 +237,17 @@ pub fn unbounded_dml_lock_escalation(ctx: &RuleCtx) -> Vec<Finding> {
         // ignore. Suppressing on *any* equality was too blunt in the other
         // direction: it silenced `WHERE CreatedUtc < @cutoff AND IsArchived = 1`.
         let bulk_shape = range_predicate || (negation_predicate && !equality_predicate);
-        if has_where && !has_top_paren && bulk_shape {
+        if !(has_where && !has_top_paren && bulk_shape) {
+            continue;
+        }
+        // `UPDATE t ... FROM @tmpDatabases t` names an alias; the target is the
+        // table variable behind it. Lock escalation on a table variable, a
+        // #temp table or a CTE over one blocks nobody — resolve the sources
+        // and require at least one persistent base table.
+        if all_sources_non_indexable(tokens, i, stmt_end, &ctes, batches[i]) {
+            continue;
+        }
+        {
             out.push(finding(
                 "locking.dml_without_batching",
                 Severity::Info,

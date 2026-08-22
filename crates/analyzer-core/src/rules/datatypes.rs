@@ -386,8 +386,23 @@ pub fn float_for_money(ctx: &RuleCtx) -> Vec<Finding> {
     // HeartRate, SampleRate, RecordTotal and TotalCount are physical/engineering
     // measurements that are correctly stored as float/real.
     const MONEY_HINTS: &[&str] = &[
-        "amount", "amt", "price", "cost", "salary", "wage",
+        "amount", "amt", "price", "salary", "wage",
         "revenue", "payment", "subtotal", "discount",
+    ];
+    // "cost" alone is NOT money: in DBA tooling it is the optimizer's unitless
+    // plan cost (key_lookup_cost, QueryPlanCost, sort_cost, StatementSubTreeCost)
+    // — a float straight out of showplan XML, for which float is the right
+    // type. It counts as money only when paired with a commerce word
+    // (unit_cost, shipping_cost, ...) and never with a plan-shape word.
+    const COST_PAIRS: &[&str] = &[
+        "unit", "item", "product", "purchase", "shipping", "standard", "labor", "labour",
+        "material", "goods", "sales", "order", "freight", "landed", "acquisition",
+        "replacement", "total", "avg", "average", "net", "gross", "actual", "estimated",
+        "budget", "budgeted", "list", "invoice", "billed", "billing",
+    ];
+    const PLAN_WORDS: &[&str] = &[
+        "plan", "query", "spool", "sort", "lookup", "subtree", "operator", "cpu", "io",
+        "statement", "estimate", "node", "compile", "optimizer", "optimiser", "seek", "scan",
     ];
     for (open, close) in table_bodies(tokens) {
         for (s, e) in split_column_list(tokens, open, close) {
@@ -399,7 +414,11 @@ pub fn float_for_money(ctx: &RuleCtx) -> Vec<Finding> {
             // Fire only when a money word is the FINAL segment (or the whole name):
             // "TotalAmount"/"UnitPrice"/"AnnualSalary" end in money; but
             // "AmountOfSubstance" ends in "substance", "CapriceFactor" in "factor".
-            let money_like = segs.last().map(|last| MONEY_HINTS.contains(&last.as_str())).unwrap_or(false);
+            let last = segs.last().map(|l| l.as_str()).unwrap_or("");
+            let money_like = MONEY_HINTS.contains(&last)
+                || (last == "cost"
+                    && segs.iter().any(|sg| COST_PAIRS.contains(&sg.as_str()))
+                    && !segs.iter().any(|sg| PLAN_WORDS.contains(&sg.as_str())));
             if !money_like { continue; }
             let col = bare_name(&tokens[name_idx]).to_string();
             let ty = ty_tok.text.to_ascii_lowercase();
@@ -478,6 +497,27 @@ pub fn sysname_as_general_string(ctx: &RuleCtx) -> Vec<Finding> {
             // (name/type_name/role_name/sequence_name/parameter_name/partition_name).
             if col_l == "name" || col_l.ends_with("name") || col_l.ends_with("_name") { continue; }
             if META_NAMES.iter().any(|m| col_l == *m) { continue; }
+            // Identifier-bearing names that do not end in "name": a column that
+            // holds a table / schema / database / object / filegroup identifier
+            // (temp_table, output_database, output_schema, built_on, view_id,
+            // partition_function, ...) is exactly what sysname is for.
+            const IDENT_SEGMENTS: &[&str] = &[
+                "table", "schema", "database", "db", "view", "object", "function", "procedure",
+                "proc", "column", "index", "filegroup", "login", "user", "role", "trigger",
+                "constraint", "partition", "scheme", "collation", "owner", "server", "instance",
+                "sequence", "synonym", "assembly", "catalog", "principal", "identifier", "ident",
+                "alias", "objname", "tablename", "schemaname",
+            ];
+            const IDENT_EXACT: &[&str] = &["built_on", "builton", "data_space", "dataspace", "fg"];
+            let segs = name_segments(&col_l);
+            let first = segs.first().map(|x| x.as_str()).unwrap_or("");
+            let last = segs.last().map(|x| x.as_str()).unwrap_or("");
+            if IDENT_EXACT.contains(&col_l.as_str())
+                || IDENT_SEGMENTS.contains(&first)
+                || IDENT_SEGMENTS.contains(&last)
+            {
+                continue;
+            }
             let col = bare_name(&tokens[name_idx]).to_string();
             out.push(finding(
                 "datatype.sysname_general_string",

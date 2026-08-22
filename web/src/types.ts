@@ -163,6 +163,11 @@ export interface SignalSummary {
   deadlock_count: number;
   blocking_incidents: number;
   regressed_queries: number;
+  /** Additive (0.4.4+): physical / statistics / type / Query-Store signals. */
+  fragmented_indexes?: number;
+  stale_statistics?: number;
+  deprecated_columns?: number;
+  sniffing_queries?: number;
 }
 
 /** "Today vs rolling baseline" trend behind the health grade, from the durable
@@ -205,6 +210,9 @@ export interface HealthReport {
   is_learning: boolean;
   /** Seconds of sentinel history backing this window; absent when the newest capture predates the window. */
   monitoring_age_secs?: number | null;
+  /** "running" | "stopped" | "never" — when "stopped", render "monitor stopped",
+   *  never a monitoring span (monitoring_age_secs is null in that state). */
+  monitor_state?: "running" | "stopped" | "never";
   /** Seconds since the NEWEST sentinel capture; absent when nothing was ever captured. */
   last_capture_secs?: number | null;
   /** "Today vs rolling baseline" trend behind the grade. Absent until a query

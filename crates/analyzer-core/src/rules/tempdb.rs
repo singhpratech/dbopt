@@ -1,6 +1,19 @@
-use super::{finding, is_word, make_loc, RuleCtx};
+use super::{finding, is_word, make_loc, prev_significant, RuleCtx};
+use super::index_design::{is_temp_or_var, statement_end};
 use crate::findings::{Finding, Severity};
 use crate::tokens::TokKind;
+
+/// `SET ROWCOUNT n` (n > 0) right before this SELECT bounds it exactly like
+/// TOP n would — the "without TOP" claim is false there.
+fn preceded_by_set_rowcount(tokens: &[crate::tokens::Token<'_>], select_idx: usize) -> bool {
+    let mut p = prev_significant(tokens, select_idx);
+    if let Some(k) = p { if tokens[k].text == ";" { p = prev_significant(tokens, k); } }
+    let Some(n) = p else { return false };
+    if tokens[n].kind != TokKind::Number || tokens[n].text == "0" { return false; }
+    let Some(r) = prev_significant(tokens, n) else { return false };
+    if !is_word(&tokens[r], "ROWCOUNT") { return false; }
+    prev_significant(tokens, r).map(|s| is_word(&tokens[s], "SET")).unwrap_or(false)
+}
 
 /// Rule 5: SELECT ... ORDER BY without TOP(...) / OFFSET in the same statement.
 ///
@@ -21,6 +34,20 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         if !is_word(t, "SELECT") {
             continue;
         }
+        // `SELECT @s = @s + ... ORDER BY` is ordered variable concatenation:
+        // the ORDER BY is what makes the result deterministic, and TOP/OFFSET
+        // would change the answer.
+        if tokens.get(i + 1).map(|n| n.text.starts_with('@')).unwrap_or(false)
+            && tokens.get(i + 2).map(|n| n.text == "=").unwrap_or(false)
+        {
+            continue;
+        }
+        if preceded_by_set_rowcount(tokens, i) {
+            continue;
+        }
+        // Scripts without `;` run statements together; cut at the next
+        // depth-0 statement keyword so a later FROM does not leak in.
+        let stmt_end = statement_end(tokens, i);
 
         // Walk forward from SELECT to the end-of-statement (';' at depth 0) or EOF.
         // Track at depth 0:
@@ -42,9 +69,12 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         // an equality predicate against a literal/variable, or a GROUP BY.
         let mut has_equality_filter = false;
         let mut has_group_by = false;
+        // `ORDER BY ... FOR XML PATH('')` is the ordered string-aggregation
+        // idiom; the ORDER BY is required for a deterministic result.
+        let mut has_for_xml = false;
         let mut in_where = false;
         let mut j = i + 1;
-        while j < tokens.len() {
+        while j < stmt_end {
             let tk = &tokens[j];
             if tk.text == "(" {
                 depth += 1;
@@ -68,15 +98,19 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
                             has_top = true;
                         }
                     }
+                } else if is_word(tk, "FOR") && tokens.get(j + 1).map(|n| is_word(n, "XML")).unwrap_or(false) {
+                    has_for_xml = true;
                 } else if is_word(tk, "FROM") || is_word(tk, "JOIN") {
                     in_where = false;
                     if let Some(n) = tokens.get(j + 1) {
-                        let temp = n.text.starts_with('#') || n.text.starts_with('@');
+                        // The driving source bounds the sort: a `#temp` /
+                        // table variable holds what this batch put in it, and
+                        // a dimension JOIN to a base table does not make that
+                        // set large (37k lines of production T-SQL: every
+                        // report on such a shape was noise).
                         if !saw_from {
-                            reads_only_temp = temp;
+                            reads_only_temp = is_temp_or_var(n.text);
                             saw_from = true;
-                        } else if !temp {
-                            reads_only_temp = false;
                         }
                     }
                 } else if is_word(tk, "WHERE") {
@@ -114,7 +148,7 @@ pub fn unbounded_sort_spill_risk(ctx: &RuleCtx) -> Vec<Finding> {
         }
 
         if let Some(loc_idx) = order_by_at {
-            if !has_top && !has_offset && !reads_only_temp {
+            if !has_top && !has_offset && !reads_only_temp && !has_for_xml {
                 let unbounded = !has_equality_filter && !has_group_by;
                 let (sev, msg, rec) = if unbounded && no_grant_feedback {
                     (

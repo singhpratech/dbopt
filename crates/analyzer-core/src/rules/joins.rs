@@ -51,6 +51,31 @@ fn is_clause_boundary(t: &Token) -> bool {
         || t.text == ";"
 }
 
+/// True if a Word token begins a NEW statement. A FROM / ON region that has no
+/// terminating `;` (the norm in real scripts) otherwise runs straight into the
+/// next statement, so an `EXECUTE proc @a = x, @b = y`, an `UPDATE ... SET a =
+/// 1, b = 2` or a `SELECT @v1 = c1, @v2 = c2` after an un-terminated query was
+/// read as part of the previous FROM list. `WITH` is deliberately absent: it is
+/// also the table-hint keyword (`FROM t WITH (NOLOCK), u`).
+fn is_statement_start(t: &Token) -> bool {
+    if t.kind != TokKind::Word || t.text.starts_with('[') || t.text.starts_with('"') {
+        return false;
+    }
+    const STARTS: &[&str] = &[
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXEC", "EXECUTE", "SET", "DECLARE",
+        "IF", "ELSE", "WHILE", "BEGIN", "END", "CREATE", "ALTER", "DROP", "TRUNCATE", "RETURN",
+        "PRINT", "RAISERROR", "THROW", "OPEN", "CLOSE", "DEALLOCATE", "FETCH", "GOTO", "BREAK",
+        "CONTINUE", "WAITFOR", "USE", "GRANT", "REVOKE", "DENY", "COMMIT", "ROLLBACK", "SAVE",
+        "TRY", "CATCH", "VALUES",
+    ];
+    STARTS.iter().any(|k| is_word(t, k))
+}
+
+/// True if the token is a `@variable` (not a `@@function`).
+fn is_variable(t: &Token) -> bool {
+    t.kind == TokKind::Word && t.text.starts_with('@') && !t.text.starts_with("@@")
+}
+
 /// Is this FROM the cursor half of a FETCH statement rather than a table list?
 fn is_cursor_fetch(tokens: &[Token<'_>], from_idx: usize) -> bool {
     let Some(prev) = from_idx.checked_sub(1).and_then(|k| tokens.get(k)) else {
@@ -95,7 +120,9 @@ fn query_block_segments(tokens: &[Token<'_>], start: usize, end: usize) -> Vec<(
             } else {
                 depth -= 1;
             }
-        } else if depth == 0 && (t.text == ";" || is_set_op(t)) {
+        } else if depth == 0 && (t.text == ";" || is_set_op(t) || is_word(t, "GO")) {
+            // GO is a batch separator: a view created in one batch must never
+            // be matched against a WHERE in the next one.
             if seg_start < j {
                 segs.push((seg_start, j));
             }
@@ -158,8 +185,15 @@ pub fn right_outer_join_readability(ctx: &RuleCtx) -> Vec<Finding> {
 ///     (those live inside parens, so depth > 0)
 ///   • APPLY / explicit JOIN operands
 fn from_region(tokens: &[Token<'_>], from_idx: usize) -> usize {
-    // Return the exclusive end index of the FROM region (first top-level clause
-    // boundary or explicit JOIN keyword after FROM).
+    from_clause_end(tokens, from_idx, true)
+}
+
+/// Exclusive end index of the FROM clause starting at `from_idx`: the first
+/// depth-0 clause boundary, statement start, or unbalanced `)`. With
+/// `stop_at_on` the region also ends at the first depth-0 `ON` — the table-
+/// source list is over once join predicates begin, so commas after it are
+/// never table separators.
+fn from_clause_end(tokens: &[Token<'_>], from_idx: usize, stop_at_on: bool) -> usize {
     let mut depth = 0i32;
     let mut j = from_idx + 1;
     while j < tokens.len() {
@@ -171,7 +205,9 @@ fn from_region(tokens: &[Token<'_>], from_idx: usize) -> usize {
                 return j;
             }
             depth -= 1;
-        } else if depth == 0 && is_clause_boundary(t) {
+        } else if depth == 0
+            && (is_clause_boundary(t) || is_statement_start(t) || (stop_at_on && is_word(t, "ON")))
+        {
             return j;
         }
         j += 1;
@@ -244,87 +280,74 @@ pub fn comma_cross_join(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn join_without_on(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    for (i, t) in tokens.iter().enumerate() {
-        if !is_word(t, "JOIN") {
+    // Only JOIN keywords inside a FROM clause are joins. `OPTION (LOOP JOIN,
+    // HASH JOIN)` query hints also spell JOIN, and the old token-wide scan
+    // reported each of them (twice per statement) as a missing predicate.
+    // OPTION is a clause boundary, so scoping to the FROM region removes them.
+    //
+    // Inside the region we match JOINs to ONs with a stack rather than
+    // demanding that ON follow each JOIN immediately: nested-join syntax
+    // `A JOIN B JOIN C ON c.x = b.x ON b.y = a.y` is valid T-SQL (the inner
+    // join's ON comes first, then the outer's) and was reported as a JOIN
+    // without ON. A JOIN still on the stack when the region ends has no
+    // predicate.
+    let mut i = 0;
+    while i < tokens.len() {
+        if !is_word(&tokens[i], "FROM") || is_cursor_fetch(tokens, i) {
+            i += 1;
             continue;
         }
-        // Identify the join flavour from the immediately preceding keyword(s).
-        // Walk back over OUTER/INNER/LEFT/RIGHT/FULL/CROSS, skipping comments.
-        let mut p = i;
-        let mut is_cross = false;
-        let mut steps = 0;
-        loop {
-            if p == 0 {
-                break;
-            }
-            let mut q = p - 1;
-            while q > 0 && tokens[q].kind == TokKind::Comment {
-                q -= 1;
-            }
-            if tokens[q].kind == TokKind::Comment {
-                break;
-            }
-            if is_word(&tokens[q], "CROSS") {
-                is_cross = true;
-                break;
-            }
-            if is_word(&tokens[q], "OUTER")
-                || is_word(&tokens[q], "INNER")
-                || is_word(&tokens[q], "LEFT")
-                || is_word(&tokens[q], "RIGHT")
-                || is_word(&tokens[q], "FULL")
-            {
-                p = q;
-                steps += 1;
-                if steps > 2 {
-                    break;
-                }
-                continue;
-            }
-            break;
-        }
-        // CROSS JOIN legitimately has no ON.
-        if is_cross {
-            continue;
-        }
-        // Scan forward to the next ON / clause boundary / next JOIN. If we reach
-        // a boundary or another JOIN before an ON, the predicate is missing.
+        let end = from_clause_end(tokens, i, false);
         let mut depth = 0i32;
+        let mut open_joins: Vec<usize> = Vec::new();
         let mut j = i + 1;
-        let mut found_on = false;
-        let mut stopped = false;
-        while j < tokens.len() {
-            let t2 = &tokens[j];
-            if t2.text == "(" {
+        while j < end {
+            let t = &tokens[j];
+            if t.text == "(" {
                 depth += 1;
-            } else if t2.text == ")" {
-                if depth == 0 {
-                    stopped = true;
-                    break;
-                }
+            } else if t.text == ")" {
                 depth -= 1;
-            } else if depth == 0 {
-                if is_word(t2, "ON") {
-                    found_on = true;
-                    break;
+            } else if depth == 0 && is_word(t, "JOIN") {
+                // CROSS JOIN legitimately has no ON. Walk back over the
+                // OUTER/INNER/LEFT/RIGHT/FULL and LOOP/HASH/MERGE/REMOTE
+                // modifiers (skipping comments) to find a leading CROSS.
+                let mut is_cross = false;
+                let mut q = j;
+                while q > i + 1 {
+                    q -= 1;
+                    let p = &tokens[q];
+                    if p.kind == TokKind::Comment {
+                        continue;
+                    }
+                    if is_word(p, "CROSS") {
+                        is_cross = true;
+                        break;
+                    }
+                    let modifier = ["OUTER", "INNER", "LEFT", "RIGHT", "FULL", "LOOP", "HASH", "MERGE", "REMOTE"]
+                        .iter()
+                        .any(|m| is_word(p, m));
+                    if !modifier {
+                        break;
+                    }
                 }
-                if is_word(t2, "JOIN") || is_clause_boundary(t2) {
-                    stopped = true;
-                    break;
+                if !is_cross {
+                    open_joins.push(j);
                 }
+            } else if depth == 0 && is_word(t, "ON") {
+                open_joins.pop();
             }
             j += 1;
         }
-        let _ = stopped;
-        if !found_on {
+        for jt in open_joins {
             out.push(finding(
                 "joins.join_without_on",
                 Severity::Error,
                 "JOIN has no ON clause — this is a cartesian product (or a parse error). Every INNER/OUTER JOIN needs a join predicate.",
-                Some(make_loc(t)),
+                Some(make_loc(&tokens[jt])),
                 Some("Add the join predicate in ON:\n  FROM Orders o JOIN Customers c\n  ->\n  FROM Orders o JOIN Customers c ON c.id = o.customer_id\nIf you really want every-row-against-every-row, write CROSS JOIN to make the intent explicit.".into()),
             ));
         }
+        i = end.max(i + 1);
     }
     out
 }
@@ -368,7 +391,13 @@ pub fn function_on_join_column(ctx: &RuleCtx) -> Vec<Finding> {
                     break;
                 }
                 depth -= 1;
-            } else if depth == 0 && (is_word(t, "JOIN") || is_clause_boundary(t)) {
+            } else if depth == 0
+                && (is_word(t, "JOIN") || is_clause_boundary(t) || is_statement_start(t))
+            {
+                // A statement start ends the ON region too: without it an
+                // un-terminated query's ON ran into the next SELECT list, and a
+                // `CASE WHEN DATEDIFF(...) > n` there was reported as a join
+                // predicate.
                 on_end = k;
                 break;
             } else if depth == 0
@@ -419,13 +448,35 @@ pub fn function_on_join_column(ctx: &RuleCtx) -> Vec<Finding> {
                         let after = skip_comments(tokens, q);
                         if after < on_end {
                             let c = &tokens[after];
-                            let is_cmp = matches!(c.text, "=" | "<" | ">" | "<>" | "!=")
-                                || is_word(c, "LIKE");
-                            // And the function must wrap a column, not a literal:
-                            // first meaningful token inside the parens is a Word.
-                            let inner = skip_comments(tokens, lp + 1);
+                            // Only an EQUALITY join key can seek. `<>` / `<` /
+                            // `>` / LIKE on a wrapped expression are range or
+                            // inequality filters that never could seek on that
+                            // side, so wrapping them costs nothing. (The lexer
+                            // emits `<>` and `!=` as two Punct tokens, so the
+                            // first one is what we see here.)
+                            let is_cmp = c.text == "="
+                                && !tokens.get(after + 1).map(|n| n.text == "=").unwrap_or(false);
+                            // And the function must wrap a COLUMN reference.
+                            // Descend through nested wrappers (LTRIM(RTRIM(
+                            // SUBSTRING(x, ...)))) to the innermost operand; a
+                            // `@variable` there is not a column, and the bare
+                            // column on the other side of `=` still seeks.
+                            let mut inner = skip_comments(tokens, lp + 1);
+                            let mut hops = 0;
+                            while hops < 8
+                                && inner + 1 < q
+                                && tokens[inner].kind == TokKind::Word
+                                && tokens[inner + 1].text == "("
+                            {
+                                inner = skip_comments(tokens, inner + 2);
+                                hops += 1;
+                            }
                             let wraps_ident = inner < q.saturating_sub(1)
-                                && tokens[inner].kind == TokKind::Word;
+                                && tokens[inner].kind == TokKind::Word
+                                && !is_variable(&tokens[inner])
+                                && !is_word(&tokens[inner], "NULL")
+                                && !is_word(&tokens[inner], "CASE")
+                                && !is_word(&tokens[inner], "SELECT");
                             // FP guard: equi-joining nullable keys via
                             // ISNULL/COALESCE on BOTH sides is a correct, often
                             // unavoidable idiom (NULL = NULL is unknown, so you
@@ -512,6 +563,17 @@ fn collect_outer_join_refs(tokens: &[Token<'_>], seg_start: usize, seg_end: usiz
             i += 1;
             continue;
         }
+        // RIGHT JOIN: the table AFTER the keyword is the PRESERVED side; the
+        // null-extended side is the operand BEFORE it. Filtering the preserved
+        // side never demotes the join, so for RIGHT we track the left operand
+        // (and stay silent when that operand is itself a join result).
+        if is_word(t, "RIGHT") {
+            if let Some(name) = left_operand_ref(tokens, i, seg_start) {
+                refs.push(OuterRef { name, join_tok_idx: join_kw_anchor });
+            }
+            i = j + 1;
+            continue;
+        }
         // After JOIN: a table reference. If it's a subquery/derived table
         // ( ( SELECT ... ) alias ) we bail — too ambiguous to alias-track safely.
         let k = skip_comments(tokens, j + 1);
@@ -592,6 +654,132 @@ fn collect_outer_join_refs(tokens: &[Token<'_>], seg_start: usize, seg_end: usiz
     refs
 }
 
+/// Reference name (alias, else last name segment) of the table source that
+/// ends immediately before `right_idx` (the RIGHT keyword). Walks back at
+/// depth 0 to the FROM / JOIN / `,` that introduced the operand; if an ON sits
+/// in between, the left operand is a join result and we return None.
+fn left_operand_ref(tokens: &[Token<'_>], right_idx: usize, seg_start: usize) -> Option<String> {
+    let mut depth = 0i32;
+    let mut k = right_idx;
+    let mut anchor: Option<usize> = None;
+    while k > seg_start {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" {
+            depth += 1;
+        } else if t.text == "(" {
+            if depth == 0 {
+                anchor = Some(k);
+                break;
+            }
+            depth -= 1;
+        } else if depth == 0 {
+            if is_word(t, "ON") {
+                return None;
+            }
+            if is_word(t, "FROM") || is_word(t, "JOIN") || is_word(t, "APPLY") || t.text == "," {
+                anchor = Some(k);
+                break;
+            }
+        }
+    }
+    let a = anchor?;
+    let mut k = skip_comments(tokens, a + 1);
+    if k >= right_idx {
+        return None;
+    }
+    let mut last_name: Option<String> = None;
+    if tokens[k].text == "(" {
+        // Derived table: skip to its matching ')', then read the alias.
+        let mut d = 1i32;
+        let mut q = k + 1;
+        while q < right_idx && d > 0 {
+            if tokens[q].text == "(" {
+                d += 1;
+            } else if tokens[q].text == ")" {
+                d -= 1;
+            }
+            q += 1;
+        }
+        k = q;
+    } else if tokens[k].kind == TokKind::Word {
+        last_name = Some(bare(&tokens[k]).to_string());
+        let mut q = k + 1;
+        while q + 1 < right_idx && tokens[q].text == "." && tokens[q + 1].kind == TokKind::Word {
+            last_name = Some(bare(&tokens[q + 1]).to_string());
+            q += 2;
+        }
+        k = q;
+    } else {
+        return None;
+    }
+    // Optional [AS] alias, then optional WITH (hints) — in either order.
+    let mut alias: Option<String> = None;
+    let mut guard = 0;
+    while k < right_idx && guard < 4 {
+        guard += 1;
+        let t = &tokens[k];
+        if is_word(t, "AS") {
+            k = skip_comments(tokens, k + 1);
+            continue;
+        }
+        if is_word(t, "WITH") && tokens.get(k + 1).map(|n| n.text == "(").unwrap_or(false) {
+            let mut d = 0i32;
+            let mut q = k + 1;
+            while q < right_idx {
+                if tokens[q].text == "(" {
+                    d += 1;
+                } else if tokens[q].text == ")" {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                q += 1;
+            }
+            k = q + 1;
+            continue;
+        }
+        if t.kind == TokKind::Word && alias.is_none() {
+            alias = Some(bare(t).to_string());
+            k += 1;
+            continue;
+        }
+        break;
+    }
+    alias.or(last_name).filter(|n| !n.is_empty())
+}
+
+
+/// True when token `k` sits inside an open `CASE … END` or inside the argument
+/// list of a NULL-absorbing function (COALESCE / ISNULL / IIF / NULLIF) that
+/// was opened at or after `from`. Such a wrapper supplies a fallback for the
+/// NULL-extended row, so a comparison inside it is not a null-rejecting
+/// predicate.
+fn inside_null_tolerant_wrapper(tokens: &[Token<'_>], from: usize, k: usize) -> bool {
+    let mut case_depth = 0i32;
+    let mut fn_stack: Vec<bool> = Vec::new();
+    let mut i = from;
+    while i < k {
+        let t = &tokens[i];
+        if is_word(t, "CASE") {
+            case_depth += 1;
+        } else if is_word(t, "END") && case_depth > 0 {
+            case_depth -= 1;
+        } else if t.text == "(" {
+            let prev = i.checked_sub(1).map(|p| &tokens[p]);
+            let tolerant = prev
+                .map(|p| ["COALESCE", "ISNULL", "IIF", "NULLIF"].iter().any(|f| is_word(p, f)))
+                .unwrap_or(false);
+            fn_stack.push(tolerant);
+        } else if t.text == ")" {
+            fn_stack.pop();
+        }
+        i += 1;
+    }
+    case_depth > 0 || fn_stack.iter().any(|&b| b)
+}
+
 pub fn outer_join_filtered_to_inner(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
@@ -620,12 +808,13 @@ fn analyze_outer_join_segment(
         return;
     }
 
-    // Locate the FIRST top-level WHERE clause inside THIS segment. (Picking the
-    // first WHERE after the segment's joins keeps us aligned with the segment's
-    // own outer joins rather than any later/global WHERE.)
+    // Locate the FIRST top-level WHERE clause inside THIS segment that comes
+    // AFTER the first outer join — a WHERE before the join belongs to an
+    // earlier statement in the same (un-terminated) segment.
+    let first_join = refs.iter().map(|r| r.join_tok_idx).min().unwrap_or(seg_start);
     let mut where_idx: Option<usize> = None;
     let mut depth = 0i32;
-    let mut i = seg_start;
+    let mut i = first_join;
     while i < seg_end {
         let t = &tokens[i];
         if t.text == "(" {
@@ -704,7 +893,15 @@ fn analyze_outer_join_segment(
                             // A positive predicate on the outer side discards the
                             // NULL-extended rows -> silent INNER join. Record the
                             // first one's location (the alias token).
-                            if is_positive_cmp && positive_pred_idx.is_none() {
+                            // A comparison wrapped in CASE / COALESCE / ISNULL /
+                            // IIF / NULLIF does not reject NULL rows: the NULL
+                            // falls through to the ELSE / fallback branch. Real
+                            // code (`CASE WHEN cd.create_days < @d THEN
+                            // cd.create_days ELSE @d END`) hit this as a FP.
+                            if is_positive_cmp
+                                && positive_pred_idx.is_none()
+                                && !inside_null_tolerant_wrapper(tokens, w + 1, k)
+                            {
                                 positive_pred_idx = Some(k);
                             }
                         }
@@ -722,7 +919,7 @@ fn analyze_outer_join_segment(
             out.push(finding(
                 "joins.outer_join_filtered_to_inner",
                 Severity::Warning,
-                format!("The WHERE clause applies a non-null predicate to `{}`, the preserved (outer) side of an OUTER JOIN. This discards the NULL-extended rows and silently turns the OUTER JOIN into an INNER JOIN.", r.name),
+                format!("The WHERE clause applies a non-null predicate to `{}`, the null-extended (non-preserved) side of an OUTER JOIN. Rows with no match carry NULL there, so the predicate discards them and silently turns the OUTER JOIN into an INNER JOIN.", r.name),
                 Some(make_loc(&tokens[idx])),
                 Some(format!(
                     "Decide which you meant:\n  • If you only want matching rows, make it explicit: change the OUTER JOIN to INNER JOIN.\n  • If you want to keep unmatched rows, move the predicate from WHERE into the ON clause:\n      LEFT JOIN {0} ON ... AND {0}.col = @x   (filter inside the join)\n  • If you want only the unmatched rows (anti-join), test {0}.<key> IS NULL instead.",

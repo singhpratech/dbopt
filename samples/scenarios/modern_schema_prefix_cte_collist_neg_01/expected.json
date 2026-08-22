@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "modern.missing_schema_prefix"
+  ],
+  "also_fires": [
+    "hygiene.select_star"
+  ],
+  "server_version": 2022,
+  "category": "modern"
+}

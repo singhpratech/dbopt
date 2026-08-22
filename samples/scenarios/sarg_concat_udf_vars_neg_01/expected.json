@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["sarg.string_concat_in_predicate"],
+  "also_fires": ["sarg.scalar_udf_in_predicate"],
+  "server_version": 2022,
+  "category": "sargability"
+}

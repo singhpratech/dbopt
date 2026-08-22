@@ -325,6 +325,7 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     let mut pending_requested_kb: Option<f64> = None;
     let mut pending_grant_warning: Option<GrantWarningInfo> = None;
     let mut pending_warnings: Vec<String> = Vec::new();
+    let mut pending_convert: Option<ConvertInfo> = None;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| PlanError::Xml(e.to_string()))? {
@@ -441,12 +442,20 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             }
                         }
                         "PlanAffectingConvert" => {
+                            let info = ConvertInfo {
+                                issue: attr_val(&e, "ConvertIssue").unwrap_or_default(),
+                                expression: attr_val(&e, "Expression").unwrap_or_default(),
+                            };
                             if let Some(top) = stack.last_mut() {
                                 top.warnings.push(name.clone());
-                                top.convert = Some(ConvertInfo {
-                                    issue: attr_val(&e, "ConvertIssue").unwrap_or_default(),
-                                    expression: attr_val(&e, "Expression").unwrap_or_default(),
-                                });
+                                top.convert = Some(info);
+                            } else {
+                                // Query-level <Warnings> (before the first RelOp,
+                                // e.g. inside a StoredProc statement): keep it for
+                                // the root, or the implicit conversion that defeated
+                                // the seek is never reported.
+                                pending_warnings.push(name.clone());
+                                if pending_convert.is_none() { pending_convert = Some(info); }
                             }
                         }
                         other if is_warning_elem(other) => {
@@ -543,12 +552,20 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
                             }
                         }
                         "PlanAffectingConvert" => {
+                            let info = ConvertInfo {
+                                issue: attr_val(&e, "ConvertIssue").unwrap_or_default(),
+                                expression: attr_val(&e, "Expression").unwrap_or_default(),
+                            };
                             if let Some(top) = stack.last_mut() {
                                 top.warnings.push(name.clone());
-                                top.convert = Some(ConvertInfo {
-                                    issue: attr_val(&e, "ConvertIssue").unwrap_or_default(),
-                                    expression: attr_val(&e, "Expression").unwrap_or_default(),
-                                });
+                                top.convert = Some(info);
+                            } else {
+                                // Query-level <Warnings> (before the first RelOp,
+                                // e.g. inside a StoredProc statement): keep it for
+                                // the root, or the implicit conversion that defeated
+                                // the seek is never reported.
+                                pending_warnings.push(name.clone());
+                                if pending_convert.is_none() { pending_convert = Some(info); }
                             }
                         }
                         "ColumnsWithNoStatistics" => {
@@ -614,6 +631,7 @@ pub fn parse(xml: &str) -> Result<PlanNode, PlanError> {
     for w in pending_warnings {
         if !root.warnings.contains(&w) { root.warnings.push(w); }
     }
+    if root.convert.is_none() { root.convert = pending_convert; }
     Ok(root)
 }
 

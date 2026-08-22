@@ -1,4 +1,4 @@
-use super::{finding, is_keyword_at, is_word, make_loc, RuleCtx};
+use super::{finding, is_keyword_at, is_system_source, is_variable, is_word, make_loc, search_condition_ids, RuleCtx};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{Token, TokKind, word_eq_ci};
 
@@ -8,35 +8,6 @@ const NON_SARG_FUNCS: &[&str] = &[
     "FORMAT", "REPLACE",
 ];
 
-
-/// Type names and datepart keywords, which occupy argument positions but are
-/// never columns.
-/// Is the token at `arg` a type/datepart *in a position where one belongs*?
-/// `fname` is the index of the function name token.
-fn is_type_or_datepart_in_position(tokens: &[Token<'_>], fname: usize, arg: usize) -> bool {
-    if !is_type_or_datepart(&tokens[arg]) {
-        return false;
-    }
-    let f = tokens[fname].text.to_ascii_uppercase();
-    // `CAST(expr AS type)` — the type follows AS.
-    let after_as = arg
-        .checked_sub(1)
-        .and_then(|k| tokens.get(k))
-        .map(|p| is_word(p, "AS"))
-        .unwrap_or(false);
-    if matches!(f.as_str(), "CAST" | "TRY_CAST") {
-        return after_as;
-    }
-    // `CONVERT(type, expr)` / `DATEDIFF(datepart, a, b)` — first argument only.
-    if matches!(
-        f.as_str(),
-        "CONVERT" | "TRY_CONVERT" | "DATEDIFF" | "DATEDIFF_BIG" | "DATEPART"
-            | "DATENAME" | "DATEADD" | "DATETRUNC"
-    ) {
-        return arg == fname + 2;
-    }
-    false
-}
 
 fn is_type_or_datepart(t: &Token<'_>) -> bool {
     const WORDS: &[&str] = &[
@@ -57,91 +28,41 @@ fn is_type_or_datepart(t: &Token<'_>) -> bool {
 pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_where = false;
-    let mut pred_depth = 0i32;
-    // The depth at which the current predicate region opened. A WHERE inside a
-    // subquery ends when that subquery's parens close; without this the region
-    // latched on and every later projection counted as a predicate, which is
-    // the projection false positive this rule had already been fixed for once.
-    let mut where_depth = 0i32;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
-        if t.text == "(" { pred_depth += 1; }
-        else if t.text == ")" {
-            pred_depth -= 1;
-            if pred_depth < 0 { pred_depth = 0; }
-            if in_where && pred_depth < where_depth { in_where = false; }
-        }
-        if is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING") {
-            in_where = true;
-            where_depth = pred_depth;
-        }
-        // The predicate region has to *end*. Previously only GROUP/ORDER/`;`
-        // closed it, so in a long script everything after the first WHERE —
-        // including every later SELECT projection and IF condition — was
-        // treated as a predicate. That produced error-severity reports on
-        // `CASE WHEN LEFT(x,1) = '['` in a column list, where no index exists
-        // to lose.
-        // Closing must happen at statement level only. A nested `SELECT` inside
-        // `WHERE id IN (SELECT …)`, or the `END` of a `CASE`, previously closed
-        // the region and hid every non-SARGable predicate after it.
-        else if pred_depth <= where_depth
-            && (["SELECT", "FROM", "GROUP", "ORDER", "INSERT", "UPDATE", "DELETE",
-                 "VALUES", "SET", "UNION", "EXCEPT", "INTERSECT", "OPTION", "GO",
-                 "DECLARE", "EXEC", "EXECUTE"]
-                .iter()
-                .any(|kw| is_word(t, kw))
-                || t.text == ";")
-        {
-            in_where = false;
-        }
-        if !in_where || t.kind != TokKind::Word { continue; }
+        if cond[i] == 0 || t.kind != TokKind::Word { continue; }
         let upper = t.text.to_ascii_uppercase();
         if !NON_SARG_FUNCS.iter().any(|f| *f == upper) { continue; }
-        // Confirm it's a function call: next non-ws token must be '('
-        if tokens.get(i + 1).map(|n| n.text == "(").unwrap_or(false) {
-            // and look forward for a comparison ('=', '<', '>', 'LIKE') after the matching ')'
-            let mut j = i + 2;
-            let mut paren = 1i32;
-            let mut wraps_column = false;
-            while j < tokens.len() && paren > 0 {
-                if tokens[j].text == "(" { paren += 1; }
-                else if tokens[j].text == ")" { paren -= 1; }
-                else if paren == 1
-                    && tokens[j].kind == TokKind::Word
-                    && !tokens[j].text.starts_with('@')
-                    && !tokens.get(j + 1).map(|n| n.text == "(").unwrap_or(false)
-                    && !is_word(&tokens[j], "AS")
-                    // A type name or datepart keyword is only *not a column* in
-                    // the specific argument slot where it is a type or a
-                    // datepart: after `AS` in a CAST, or first argument of
-                    // CONVERT/DATEDIFF/DATEPART/DATENAME/DATEADD. Applying that
-                    // exclusion to every argument of every function made the
-                    // rule blind to columns named `month`, `date`, `text`,
-                    // `max`, `money` — some of the most common names in real
-                    // schemas — which is a silent miss, the worst kind.
-                    && !is_type_or_datepart_in_position(tokens, i, j)
-                {
-                    wraps_column = true;
-                }
-                j += 1;
-            }
-            // `UPPER(@@SERVERNAME) <> UPPER(@ServerName)` compares two variables:
-            // there is no column, no index, and nothing to rewrite. The rule is
-            // about a function applied to a *column*, so require one.
-            if !wraps_column {
-                continue;
-            }
-            if let Some(cmp) = tokens.get(j) {
-                let is_cmp = matches!(cmp.text, "=" | "<" | ">") || is_word(cmp, "LIKE") || is_word(cmp, "IN");
-                if is_cmp {
-                    out.push(finding(
-                        "sarg.function_on_column",
-                        Severity::Error,
-                        format!("Calling {}() on a column inside a predicate is non-SARGable — the optimizer cannot seek the index and must scan.", upper),
-                        Some(make_loc(t)),
-                        Some(format!("Rewrite the predicate to leave the column alone. Examples:\n  • UPPER(col) = 'X'  →  col = 'X' (collation already case-insensitive on most installs)\n  • CAST(dt AS date) = '2026-01-01'  →  dt >= '2026-01-01' AND dt < '2026-01-02'\n  • LEFT(name, 3) = 'abc'  →  name LIKE 'abc%'\n  • ISNULL(c, 0) = 0  →  (c = 0 OR c IS NULL)\nIf you genuinely need the transformed value, add a computed PERSISTED column and index that.")),
-                    ));
-                }
+        // Confirm it's a function call: next token must be '('
+        if !tokens.get(i + 1).map(|n| n.text == "(").unwrap_or(false) { continue; }
+        let Some(close) = matching_paren(tokens, i + 1) else { continue };
+        let args = call_args(tokens, i + 1, close);
+        // Only the argument that is *searched* matters. `SUBSTRING(@header,
+        // number, 1)` wraps a variable; the column `number` is a position, and
+        // reporting it as the searched operand names a column that is not
+        // being transformed at all. `UPPER(@@SERVERNAME) <> UPPER(@ServerName)`
+        // compares two variables: no column, no index, nothing to rewrite.
+        let searched: Vec<usize> = match upper.as_str() {
+            "CONVERT" | "DATEPART" => vec![1],
+            "DATEDIFF" => vec![1, 2],
+            "COALESCE" => (0..args.len()).collect(),
+            _ => vec![0],
+        };
+        let wraps_column = searched
+            .iter()
+            .filter_map(|&k| args.get(k))
+            .any(|&(s, e)| range_has_column(tokens, s, e, false));
+        if !wraps_column { continue; }
+        if let Some(cmp) = tokens.get(close + 1) {
+            let is_cmp = matches!(cmp.text, "=" | "<" | ">") || is_word(cmp, "LIKE") || is_word(cmp, "IN");
+            if is_cmp {
+                out.push(finding(
+                    "sarg.function_on_column",
+                    Severity::Error,
+                    format!("Calling {}() on a column inside a predicate is non-SARGable — the optimizer cannot seek the index and must scan.", upper),
+                    Some(make_loc(t)),
+                    Some(format!("Rewrite the predicate to leave the column alone. Examples:\n  • UPPER(col) = 'X'  →  col = 'X' (collation already case-insensitive on most installs)\n  • CAST(dt AS date) = '2026-01-01'  →  dt >= '2026-01-01' AND dt < '2026-01-02'\n  • LEFT(name, 3) = 'abc'  →  name LIKE 'abc%'\n  • ISNULL(c, 0) = 0  →  (c = 0 OR c IS NULL)\nIf you genuinely need the transformed value, add a computed PERSISTED column and index that.")),
+                ));
             }
         }
     }
@@ -151,17 +72,50 @@ pub fn function_on_indexed_column(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn leading_wildcard_like(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
         if !is_word(t, "LIKE") { continue; }
+        // Only a search condition has an index to lose. `IF @name LIKE '%"%'`,
+        // `CASE WHEN @cols LIKE '%x%' THEN …` in a select list and `SET @s = …`
+        // are control flow and string building, not predicates.
+        if cond[i] == 0 { continue; }
+        // The left operand must be a column (or an expression containing one),
+        // never a bare variable: `@output_column_list LIKE '%|[x|]%'` searches
+        // a string in memory.
+        let Some(k) = i.checked_sub(1) else { continue };
+        // `col NOT LIKE '%x%'` can never seek regardless of where the wildcard
+        // sits — a negated LIKE is a residual predicate by nature, so neither
+        // the diagnosis ("leading wildcard lost the seek") nor the full-text
+        // advice applies.
+        if is_word(&tokens[k], "NOT") { continue; }
+        let left_is_column = if tokens[k].text == ")" {
+            match matching_paren_back(tokens, k) {
+                Some(open) => range_has_column(tokens, open + 1, k, true),
+                None => false,
+            }
+        } else {
+            looks_like_column_at(tokens, k)
+        };
+        if !left_is_column { continue; }
+        // `FROM (SELECT REPLACE(@p, …) AS x) AS t WHERE x LIKE '%{%'` — the
+        // derived table has no base table, so there is no index to lose.
+        if source_is_tableless_derived(tokens, k) { continue; }
+        if statement_sources_exempt(tokens, k) { continue; }
         if let Some(n) = tokens.get(i + 1) {
-            if n.kind == TokKind::String {
-                let inner = n.text.trim_matches('\'').trim_start_matches('N');
+            let (n, string_tok) = if n.kind == TokKind::Word && (n.text == "N" || n.text == "n") {
+                match tokens.get(i + 2) { Some(s) => (n, s), None => continue }
+            } else {
+                (n, n)
+            };
+            let _ = n;
+            if string_tok.kind == TokKind::String {
+                let inner = string_tok.text.trim_matches('\'').trim_start_matches('N');
                 if inner.starts_with('%') || inner.starts_with('_') {
                     out.push(finding(
                         "sarg.leading_wildcard",
                         Severity::Warning,
                         "LIKE pattern starts with a wildcard — index seek is impossible, the engine has to scan.",
-                        Some(make_loc(n)),
+                        Some(make_loc(string_tok)),
                         Some("Avoid leading wildcards on indexed columns. For substring search at scale, use full-text search (CONTAINS / FREETEXT) or maintain a reverse-indexed computed column.".into()),
                     ));
                 }
@@ -174,6 +128,9 @@ pub fn leading_wildcard_like(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn implicit_convert_unicode(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let cond = search_condition_ids(tokens);
+    let sys_aliases = system_source_aliases(tokens);
+    let declared = declared_column_families(tokens);
     for (i, t) in tokens.iter().enumerate() {
         if t.kind != TokKind::String { continue; }
         // The tokenizer splits N'…' into [Word "N"][String "'…'"]. Detect both shapes:
@@ -183,13 +140,28 @@ pub fn implicit_convert_unicode(ctx: &RuleCtx) -> Vec<Finding> {
         let prev = tokens.get(i.wrapping_sub(1));
         let n_prefix_word = prev.map(|p| p.kind == TokKind::Word && (p.text == "N" || p.text == "n")).unwrap_or(false);
         if !n_prefix_inline && !n_prefix_word { continue; }
+        // An `=` outside a search condition is an assignment or an alias:
+        // `SET @sql = N'…'`, `SELECT @s = N'…'`, `SET t.col = N'…'` in an
+        // UPDATE, `script_type = N'…'` in a select list, `@p sysname = N''`
+        // parameter defaults and `@params = N'…'` EXEC arguments compare
+        // nothing and consult no index.
+        if cond[i] == 0 { continue; }
         // When the prefix is a separate word, the comparison op + column are one
         // slot further left.
         let (op_at, col_at) = if n_prefix_word { (i.wrapping_sub(2), i.wrapping_sub(3)) } else { (i.wrapping_sub(1), i.wrapping_sub(2)) };
         let op = tokens.get(op_at).map(|p| p.text);
         if !matches!(op, Some("=") | Some("<>") | Some("!=") | Some("<") | Some(">")) { continue; }
         let Some(c) = tokens.get(col_at) else { continue };
-        if c.kind != TokKind::Word { continue; }
+        // The other side must be a column reference, not a variable.
+        if !looks_like_column_at(tokens, col_at) { continue; }
+        // Catalog views and DMVs are nvarchar throughout: `sys.objects.name =
+        // N'x'` is exactly right, and there is no user index to design.
+        if column_source_is_system(tokens, col_at, &sys_aliases) { continue; }
+        // A column this file declares as nvarchar (`CREATE TABLE #t (name
+        // nvarchar(128))`, `DECLARE @t TABLE (…)`) is typed correctly for an
+        // N'…' literal: nothing converts.
+        let key = c.text.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
+        if matches!(declared.get(&key), Some(Some((StrFamily::Unicode, _)))) { continue; }
         out.push(finding(
             "sarg.implicit_convert_unicode",
             // Advisory only: at the token level we cannot know the column's type,
@@ -239,9 +211,7 @@ pub fn not_in_subquery(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn or_chain_predicate(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_where = false;
-    let mut or_count = 0u32;
-    let mut first_or_loc = None;
+    let cond = search_condition_ids(tokens);
 
     fn emit(out: &mut Vec<Finding>, or_count: u32, loc: Option<crate::findings::Location>) {
         if or_count >= 3 {
@@ -255,80 +225,214 @@ pub fn or_chain_predicate(ctx: &RuleCtx) -> Vec<Finding> {
         }
     }
 
-    for t in tokens {
-        // Any new WHERE / ORDER / GROUP / ';' is a boundary. Flush the
-        // current count (even if we're entering a nested WHERE) so we
-        // don't lose a long OR chain that ended just before the boundary.
-        if is_word(t, "WHERE") {
-            if in_where { emit(&mut out, or_count, first_or_loc); }
-            in_where = true;
-            or_count = 0;
-            first_or_loc = None;
+    // Count per OR *group*: a parenthesised group, or one top-level AND-ed
+    // conjunct of a search condition. `(a = 1 OR a = 2) AND (b = 1 OR b = 2)`
+    // is two short chains, not one long one, and each WHERE / ON / HAVING —
+    // including one inside a subquery — is its own region, so an IF's
+    // `@a <= 0 OR @b > 100` is never counted and neighbouring statements are
+    // never summed into one inflated number.
+    let mut counts: std::collections::HashMap<(u32, usize), (u32, Option<crate::findings::Location>)> =
+        std::collections::HashMap::new();
+    let mut order: Vec<(u32, usize)> = Vec::new();
+    let mut select_cache: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if cond[i] == 0 || !is_keyword_at(tokens, i, "OR") { continue; }
+        // "Rewrite as a UNION" only exists for a SELECT. A DELETE / UPDATE
+        // WHERE has no such rewrite, and its OR chain is the filter it is.
+        let is_select = *select_cache
+            .entry(cond[i])
+            .or_insert_with(|| condition_belongs_to_select(tokens, i));
+        if !is_select { continue; }
+        // An OR is only an index problem when the predicates on BOTH sides
+        // test a column. `@x IS NULL OR col = @x` and
+        // `CONVERT(smallint, @filter) = 0 OR sp.spid = @filter` are parameter
+        // guards: the engine evaluates the variable side once.
+        if !or_operands_are_columns(tokens, i) { continue; }
+        // `col = other OR other IS NULL`, `x IS NULL OR CHARINDEX(x, …) > 0`
+        // and `(@v IS NOT NULL AND c = @v) OR (@v IS NULL AND c IS NULL)` are
+        // NULL-guard idioms — an optional filter, not a value list.
+        if or_is_null_guard_idiom(tokens, i) { continue; }
+        if statement_sources_exempt(tokens, i) { continue; }
+        let key = (cond[i], or_group_anchor(tokens, i));
+        let e = counts.entry(key).or_insert_with(|| { order.push(key); (0, None) });
+        e.0 += 1;
+        if e.1.is_none() { e.1 = Some(make_loc(t)); }
+    }
+    for key in order {
+        let (n, loc) = counts.remove(&key).unwrap();
+        emit(&mut out, n, loc);
+    }
+    out
+}
+
+/// The token index that anchors the OR group the `OR` at `or_at` belongs to:
+/// the nearest preceding `(` that encloses it, a top-level `AND` in the same
+/// group, or the clause keyword that opened the search condition.
+fn or_group_anchor(tokens: &[Token<'_>], or_at: usize) -> usize {
+    let mut depth = 0i32;
+    let mut k = or_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" {
+            depth -= 1;
+            if depth < 0 { return k; }
             continue;
         }
-        if is_word(t, "GROUP") || is_word(t, "ORDER") || t.text == ";" {
-            if in_where { emit(&mut out, or_count, first_or_loc); }
-            in_where = false;
-            or_count = 0;
-            first_or_loc = None;
-            continue;
-        }
-        if in_where && is_word(t, "OR") {
-            or_count += 1;
-            if first_or_loc.is_none() { first_or_loc = Some(make_loc(t)); }
+        if depth != 0 { continue; }
+        if is_word(t, "AND") || is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING")
+            || is_word(t, "WHEN") || t.text == ";"
+        {
+            return k;
         }
     }
-    // EOF flush.
-    if in_where { emit(&mut out, or_count, first_or_loc); }
-    out
+    0
+}
+
+/// Does the search condition containing the `OR` at `or_at` belong to a
+/// SELECT (including `INSERT … SELECT` and subqueries) rather than a DELETE /
+/// UPDATE / MERGE? Walks back at the condition's own nesting level to the
+/// nearest statement keyword; escaping a parenthesis keeps walking in the
+/// enclosing statement.
+fn condition_belongs_to_select(tokens: &[Token<'_>], or_at: usize) -> bool {
+    let mut depth = 0i32;
+    let mut k = or_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" { depth -= 1; if depth < 0 { depth = 0; } continue; }
+        if depth != 0 { continue; }
+        if is_keyword_at(tokens, k, "SELECT") { return true; }
+        if is_keyword_at(tokens, k, "DELETE") || is_keyword_at(tokens, k, "UPDATE")
+            || is_keyword_at(tokens, k, "MERGE")
+        {
+            return false;
+        }
+        if t.text == ";" || super::is_batch_separator(tokens, k) { break; }
+    }
+    true
+}
+
+/// The half-open token ranges of the predicate on each side of the `OR` at
+/// `or_at`, each scanned to the nearest boundary at its own nesting level.
+fn or_sides(tokens: &[Token<'_>], or_at: usize) -> ((usize, usize), (usize, usize)) {
+    let is_boundary = |t: &Token<'_>| {
+        is_word(t, "AND") || is_word(t, "OR") || is_word(t, "WHEN") || is_word(t, "THEN")
+            || is_word(t, "ELSE") || is_word(t, "END") || is_word(t, "CASE")
+            || is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING")
+            || t.text == ";"
+    };
+    let mut depth = 0i32;
+    let mut j = or_at + 1;
+    let mut right_end = j;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; j += 1; continue; }
+        if t.text == ")" { depth -= 1; if depth < 0 { break; } j += 1; continue; }
+        if depth == 0 && is_boundary(t) { break; }
+        right_end = j + 1;
+        j += 1;
+    }
+    let mut depth = 0i32;
+    let mut k = or_at;
+    let mut left_start = or_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" { depth -= 1; if depth < 0 { break; } continue; }
+        if depth == 0 && is_boundary(t) { break; }
+        left_start = k;
+    }
+    ((left_start, or_at), (or_at + 1, right_end))
+}
+
+/// Is the `OR` at `or_at` part of a NULL-guard idiom? Either side is
+/// `<operand> IS [NOT] NULL` where the operand is a variable, or a column
+/// that the other side also references; or either side is a parenthesised
+/// conjunction that contains a `@var IS [NOT] NULL` test at its top level.
+fn or_is_null_guard_idiom(tokens: &[Token<'_>], or_at: usize) -> bool {
+    let (left, right) = or_sides(tokens, or_at);
+    let strip = |(s, e): (usize, usize)| {
+        let (mut s, mut e) = (s, e);
+        while s < e && tokens[s].text == "(" && e > 0 && tokens[e - 1].text == ")" { s += 1; e -= 1; }
+        (s, e)
+    };
+    let norm = |t: &Token<'_>| t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    // `X IS [NOT] NULL` at the top level of `range`; returns the operand tokens.
+    let is_null_test = |(s, e): (usize, usize)| -> Option<(usize, usize)> {
+        let mut depth = 0i32;
+        for j in s..e {
+            match tokens[j].text {
+                "(" => { depth += 1; continue; }
+                ")" => { depth -= 1; continue; }
+                _ => {}
+            }
+            if depth != 0 || !is_word(&tokens[j], "IS") { continue; }
+            let mut n = j + 1;
+            if tokens.get(n).map(|t| is_word(t, "NOT")).unwrap_or(false) { n += 1; }
+            if !tokens.get(n).map(|t| is_word(t, "NULL")).unwrap_or(false) { return None; }
+            return Some((s, j));
+        }
+        None
+    };
+    let mentions_all = |operand: (usize, usize), other: (usize, usize)| {
+        let words: Vec<String> = (operand.0..operand.1)
+            .filter(|&j| tokens[j].kind == TokKind::Word)
+            .map(|j| norm(&tokens[j]))
+            .collect();
+        !words.is_empty()
+            && words.iter().all(|w| (other.0..other.1).any(|j| tokens[j].kind == TokKind::Word && norm(&tokens[j]) == *w))
+    };
+    for (side, other) in [(strip(left), strip(right)), (strip(right), strip(left))] {
+        let Some(operand) = is_null_test(side) else { continue };
+        // Whole side is the NULL test on a variable, or on a column the other
+        // side also tests.
+        let whole = operand.0 == side.0 && operand.1 + 2 >= side.1 - 1;
+        let operand_is_var = (operand.0..operand.1).any(|j| is_variable(&tokens[j]));
+        if operand_is_var { return true; }
+        if whole && mentions_all(operand, other) { return true; }
+    }
+    // `(@v IS NOT NULL AND c = @v)` — a top-level conjunct tests a variable.
+    for side in [strip(left), strip(right)] {
+        let mut depth = 0i32;
+        let mut seg_start = side.0;
+        let mut segs = Vec::new();
+        for j in side.0..side.1 {
+            match tokens[j].text {
+                "(" => { depth += 1; continue; }
+                ")" => { depth -= 1; continue; }
+                _ => {}
+            }
+            if depth == 0 && is_word(&tokens[j], "AND") { segs.push((seg_start, j)); seg_start = j + 1; }
+        }
+        segs.push((seg_start, side.1));
+        if segs.len() < 2 { continue; }
+        if segs.iter().any(|&seg| {
+            is_null_test(seg).map(|op| (op.0..op.1).any(|j| is_variable(&tokens[j]))).unwrap_or(false)
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    // very rough: any "dbo.Name(" inside a WHERE/ON clause
-    let mut in_pred = false;
-    // `ON` opens a join predicate in DML, but in DDL it introduces a target:
-    // `CREATE INDEX IX ON dbo.Orders ([Status])` puts `dbo.Orders (` right after
-    // `ON`, which is byte-for-byte the `Word DOT Word LPAREN` shape we treat as a
-    // function call — so every CREATE/ALTER INDEX used to report a scalar UDF that
-    // isn't there. Track the statement verb and never open a predicate on DDL `ON`.
-    let mut stmt_is_ddl = false;
-    let mut at_stmt_start = true;
+    // `schema.Name(` inside a WHERE / JOIN ON / HAVING. `search_condition_ids`
+    // already keeps DDL `ON` (`CREATE INDEX … ON dbo.T (col)`), MERGE OUTPUT
+    // targets, CROSS/OUTER APPLY sources and batch separators out of the
+    // region, so the only shape-level question left is whether the dotted call
+    // is a user function at all.
+    let cond = search_condition_ids(tokens);
+    // One finding per (search condition, line): `WHERE a.f(x) = b.g(y)` is a
+    // single predicate to fix, not two.
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
     for (i, t) in tokens.iter().enumerate() {
-        if t.kind == TokKind::Comment { continue; }
-        // `GO` is a batch separator, not a statement. Letting it consume
-        // `at_stmt_start` meant the CREATE that follows was never recognized as
-        // DDL, so `CREATE INDEX ... ON dbo.View (col)` reported a scalar UDF
-        // that does not exist — in every deployment script ever written.
-        if is_word(t, "GO") {
-            in_pred = false;
-            at_stmt_start = true;
-            stmt_is_ddl = false;
-            continue;
-        }
-        if at_stmt_start && t.kind == TokKind::Word {
-            stmt_is_ddl = is_word(t, "CREATE") || is_word(t, "ALTER") || is_word(t, "DROP");
-            at_stmt_start = false;
-        }
-        if is_word(t, "WHERE") || (is_word(t, "ON") && !stmt_is_ddl) { in_pred = true; }
-        // A MERGE's ON opens a predicate that no `;` closes until the whole
-        // statement ends, so `... OUTPUT inserted.Id INTO dbo.Audit (Id)` was
-        // read as a scalar UDF call inside a predicate. These keywords all end
-        // the predicate region they follow.
-        // WHEN/THEN are deliberately NOT here. They terminate a MERGE's ON
-        // clause, but they are also CASE keywords, and closing the predicate on
-        // them made `WHERE CASE WHEN ... END = 1` — and anything after it —
-        // invisible to this rule. OUTPUT/INTO already close the MERGE case,
-        // which is what the phantom-UDF report was actually about.
-        else if ["GROUP", "ORDER", "OUTPUT", "INTO", "VALUES",
-                 "UNION", "EXCEPT", "INTERSECT", "OPTION"]
-            .iter()
-            .any(|kw| is_word(t, kw))
-        { in_pred = false; }
-        else if t.text == ";" { in_pred = false; at_stmt_start = true; stmt_is_ddl = false; }
-        if !in_pred { continue; }
-        if t.kind != TokKind::Word { continue; }
+        if cond[i] == 0 || t.kind != TokKind::Word || is_variable(t) { continue; }
         // pattern: Word DOT Word LPAREN
         let dot = tokens.get(i + 1);
         let fn_name = tokens.get(i + 2);
@@ -337,20 +441,25 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
             && fn_name.map(|f| f.kind == TokKind::Word).unwrap_or(false)
             && lparen.map(|p| p.text == "(").unwrap_or(false)
         {
+            let fn_name = fn_name.unwrap();
             // skip if the schema part is one of the system-ish ones we don't care about
             let schema = t.text.to_ascii_lowercase();
             if matches!(schema.as_str(), "sys" | "information_schema") { continue; }
+            // `x.exist(…)`, `col.value(…)`, `node.ToString()`, `g.STDistance(…)`
+            // are methods of the xml / hierarchyid / spatial types, not UDFs.
+            if is_type_method(fn_name) { continue; }
+            if !seen.insert((cond[i], t.line)) { continue; }
             let ver_gate = ctx.server_version.unwrap_or(0) < 2019;
             let sev = if ver_gate { Severity::Error } else { Severity::Warning };
             let msg = if ver_gate {
                 format!(
                     "{}.{}( … ) appears in a predicate. On SQL Server < 2019 scalar UDFs in a WHERE clause are evaluated row-by-row and force the entire plan serial.",
-                    t.text, fn_name.unwrap().text
+                    t.text, fn_name.text
                 )
             } else {
                 format!(
                     "{}.{}( … ) appears in a predicate. SQL Server 2019+ inlines many scalar UDFs, but this is conditional — verify with the actual plan that inlining occurred.",
-                    t.text, fn_name.unwrap().text
+                    t.text, fn_name.text
                 )
             };
             out.push(finding(
@@ -372,17 +481,21 @@ pub fn scalar_udf_in_where(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn arithmetic_on_column(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
         // arithmetic operator
         if t.kind != TokKind::Punct || !matches!(t.text, "+" | "-" | "*" | "/" | "%") { continue; }
-        // left operand: a column identifier (Word), not a number/paren/operator
-        let Some(left) = (if i > 0 { tokens.get(i - 1) } else { None }) else { continue };
-        if left.kind != TokKind::Word { continue; }
-        // a bare keyword on the left (e.g. part of an expression) — still a Word; acceptable.
+        // Only inside a search condition. `CASE WHEN seconds % 3600 >= 60` in
+        // a select list and `IF @size % 64 <> 0` compute a value; no index is
+        // consulted and nothing can be moved to "the constant side".
+        if cond[i] == 0 { continue; }
+        // left operand: a column reference — never a variable, keyword or literal
+        let Some(li) = i.checked_sub(1) else { continue };
+        if !looks_like_column_at(tokens, li) { continue; }
+        let left = &tokens[li];
         // right operand: a numeric literal or a parameter
         let Some(right) = tokens.get(i + 1) else { continue };
-        let right_is_operand = right.kind == TokKind::Number
-            || (right.kind == TokKind::Word && right.text.starts_with('@'));
+        let right_is_operand = right.kind == TokKind::Number || is_variable(right);
         if !right_is_operand { continue; }
         // must be part of a comparison: next token is a comparison operator
         let Some(after) = tokens.get(i + 2) else { continue };
@@ -495,32 +608,498 @@ fn arg_is_bare_column(tokens: &[Token<'_>], start: usize, end: usize) -> Option<
     }
 }
 
-/// Track whether we are inside a filtering predicate (WHERE / ON / HAVING) and
-/// reset at clause boundaries. Returns the updated flag for token `t`.
-fn predicate_state(t: &Token<'_>, in_pred: bool) -> bool {
-    if is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING") {
-        true
-    } else if is_word(t, "GROUP")
-        || is_word(t, "ORDER")
-        || is_word(t, "SELECT")
-        || is_word(t, "SET")
-        // Statement boundaries: a predicate ends when a new DML statement begins.
-        // Without these, a missing `;` leaks `in_pred` from one statement's WHERE
-        // into the next (e.g. `WHERE Id=1 INSERT INTO Log VALUES('x'+col)`),
-        // misfiring on the INSERT's VALUES list.
-        || is_word(t, "INSERT")
-        || is_word(t, "UPDATE")
-        || is_word(t, "DELETE")
-        || is_word(t, "MERGE")
-        || is_word(t, "VALUES")
-        || is_word(t, "EXEC")
-        || is_word(t, "EXECUTE")
-        || t.text == ";"
-    {
-        false
-    } else {
-        in_pred
+/// Like [`looks_like_column`], decided in context: a word followed by `(` is a
+/// function name, the `N` of `N'…'` is a literal prefix, and a type name in a
+/// type position (`CAST(x AS int)`, `CONVERT(int, x)`) is a type.
+fn looks_like_column_at(tokens: &[Token<'_>], j: usize) -> bool {
+    let Some(t) = tokens.get(j) else { return false };
+    if !looks_like_column(t) {
+        return false;
     }
+    if tokens.get(j + 1).map(|n| n.text == "(").unwrap_or(false) {
+        return false;
+    }
+    // `schema.fn(…)` / `db.schema.fn(…)`: the head of a dotted name whose last
+    // segment is called is a schema, not a column.
+    {
+        let mut last = j;
+        while tokens.get(last + 1).map(|d| d.text == ".").unwrap_or(false)
+            && tokens.get(last + 2).map(|w| w.kind == TokKind::Word).unwrap_or(false)
+        {
+            last += 2;
+        }
+        if last != j && tokens.get(last + 1).map(|n| n.text == "(").unwrap_or(false) {
+            return false;
+        }
+    }
+    if (t.text == "N" || t.text == "n")
+        && tokens.get(j + 1).map(|n| n.kind == TokKind::String).unwrap_or(false)
+    {
+        return false;
+    }
+    if is_type_or_datepart(t) {
+        let prev = j.checked_sub(1).map(|k| &tokens[k]);
+        if prev.map(|p| is_word(p, "AS")).unwrap_or(false) {
+            return false;
+        }
+        // First argument of a type-taking / datepart-taking function.
+        if prev.map(|p| p.text == "(").unwrap_or(false) {
+            if let Some(f) = j.checked_sub(2).map(|k| &tokens[k]) {
+                let f = f.text.to_ascii_uppercase();
+                if matches!(
+                    f.as_str(),
+                    "CONVERT" | "TRY_CONVERT" | "DATEDIFF" | "DATEDIFF_BIG" | "DATEPART"
+                        | "DATENAME" | "DATEADD" | "DATETRUNC" | "PARSE" | "TRY_PARSE"
+                ) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Does the half-open token range contain a column reference? With
+/// `any_depth == false` only the range's own nesting level counts (so
+/// `UPPER(LTRIM(col))` is attributed to the inner call, which reports it);
+/// with `any_depth == true` a column anywhere inside qualifies.
+fn range_has_column(tokens: &[Token<'_>], start: usize, end: usize, any_depth: bool) -> bool {
+    let mut depth = 0i32;
+    for j in start..end.min(tokens.len()) {
+        match tokens[j].text {
+            "(" => { depth += 1; continue; }
+            ")" => { depth -= 1; continue; }
+            _ => {}
+        }
+        if (any_depth || depth == 0) && looks_like_column_at(tokens, j) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk backward from the `)` at `close_idx` to its matching `(`.
+fn matching_paren_back(tokens: &[Token<'_>], close_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut j = close_idx;
+    loop {
+        match tokens[j].text {
+            ")" => depth += 1,
+            "(" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+        if j == 0 {
+            return None;
+        }
+        j -= 1;
+    }
+}
+
+/// Methods of the built-in xml / hierarchyid / geography / geometry types.
+/// `alias.col.exist('…') = 1` has the same `Word . Word (` shape as a
+/// schema-qualified scalar UDF and is nothing of the kind.
+fn is_type_method(t: &Token<'_>) -> bool {
+    const METHODS: &[&str] = &[
+        // xml
+        "exist", "value", "nodes", "query", "modify",
+        // hierarchyid
+        "tostring", "getancestor", "getdescendant", "getlevel", "isdescendantof",
+        "getreparentedvalue", "getroot", "parse", "read", "write",
+        // geography / geometry (OGC + extended)
+        "stdistance", "stintersects", "stcontains", "stwithin", "stbuffer", "starea",
+        "stlength", "stastext", "stasbinary", "stequals", "stoverlaps", "sttouches",
+        "stcrosses", "stdisjoint", "stintersection", "stunion", "stdifference",
+        "stsymdifference", "stisvalid", "stsrid", "stgeometrytype", "stx", "sty",
+        "stpointn", "stnumpoints", "ststartpoint", "stendpoint", "stcentroid",
+        "stenvelope", "strelate", "stconvexhull", "stboundary", "stdimension",
+        "stisempty", "stisclosed", "stisring", "stissimple", "stnumgeometries",
+        "stgeometryn", "stexteriorring", "stinteriorringn", "stnuminteriorring",
+        "stpointonsurface", "stgeomfromtext", "stgeomfromwkb", "stpointfromtext",
+        "makevalid", "filter", "reduce", "astextzm", "bufferwithtolerance",
+        "bufferwithcurves", "shortestlineto", "envelopeangle", "envelopecenter",
+        "numrings", "ringn", "instanceof", "lat", "long", "z", "m",
+    ];
+    let lc = t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    METHODS.contains(&lc.as_str())
+}
+
+/// Aliases (and bare names) of the sources named in FROM / JOIN / APPLY /
+/// UPDATE / DELETE, mapped to whether that source is a system catalog view or
+/// [`is_system_source`] plus the shapes the shared helper does not cover:
+/// `msdb.dbo.sys*` / `msdb..sys*` (the agent catalog, nvarchar throughout)
+/// and bare system table-valued functions such as `fn_my_permissions(…)`.
+/// Every source of the statement enclosing `at` is a session table
+/// (`#temp` / `@tablevar`) or a system catalog / DMV. A search predicate over
+/// those has no user index to lose: the rows were built by this batch or are
+/// served from an in-memory catalog, and 37k lines of DBA tooling showed such
+/// predicates to be nearly all of the remaining noise in the sargability rules.
+fn statement_sources_exempt(tokens: &[Token<'_>], at: usize) -> bool {
+    // Walk back to this statement's FROM at the same nesting level.
+    let mut depth = 0i32;
+    let mut k = at;
+    let mut from_at = None;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        match t.text {
+            ")" => { depth += 1; continue; }
+            "(" => { depth -= 1; if depth < 0 { depth = 0; } continue; }
+            _ => {}
+        }
+        if depth != 0 { continue; }
+        if is_keyword_at(tokens, k, "FROM") { from_at = Some(k); break; }
+        if is_keyword_at(tokens, k, "SELECT") || t.text == ";" { return false; }
+    }
+    let Some(f) = from_at else { return false };
+    // Scan the FROM clause forward and classify every source.
+    let mut depth = 0i32;
+    let mut j = f + 1;
+    let mut expect_source = true;
+    let mut sources = 0u32;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; j += 1; continue; }
+        if t.text == ")" { depth -= 1; if depth < 0 { break; } j += 1; continue; }
+        if depth == 0 {
+            if is_word(t, "WHERE") || is_word(t, "GROUP") || is_word(t, "ORDER") || is_word(t, "HAVING")
+                || is_word(t, "UNION") || is_word(t, "EXCEPT") || is_word(t, "INTERSECT")
+                || is_word(t, "SELECT") || t.text == ";" || is_word(t, "OPTION") || is_word(t, "FOR")
+            { break; }
+            if expect_source && t.kind == TokKind::Word {
+                sources += 1;
+                let bare = t.text.trim_matches(|c| c == '[' || c == ']');
+                let exempt = bare.starts_with('#') || bare.starts_with('@') || is_system_source_ext(tokens, j);
+                if !exempt { return false; }
+                expect_source = false;
+            } else if is_word(t, "JOIN") || is_word(t, "APPLY") || t.text == "," {
+                expect_source = true;
+            }
+        }
+        j += 1;
+    }
+    sources > 0
+}
+
+fn is_system_source_ext(tokens: &[Token<'_>], i: usize) -> bool {
+    if is_system_source(tokens, i) {
+        return true;
+    }
+    let Some(t) = tokens.get(i) else { return false };
+    if t.kind != TokKind::Word {
+        return false;
+    }
+    let bare = |k: usize| {
+        tokens.get(k).map(|x| x.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase())
+    };
+    let dot = |k: usize| tokens.get(k).map(|x| x.text == ".").unwrap_or(false);
+    let is_fn = |k: usize| {
+        bare(k).map(|n| n.starts_with("fn_")).unwrap_or(false)
+            && tokens.get(k + 1).map(|p| p.text == "(").unwrap_or(false)
+    };
+    if is_fn(i) {
+        return true;
+    }
+    if bare(i).as_deref() == Some("msdb") && dot(i + 1) {
+        // msdb.dbo.sysjobs | msdb..sysjobs
+        if dot(i + 2) {
+            return bare(i + 3).map(|n| n.starts_with("sys")).unwrap_or(false);
+        }
+        if bare(i + 2).as_deref() == Some("dbo") && dot(i + 3) {
+            return bare(i + 4).map(|n| n.starts_with("sys")).unwrap_or(false);
+        }
+    }
+    false
+}
+
+/// DMV. A name that is reused for both a system and a user source is
+/// ambiguous and recorded as `None`.
+fn system_source_aliases(tokens: &[Token<'_>]) -> std::collections::HashMap<String, Option<bool>> {
+    let mut out: std::collections::HashMap<String, Option<bool>> = std::collections::HashMap::new();
+    let mut record = |name: &str, is_sys: bool| {
+        let key = name.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+        match out.get(&key) {
+            Some(Some(prev)) if *prev != is_sys => { out.insert(key, None); }
+            Some(_) => {}
+            None => { out.insert(key, Some(is_sys)); }
+        }
+    };
+    for (i, t) in tokens.iter().enumerate() {
+        if !(is_word(t, "FROM") || is_word(t, "JOIN") || is_word(t, "APPLY")
+            || is_word(t, "UPDATE") || is_word(t, "DELETE"))
+        {
+            continue;
+        }
+        let Some(first) = tokens.get(i + 1) else { continue };
+        if first.kind != TokKind::Word || is_variable(first) || first.text.starts_with('#') {
+            continue;
+        }
+        let is_sys = is_system_source_ext(tokens, i + 1);
+        // Skip the dotted name and an optional argument list (TVF / DMF).
+        let mut k = i + 1;
+        while tokens.get(k + 1).map(|d| d.text == ".").unwrap_or(false) {
+            k += 2;
+        }
+        let last_name = k;
+        let mut next = k + 1;
+        if tokens.get(next).map(|p| p.text == "(").unwrap_or(false) {
+            match matching_paren(tokens, next) {
+                Some(c) => next = c + 1,
+                None => continue,
+            }
+        }
+        if tokens.get(next).map(|n| is_word(n, "AS")).unwrap_or(false) {
+            next += 1;
+        }
+        if let Some(alias) = tokens.get(next) {
+            if alias.kind == TokKind::Word && !is_variable(alias) && !is_reserved_after_table(alias)
+                && !is_word(alias, "WITH") && !is_word(alias, "FOR") && !is_word(alias, "AS")
+            {
+                record(alias.text, is_sys);
+            }
+        }
+        if let Some(nm) = tokens.get(last_name) {
+            record(nm.text, is_sys);
+        }
+    }
+    out
+}
+
+/// Is the column referenced at `col_at` known to come from a system catalog
+/// view / DMV? Qualified (`o.name`) resolves through the alias map; an
+/// unqualified column resolves only when the nearest enclosing FROM names a
+/// single system source.
+fn column_source_is_system(
+    tokens: &[Token<'_>],
+    col_at: usize,
+    aliases: &std::collections::HashMap<String, Option<bool>>,
+) -> bool {
+    if col_at >= 2 && tokens[col_at - 1].text == "." {
+        let q = tokens[col_at - 2].text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+        // The statement's own `FROM sys.objects AS o` / `JOIN sys.schemas s`
+        // wins over the file-wide map: an alias letter like `c` is reused
+        // across a long procedure for system and user sources alike.
+        if let Some(is_sys) = alias_source_in_statement(tokens, col_at, &q) {
+            return is_sys;
+        }
+        return matches!(aliases.get(&q), Some(Some(true)));
+    }
+    // Unqualified: walk back to this statement's FROM at the same nesting
+    // level. Leaving a parenthesis the column sits inside (`AND NOT (col =
+    // N'x' …)`) is still the same statement, so the walk continues at the
+    // outer level; a SELECT or `;` is the real boundary.
+    let mut depth = 0i32;
+    let mut k = col_at;
+    let mut sources = 0u32;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        match t.text {
+            ")" => { depth += 1; continue; }
+            "(" => { depth -= 1; if depth < 0 { depth = 0; } continue; }
+            _ => {}
+        }
+        if depth != 0 { continue; }
+        if is_word(t, "JOIN") || is_word(t, "APPLY") || t.text == "," {
+            sources += 1;
+        }
+        if is_keyword_at(tokens, k, "FROM") {
+            return sources == 0 && is_system_source_ext(tokens, k + 1);
+        }
+        if is_keyword_at(tokens, k, "SELECT") || t.text == ";" {
+            return false;
+        }
+    }
+    false
+}
+
+/// Resolve the qualifier `q` of the column at `col_at` against the sources
+/// declared in the same statement (`FROM x [AS] q`, `JOIN x q`, `APPLY f(…) q`,
+/// `UPDATE q`, `DELETE q`), walking back through enclosing parentheses so a
+/// correlated subquery sees the outer statement's aliases. `Some(true)` when
+/// the source is a system catalog / DMV, `Some(false)` for a user or derived
+/// source, `None` when the statement never declares `q`.
+fn alias_source_in_statement(tokens: &[Token<'_>], col_at: usize, q: &str) -> Option<bool> {
+    let norm = |t: &Token<'_>| t.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    let mut depth = 0i32;
+    let mut k = col_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        match t.text {
+            ")" => { depth += 1; continue; }
+            "(" => { depth -= 1; if depth < 0 { depth = 0; } continue; }
+            ";" => return None,
+            _ => {}
+        }
+        if depth != 0 { continue; }
+        if super::is_batch_separator(tokens, k) { return None; }
+        if t.kind != TokKind::Word || norm(t) != q { continue; }
+        // Is this occurrence an alias declaration? Look at what precedes it.
+        let mut p = k;
+        if p > 0 && is_word(&tokens[p - 1], "AS") { p -= 1; }
+        if p == 0 { continue; }
+        let before = &tokens[p - 1];
+        if before.text == ")" {
+            // `FROM (SELECT …) AS q` or `APPLY fn(…) AS q`: find what opened it.
+            let Some(open) = matching_paren_back(tokens, p - 1) else { continue };
+            if open == 0 { return Some(false); }
+            // A function source: `<name>(…) q`.
+            let mut name_end = open - 1;
+            if tokens[name_end].kind != TokKind::Word { return Some(false); }
+            let mut name_start = name_end;
+            while name_start >= 2 && tokens[name_start - 1].text == "." && tokens[name_start - 2].kind == TokKind::Word {
+                name_start -= 2;
+            }
+            name_end = name_start;
+            let _ = name_end;
+            let intro = name_start.checked_sub(1).map(|x| &tokens[x]);
+            let introduced = intro
+                .map(|x| is_word(x, "FROM") || is_word(x, "JOIN") || is_word(x, "APPLY") || x.text == ",")
+                .unwrap_or(false);
+            if !introduced { continue; }
+            return Some(is_system_source_ext(tokens, name_start));
+        }
+        if before.kind != TokKind::Word { continue; }
+        // `<name>[.<name>…] q`: walk to the head of the dotted name.
+        let mut name_start = p - 1;
+        while name_start >= 2 && tokens[name_start - 1].text == "." && tokens[name_start - 2].kind == TokKind::Word {
+            name_start -= 2;
+        }
+        let intro = name_start.checked_sub(1).map(|x| &tokens[x]);
+        let introduced = intro
+            .map(|x| is_word(x, "FROM") || is_word(x, "JOIN") || is_word(x, "APPLY")
+                || is_word(x, "UPDATE") || is_word(x, "DELETE") || x.text == ",")
+            .unwrap_or(false);
+        if !introduced { continue; }
+        return Some(is_system_source_ext(tokens, name_start));
+    }
+    None
+}
+
+/// Do both predicates joined by the `OR` at `or_at` reference a column?
+/// Each side is scanned to the nearest boundary at its own nesting level
+/// (AND / OR / CASE keywords / the enclosing parenthesis).
+fn or_operands_are_columns(tokens: &[Token<'_>], or_at: usize) -> bool {
+    let is_boundary = |t: &Token<'_>| {
+        is_word(t, "AND") || is_word(t, "OR") || is_word(t, "WHEN") || is_word(t, "THEN")
+            || is_word(t, "ELSE") || is_word(t, "END") || is_word(t, "CASE")
+            || is_word(t, "WHERE") || is_word(t, "ON") || is_word(t, "HAVING")
+            || t.text == ";"
+    };
+    // Right side.
+    let mut depth = 0i32;
+    let mut j = or_at + 1;
+    let mut right_start = j;
+    let mut right_end = j;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; j += 1; continue; }
+        if t.text == ")" { depth -= 1; if depth < 0 { break; } j += 1; continue; }
+        if depth == 0 && is_boundary(t) { break; }
+        right_end = j + 1;
+        j += 1;
+    }
+    // A leading `(` belongs to the predicate: `OR (col = 1 AND …)`.
+    while right_start < right_end && tokens[right_start].text == "(" { right_start += 1; }
+    if !range_has_column(tokens, right_start, right_end, true) {
+        return false;
+    }
+    // Left side.
+    let mut depth = 0i32;
+    let mut k = or_at;
+    let mut left_start = or_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; continue; }
+        if t.text == "(" { depth -= 1; if depth < 0 { break; } continue; }
+        if depth == 0 && is_boundary(t) { break; }
+        left_start = k;
+    }
+    range_has_column(tokens, left_start, or_at, true)
+}
+
+/// Is the column at `col_at` drawn from a derived table that has no FROM of
+/// its own — `FROM (SELECT <expr> AS x) AS t`? Such a source is a computed
+/// row with no base table and no index.
+fn source_is_tableless_derived(tokens: &[Token<'_>], col_at: usize) -> bool {
+    let qualifier = if col_at >= 2 && tokens[col_at - 1].text == "." {
+        Some(tokens[col_at - 2].text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase())
+    } else {
+        None
+    };
+    let mut depth = 0i32;
+    let mut k = col_at;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        match t.text {
+            ")" => { depth += 1; continue; }
+            "(" => { depth -= 1; if depth < 0 { return false; } continue; }
+            _ => {}
+        }
+        if depth != 0 { continue; }
+        if is_word(t, "JOIN") || is_word(t, "APPLY") || t.text == "," {
+            return false;
+        }
+        if is_keyword_at(tokens, k, "FROM") {
+            let open = k + 1;
+            if tokens.get(open).map(|o| o.text != "(").unwrap_or(true) { return false; }
+            let Some(close) = matching_paren(tokens, open) else { return false };
+            let has_from = (open + 1..close).any(|j| is_keyword_at(tokens, j, "FROM"));
+            if has_from { return false; }
+            if let Some(q) = qualifier {
+                let mut a = close + 1;
+                if tokens.get(a).map(|x| is_word(x, "AS")).unwrap_or(false) { a += 1; }
+                return tokens.get(a)
+                    .map(|x| x.text.trim_matches(|c| c == '[' || c == ']').eq_ignore_ascii_case(&q))
+                    .unwrap_or(false);
+            }
+            return true;
+        }
+        if is_keyword_at(tokens, k, "SELECT") || t.text == ";" {
+            return false;
+        }
+    }
+    false
+}
+/// Is the `+` at `plus` part of an expression that sits on the RIGHT of a
+/// comparison whose LEFT side is a bare column? Then the concatenation builds
+/// the value being compared against, and the column itself stays seekable.
+fn concat_is_rhs_of_column_comparison(tokens: &[Token<'_>], plus: usize) -> bool {
+    let mut depth = 0i32;
+    let mut k = plus;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        match t.text {
+            ")" => { depth += 1; continue; }
+            "(" => { depth -= 1; if depth < 0 { return false; } continue; }
+            _ => {}
+        }
+        if depth != 0 { continue; }
+        let is_cmp = (t.kind == TokKind::Punct && matches!(t.text, "=" | "<" | ">"))
+            || is_word(t, "LIKE");
+        if is_cmp {
+            // Step over a NOT and a multi-char operator tail (`<>`, `!=`, `>=`).
+            let mut l = k;
+            while l > 0 && (matches!(tokens[l - 1].text, "<" | ">" | "!") || is_word(&tokens[l - 1], "NOT")) {
+                l -= 1;
+            }
+            return l > 0 && looks_like_column_at(tokens, l - 1);
+        }
+        if is_word(t, "AND") || is_word(t, "OR") || is_word(t, "WHERE") || is_word(t, "ON")
+            || is_word(t, "HAVING") || is_word(t, "WHEN") || is_word(t, "THEN") || t.text == ","
+        {
+            return false;
+        }
+    }
+    false
 }
 
 /// (a) date/time function wrapping a column on the LEFT of a `BETWEEN`, e.g.
@@ -532,10 +1111,9 @@ pub fn datetime_fn_between(ctx: &RuleCtx) -> Vec<Finding> {
     const DATE_FNS: &[&str] = &["YEAR", "MONTH", "DAY", "DATEPART", "DATENAME"];
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_pred = false;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
-        in_pred = predicate_state(t, in_pred);
-        if !in_pred || t.kind != TokKind::Word {
+        if cond[i] == 0 || t.kind != TokKind::Word {
             continue;
         }
         let upper = t.text.to_ascii_uppercase();
@@ -591,10 +1169,9 @@ pub fn datetime_fn_between(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn dateadd_on_column(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_pred = false;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
-        in_pred = predicate_state(t, in_pred);
-        if !in_pred || !is_word(t, "DATEADD") {
+        if cond[i] == 0 || !is_word(t, "DATEADD") {
             continue;
         }
         let Some(open) = tokens.get(i + 1) else { continue };
@@ -645,11 +1222,10 @@ pub fn dateadd_on_column(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn string_concat_in_predicate(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_pred = false;
+    let cond = search_condition_ids(tokens);
     let mut last_emit_line = u32::MAX;
     for (i, t) in tokens.iter().enumerate() {
-        in_pred = predicate_state(t, in_pred);
-        if !in_pred || t.kind != TokKind::Punct || t.text != "+" {
+        if cond[i] == 0 || t.kind != TokKind::Punct || t.text != "+" {
             continue;
         }
         let Some(prev) = (if i > 0 { tokens.get(i - 1) } else { None }) else { continue };
@@ -658,12 +1234,20 @@ pub fn string_concat_in_predicate(ctx: &RuleCtx) -> Vec<Finding> {
         // a string literal, AND at least one operand is a column. This filters out
         // numeric arithmetic (already handled) and literal+literal expressions.
         let prev_str = prev.kind == TokKind::String;
-        let next_str = next.kind == TokKind::String;
-        let prev_col = looks_like_column(prev);
-        let next_col = looks_like_column(next);
+        let next_str = next.kind == TokKind::String
+            || (is_word(next, "N") && tokens.get(i + 2).map(|s| s.kind == TokKind::String).unwrap_or(false));
+        let prev_col = looks_like_column_at(tokens, i - 1);
+        let next_col = looks_like_column_at(tokens, i + 1);
         let has_string = prev_str || next_str;
         let has_column = prev_col || next_col;
         if !(has_string && has_column) {
+            continue;
+        }
+        // `the_path NOT LIKE '%.' + CONVERT(varchar, s.session_id) + '.%'`:
+        // the concatenation builds the *pattern* and the compared column stays
+        // bare on the other side. Only a column wrapped on its own side of the
+        // comparison loses the seek.
+        if concat_is_rhs_of_column_comparison(tokens, i) {
             continue;
         }
         // Anchor the finding at the column operand for line precision.
@@ -695,10 +1279,9 @@ pub fn string_concat_in_predicate(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn charindex_search_predicate(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    let mut in_pred = false;
+    let cond = search_condition_ids(tokens);
     for (i, t) in tokens.iter().enumerate() {
-        in_pred = predicate_state(t, in_pred);
-        if !in_pred || t.kind != TokKind::Word {
+        if cond[i] == 0 || t.kind != TokKind::Word {
             continue;
         }
         let upper = t.text.to_ascii_uppercase();
@@ -710,6 +1293,18 @@ pub fn charindex_search_predicate(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         }
         let Some(close) = matching_paren(tokens, i + 1) else { continue };
+        // The needle must be a literal or variable and the haystack a column:
+        // `CHARINDEX(a.cols, b.cols)` compares two columns (no LIKE-literal
+        // rewrite exists) and `CHARINDEX(',', @list, t + 1)` searches a
+        // variable (no column, no index).
+        let args = call_args(tokens, i + 1, close);
+        let (Some(&needle), Some(&hay)) = (args.get(0), args.get(1)) else { continue };
+        if range_has_column(tokens, needle.0, needle.1, true) {
+            continue;
+        }
+        if !range_has_column(tokens, hay.0, hay.1, true) {
+            continue;
+        }
         // require a `> 0` (or `>= 1`) after the close paren — the substring-found test.
         let mut k = close + 1;
         while k < tokens.len() && tokens[k].kind == TokKind::Comment {
@@ -847,6 +1442,31 @@ mod sargability_deep_tests {
     }
 
     // --- sarg.string_concat_in_predicate ---
+    #[test]
+    fn scalar_udf_dedupes_per_statement_line() {
+        let f = run(
+            scalar_udf_in_where,
+            "SELECT 1 FROM dbo.T AS t WHERE dbo.fnA(t.x) = dbo.fnB(t.y);",
+        );
+        assert_eq!(f.iter().filter(|x| x.rule.0 == "sarg.scalar_udf_in_predicate").count(), 1);
+        let f = run(
+            scalar_udf_in_where,
+            "SELECT 1 FROM dbo.T AS t WHERE dbo.fnA(t.x) = 1\n  AND dbo.fnB(t.y) = 2;",
+        );
+        assert_eq!(f.iter().filter(|x| x.rule.0 == "sarg.scalar_udf_in_predicate").count(), 2);
+    }
+
+    #[test]
+    fn implicit_convert_resolves_statement_local_sys_alias() {
+        // `c` is a user alias elsewhere in the file; the statement's own
+        // `FROM sys.configurations AS c` must win.
+        let sql = "SELECT c.id FROM dbo.Customers AS c WHERE c.name = N'x';\n\
+                   SELECT 1 FROM sys.configurations AS c WHERE c.name = N'blocked process threshold (s)';";
+        let f = run(implicit_convert_unicode, sql);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].location.as_ref().unwrap().line, 1);
+    }
+
     #[test]
     fn string_concat_fires() {
         assert_fires(
@@ -1035,7 +1655,7 @@ fn declared_column_families(
 /// Only `DECLARE` lists and module parameter headers declare anything.
 fn declared_variable_families(tokens: &[Token<'_>]) -> std::collections::HashMap<String, Option<StrFamily>> {
     let mut out: std::collections::HashMap<String, Option<StrFamily>> = std::collections::HashMap::new();
-    let mut record = |out: &mut std::collections::HashMap<String, Option<StrFamily>>, name: &str, fam: Option<StrFamily>| {
+    let record = |out: &mut std::collections::HashMap<String, Option<StrFamily>>, name: &str, fam: Option<StrFamily>| {
         let key = name.to_ascii_lowercase();
         match (out.get(&key), fam) {
             // Re-declared with a different family: we cannot tell which one a

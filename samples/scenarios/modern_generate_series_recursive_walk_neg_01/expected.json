@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "modern.generate_series_replaces_numbers_cte"
+  ],
+  "also_fires": [
+    "hygiene.select_star"
+  ],
+  "server_version": 2022,
+  "category": "modern"
+}

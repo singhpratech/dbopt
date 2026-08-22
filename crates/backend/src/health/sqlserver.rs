@@ -33,6 +33,7 @@ impl HealthProvider for SqlServerHealthProvider {
         // Monitor read-back: how persistently the missing-index DMV has
         // suggested each table across daily snapshots (empty if unmonitored).
         sentinel_api::attach_missing_index_history(&mut bundle, req);
+        sentinel_api::attach_index_usage_history(&mut bundle, req);
 
         // b + c. Advisor recs + static findings off the same bundle.
         let recs = dmv::advise(&bundle);
@@ -53,6 +54,11 @@ impl HealthProvider for SqlServerHealthProvider {
 
         // --- static findings -> Issue -------------------------------------
         for f in &advice.findings {
+            // Carried by an advisor rec (with DDL + evidence chips) — the
+            // finding is the same fact without the fix.
+            if RULES_CARRIED_BY_RECS.contains(&f.rule.0.as_str()) {
+                continue;
+            }
             let severity = severity_str(f.severity);
             // Lane by consequence: critical/error findings are correctness /
             // user-facing risks (reliability); warning/info are opportunities.
@@ -209,22 +215,27 @@ impl HealthProvider for SqlServerHealthProvider {
         // background waits (SOS_WORK_DISPATCHER, PVS_PREALLOCATE, PREEMPTIVE_XE_*,
         // …) are noise and must never ding the Reliability grade.
         let wait_label = pain.top_wait_type.clone().unwrap_or_default();
-        if pain.top_wait_time_ms > 120_000 && is_actionable_wait(&wait_label) {
+        // ≥ 120 s over the window is a warning; ≥ 30 s is an info card that
+        // still names the wait and what to look at — never a bare number.
+        if pain.top_wait_time_ms >= 30_000 && is_actionable_wait(&wait_label) {
+            let severity = if pain.top_wait_time_ms > 120_000 { "warning" } else { "info" };
             issues.push(Issue {
                 id: format!("sentinel:wait:{wait_label}"),
                 source: "sentinel".to_string(),
                 kind: "wait".to_string(),
-                severity: "warning".to_string(),
+                severity: severity.to_string(),
                 lane: "reliability".to_string(),
-                consequence: format!(
-                    "The server spends most of its time waiting on {wait_label} — everything runs slower."
-                ),
+                consequence: if severity == "warning" {
+                    format!("The server spends most of its time waiting on {wait_label} — everything runs slower.")
+                } else {
+                    format!("{wait_label} is the top wait over the window ({:.1} s) — modest so far; worth knowing what drives it.", pain.top_wait_time_ms as f64 / 1000.0)
+                },
                 impact_rank: ((pain.top_wait_time_ms / 1000).clamp(0, 10000)) as u32,
-                title: format!("High {wait_label} waits"),
+                title: if severity == "warning" { format!("High {wait_label} waits") } else { format!("Top wait: {wait_label}") },
                 affected_object: "server".to_string(),
                 rationale: format!(
-                    "Top wait type {} accumulated {} ms over the window. Investigate the workload driving this wait category.",
-                    wait_label, pain.top_wait_time_ms
+                    "Top wait type {} accumulated {} ms over the window. {}",
+                    wait_label, pain.top_wait_time_ms, wait_advice(&wait_label)
                 ),
                 fix_sql: None,
                 fix_action: "investigate".to_string(),
@@ -369,7 +380,18 @@ impl HealthProvider for SqlServerHealthProvider {
                 RecKind::DropIndex => signals.unused_indexes += 1,
                 RecKind::MergeIndex => signals.duplicate_indexes += 1,
                 RecKind::ColumnstoreCandidate => signals.columnstore_candidates += 1,
+                RecKind::RebuildIndex => signals.fragmented_indexes += 1,
+                RecKind::UpdateStatistics => signals.stale_statistics += 1,
+                RecKind::AlterColumnType => signals.deprecated_columns += 1,
+                RecKind::ParameterSniffing => signals.sniffing_queries += 1,
             }
+        }
+        // A wait is listed as a signal only when it produced an issue above:
+        // a headline "top wait LATCH_EX 49 s" with nothing attached to it is a
+        // number the reader cannot act on.
+        if !issues.iter().any(|i| i.kind == "wait") {
+            signals.top_wait_type = None;
+            signals.top_wait_time_ms = 0;
         }
 
         // h. Score (per-lane). Back-compat headline mirrors the reliability lane.
@@ -379,9 +401,16 @@ impl HealthProvider for SqlServerHealthProvider {
         //    falls inside it: a 7-day history that ended 86 days ago is a
         //    fossil, and must not promote "no signals" to a mature all-clear.
         let last_capture_secs = sentinel_api::last_capture_secs();
-        let window_secs = (report.window_to - report.window_from).num_seconds().max(0);
-        let telemetry_is_current = last_capture_secs.map(|s| s <= window_secs).unwrap_or(false);
-        let monitoring_secs = if telemetry_is_current {
+        // "Monitoring for 86 days" is only true while the monitor is running:
+        // the newest capture must be recent (the slowest poller runs every
+        // few minutes). A store whose last sample is older than that is a
+        // stopped monitor, and the report says so instead of quoting its span.
+        let monitor_state = match last_capture_secs {
+            None => "never",
+            Some(s) if s <= MONITOR_LIVE_SECS => "running",
+            Some(_) => "stopped",
+        };
+        let monitoring_secs = if monitor_state == "running" {
             sentinel_api::monitoring_age_secs()
         } else {
             None
@@ -424,6 +453,7 @@ impl HealthProvider for SqlServerHealthProvider {
             action_plan,
             is_learning: scores.is_learning,
             monitoring_age_secs: monitoring_secs,
+            monitor_state: monitor_state.to_string(),
             last_capture_secs,
             counter_age_secs: bundle.counter_age_secs,
             counters_since: bundle.counters_since.clone(),
@@ -446,6 +476,10 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         RecKind::DropIndex => "unused_index",
         RecKind::MergeIndex => "duplicate_index",
         RecKind::ColumnstoreCandidate => "columnstore_candidate",
+        RecKind::RebuildIndex => "fragmented_index",
+        RecKind::UpdateStatistics => "stale_statistics",
+        RecKind::AlterColumnType => "deprecated_type",
+        RecKind::ParameterSniffing => "parameter_sniffing",
     };
     let severity = match rec.priority.as_str() {
         "high" | "medium" => "warning",
@@ -479,14 +513,35 @@ fn rec_to_issue(rec: &Recommendation) -> Issue {
         }
         RecKind::DropIndex => {
             // observed — measured write counters + reclaimed storage.
-            match (metric("Storage reclaimed"), metric("Writes maintained")) {
-                (Some(storage), Some(writes)) => format!(
+            match (metric("Storage reclaimed"), metric("Writes maintained"), metric("Storage")) {
+                (Some(storage), Some(writes), _) => format!(
                     "Dropping it reclaims {} and removes {} writes/window for zero reads.",
                     storage, writes
+                ),
+                (None, None, Some(storage)) => format!(
+                    "Neither read nor written since the counters began; it holds {} and will cost a write on every change once writes arrive.",
+                    storage
                 ),
                 _ => "Written on every change but never read — wasted write cost and storage.".to_string(),
             }
         }
+        RecKind::RebuildIndex => match (metric("Fragmentation"), metric("Fill factor"), metric("Leaf pages")) {
+            (Some(frag), _, Some(pages)) => format!("{frag} fragmented across {pages} leaf pages — range reads touch pages out of order and read more than the data needs."),
+            (_, Some(ff), Some(pages)) => format!("Fill factor {ff} keeps {pages} pages part-empty for writes that are not arriving — every scan reads roughly twice the pages it should."),
+            _ => "Physical layout of this index is costing reads; rebuild it.".to_string(),
+        },
+        RecKind::UpdateStatistics => match (metric("Modified"), metric("Auto-update")) {
+            (Some(pct), Some(auto)) => format!("The histogram is {pct} out of date (auto-update {auto}) — the optimizer misestimates row counts on this table and picks wrong plans and memory grants."),
+            _ => "Stale statistics mislead the optimizer into wrong plans.".to_string(),
+        },
+        RecKind::AlterColumnType => match metric("Column type") {
+            Some(t) => format!("{t} is a deprecated LOB type: string functions, ORDER BY/DISTINCT and modern tooling cannot use it, and it is slated for removal."),
+            _ => "Deprecated column type.".to_string(),
+        },
+        RecKind::ParameterSniffing => match (metric("Swing"), metric("Plans")) {
+            (Some(swing), Some(plans)) => format!("Same statement, {plans} plans, per-execution reads swing {swing} — some callers get a plan compiled for a very different parameter value and pay for it."),
+            _ => "Plan reuse across skewed parameter values is costing some callers heavily.".to_string(),
+        },
         RecKind::MergeIndex => {
             // observed — reclaimed storage + halved write maintenance.
             match (metric("Storage"), metric("Reads")) {
@@ -573,6 +628,17 @@ fn advisor_metric_source(kind: RecKind, label: &str) -> Option<String> {
             // "Rows", "Size", and anything else come from partition stats.
             _ => "sys.dm_db_partition_stats",
         },
+        RecKind::RebuildIndex => match label {
+            "Fill factor" => "sys.indexes",
+            "Reads / writes" => "sys.dm_db_index_usage_stats",
+            _ => "sys.dm_db_index_physical_stats",
+        },
+        RecKind::UpdateStatistics => match label {
+            "Auto-update" => "sys.stats",
+            _ => "sys.dm_db_stats_properties",
+        },
+        RecKind::AlterColumnType => "sys.columns / sys.types",
+        RecKind::ParameterSniffing => "sys.query_store_runtime_stats + sys.query_store_plan",
     };
     Some(src.to_string())
 }
@@ -597,6 +663,14 @@ fn impact_rank_for(rec: &Recommendation) -> u32 {
                 let mb = (kb / 1024.0).max(1.0);
                 (1000.0 + (mb.log10() / 6.0).clamp(0.0, 1.0) * 4000.0).round() as u32
             }
+        }
+        // Raw magnitudes (pages × fragmentation, modification counters,
+        // logical reads, rows) span many orders: rank them on a log scale so
+        // a 600k-modification stat and a 2.9M-read sniff both land high
+        // without every one pinning at 10000.
+        RecKind::RebuildIndex | RecKind::UpdateStatistics | RecKind::AlterColumnType | RecKind::ParameterSniffing => {
+            let v = rec.impact_score.max(0.0);
+            ((1.0 + v).log10() * 1400.0).round().clamp(0.0, 10000.0) as u32
         }
         RecKind::CreateIndex | RecKind::DropIndex | RecKind::ColumnstoreCandidate => {
             let v = rec.impact_score.round();
@@ -725,6 +799,44 @@ fn human_kb(kb: u64) -> String {
     } else {
         format!("{kb} KB")
     }
+}
+
+/// Static-finding rules whose fact is ALSO emitted as an advisor rec (with
+/// DDL + evidence chips); the rec is the card, the finding would duplicate it.
+const RULES_CARRIED_BY_RECS: &[&str] = &["structure.deprecated_lob_type"];
+
+/// Newest sentinel capture must be at most this old for the monitor to count
+/// as running (the slowest regular poller is the 5-minute report capture).
+const MONITOR_LIVE_SECS: i64 = 15 * 60;
+
+/// What to look at for an actionable wait type — the sentence that turns a
+/// wait name into an investigation.
+fn wait_advice(w: &str) -> String {
+    let tip = if w.starts_with("PAGEIOLATCH_") {
+        "Pages are being read from disk: check buffer-pool headroom (PLE), the biggest scan-heavy queries, and storage read latency in sys.dm_io_virtual_file_stats."
+    } else if w.starts_with("LCK_M_") {
+        "Lock waits: find the blocking chain (sys.dm_exec_requests.blocking_session_id), long transactions, and scans on tables that should be seeked."
+    } else if w.starts_with("PAGELATCH_") {
+        "In-memory page contention — classically tempdb allocation pages or a last-page insert hotspot on an ever-increasing key; check sys.dm_os_waiting_tasks for the resource."
+    } else if w.starts_with("LATCH_") {
+        "Non-buffer latch contention: look at sys.dm_os_latch_stats for the latch class. Heaps with forwarded records, parallel scans and ACCESS_METHODS_* latches are the usual sources — the heap findings in this report are the first place to look."
+    } else {
+        match w {
+            "WRITELOG" => "Log-flush waits: transaction-log write latency (sys.dm_io_virtual_file_stats on the log file) or many tiny auto-commit transactions; batch the writes or move the log to faster storage.",
+            "CXPACKET" | "CXCONSUMER" => "Parallelism waits: usually a low cost threshold for parallelism and MAXDOP 0 on a big box — see the operational checks — plus the scan-heavy queries that go parallel.",
+            "SOS_SCHEDULER_YIELD" => "CPU pressure: runnable tasks are yielding the scheduler. Find the top-CPU queries in Query Store and the plans that scan instead of seek.",
+            "RESOURCE_SEMAPHORE" => "Memory-grant waits: queries are queuing for workspace memory. Look for big sorts/hashes (SELECT * with ORDER BY, missing indexes) and the grants Query Store records.",
+            "RESOURCE_SEMAPHORE_QUERY_COMPILE" => "Compile-memory waits: too many concurrent compiles — plan-cache churn from non-parameterised SQL or OPTION (RECOMPILE) everywhere.",
+            "ASYNC_NETWORK_IO" => "The client is slow to consume results: applications pulling large result sets row by row, or SELECT * over the network.",
+            "THREADPOOL" => "Worker-thread starvation: a blocking chain or a parallel storm has exhausted max worker threads; resolve the blocking first.",
+            "IO_COMPLETION" | "ASYNC_IO_COMPLETION" => "Non-data-page I/O (tempdb spills, backups, sorts): check spill warnings in plans and tempdb I/O latency.",
+            "BACKUPIO" => "Backup I/O: the backup target is the bottleneck; compress, stripe, or move the backup window.",
+            "HADR_SYNC_COMMIT" => "Synchronous-replica commit latency: the secondary or the network between replicas is slow to harden the log.",
+            "MEMORY_ALLOCATION_EXT" => "Memory allocation waits: the instance is under memory pressure; check max server memory and memory-hungry plans.",
+            _ => "Investigate the workload driving this wait category.",
+        }
+    };
+    tip.to_string()
 }
 
 /// Allowlist of waits a DBA can actually act on. We only raise a reliability

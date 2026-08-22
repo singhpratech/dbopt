@@ -1,0 +1,9 @@
+{
+  "also_fires": [],
+  "category": "sargability",
+  "must_fire": [],
+  "must_not_fire": [
+    "sarg.implicit_convert_unicode"
+  ],
+  "server_version": 2022
+}

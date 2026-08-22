@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["modern.missing_set_nocount"],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "modern"
+}

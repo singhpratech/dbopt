@@ -1,0 +1,12 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "tempdb.spill_risk_large_sort"
+  ],
+  "also_fires": [
+    "deprecated.set_rowcount_dml",
+    "modern.missing_schema_prefix"
+  ],
+  "server_version": 2022,
+  "category": "tempdb"
+}

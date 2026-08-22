@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "modern.sp_executesql_optimized_2025"
+  ],
+  "category": "joins",
+  "must_fire": [],
+  "must_not_fire": [
+    "joins.comma_cross_join"
+  ],
+  "server_version": 2022
+}

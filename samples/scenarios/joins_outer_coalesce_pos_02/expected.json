@@ -1,0 +1,11 @@
+{
+  "must_fire": [
+    "joins.outer_join_filtered_to_inner"
+  ],
+  "must_not_fire": [],
+  "also_fires": [
+    "sarg.function_on_column"
+  ],
+  "server_version": 2022,
+  "category": "joins"
+}

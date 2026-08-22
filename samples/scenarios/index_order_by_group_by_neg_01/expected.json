@@ -1,0 +1,13 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "index.order_by_forces_sort"
+  ],
+  "also_fires": [
+    "index.missing_columnstore_opportunity",
+    "index.missing_index_from_predicate",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "server_version": 2022,
+  "category": "index"
+}

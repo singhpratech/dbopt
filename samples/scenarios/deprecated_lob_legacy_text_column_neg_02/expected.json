@@ -1,0 +1,12 @@
+{
+  "also_fires": [
+    "sarg.leading_wildcard",
+    "tempdb.spill_risk_large_sort"
+  ],
+  "category": "deprecated",
+  "must_fire": [],
+  "must_not_fire": [
+    "deprecated.lob_legacy_types"
+  ],
+  "server_version": 2022
+}

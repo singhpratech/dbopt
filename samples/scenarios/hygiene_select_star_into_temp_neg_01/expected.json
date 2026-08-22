@@ -1,0 +1,12 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.select_star"
+  ],
+  "also_fires": [
+    "modern.missing_schema_prefix",
+    "sarg.not_in_nullable"
+  ],
+  "server_version": 2022,
+  "category": "hygiene"
+}

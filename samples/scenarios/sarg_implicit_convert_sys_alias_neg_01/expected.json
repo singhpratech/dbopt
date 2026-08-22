@@ -1,0 +1,7 @@
+{
+  "must_fire": [],
+  "must_not_fire": ["sarg.implicit_convert_unicode"],
+  "also_fires": ["index.missing_index_from_predicate", "modern.missing_schema_prefix"],
+  "server_version": 2022,
+  "category": "sargability"
+}

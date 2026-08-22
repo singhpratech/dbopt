@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.top_without_order_by"
+  ],
+  "category": "joins",
+  "must_fire": [],
+  "must_not_fire": [
+    "joins.comma_cross_join"
+  ],
+  "server_version": 2022
+}

@@ -1,0 +1,11 @@
+{
+  "also_fires": [
+    "hygiene.heap_table"
+  ],
+  "category": "plan",
+  "must_fire": [],
+  "must_not_fire": [
+    "plan.scalar_udf_in_computed_column"
+  ],
+  "server_version": 2022
+}

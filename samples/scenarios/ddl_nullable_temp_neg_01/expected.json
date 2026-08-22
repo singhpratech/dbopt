@@ -1,0 +1,9 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "ddl.nullable_columns_should_be_explicit"
+  ],
+  "also_fires": [],
+  "server_version": 2022,
+  "category": "ddl"
+}

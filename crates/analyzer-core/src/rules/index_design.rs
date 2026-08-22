@@ -28,6 +28,12 @@ fn skip_comments(tokens: &[Token<'_>], from: usize) -> usize {
 /// Locate `CREATE TABLE` statements and return (open_paren_idx, close_paren_idx)
 /// of the column-list. Skips comments. Returns empty list if none found.
 fn create_table_bodies(tokens: &[Token<'_>]) -> Vec<(usize, usize)> {
+    create_table_bodies_named(tokens).into_iter().map(|(_, o, c)| (o, c)).collect()
+}
+
+/// Like `create_table_bodies`, with the normalized table name (last dotted
+/// segment, e.g. `#locks`, `orders`) so callers can skip temp tables.
+fn create_table_bodies_named(tokens: &[Token<'_>]) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -50,7 +56,10 @@ fn create_table_bodies(tokens: &[Token<'_>]) -> Vec<(usize, usize)> {
             }
             m += 1;
         }
-        if m < tokens.len() { out.push((k, m)); i = m + 1; } else { break; }
+        if m < tokens.len() {
+            out.push((table_name_after(tokens, j), k, m));
+            i = m + 1;
+        } else { break; }
     }
     out
 }
@@ -111,6 +120,378 @@ fn range_has_seq(tokens: &[Token<'_>], start: usize, end: usize, a: &str, b: &st
 /// Returns true if range contains the given keyword (case-insensitive Word match).
 fn range_has_kw(tokens: &[Token<'_>], start: usize, end: usize, kw: &str) -> bool {
     (start..end).any(|i| is_word(&tokens[i], kw))
+}
+
+
+// ===========================================================================
+// Shared "what kind of object is this predicate really about?" helpers.
+//
+// Index / statistics / locking advice only makes sense against a persistent
+// base table. Real-world T-SQL (maintenance procs, diagnostic tools) spends
+// most of its time querying `@table` variables, `#temp` tables, CTEs, DMVs,
+// catalog views and table-valued functions — none of which can take a
+// CREATE INDEX, a filtered index, a columnstore, or benefit from batching.
+// These helpers resolve the sources of a statement so rules can stay silent
+// when every source is non-indexable.
+// ===========================================================================
+
+/// Does this identifier text name a `#temp` / `##global` table or a `@table`
+/// variable? (The lexer keeps the sigil inside the Word token.)
+pub(crate) fn is_temp_or_var(text: &str) -> bool {
+    let t = text.trim_start_matches(|c| c == '[' || c == '"');
+    t.starts_with('#') || t.starts_with('@')
+}
+
+/// Strip `[]` / `""` delimiters and lowercase, for name comparisons.
+pub(crate) fn norm_ident(text: &str) -> String {
+    text.trim_matches(|c| c == '[' || c == ']' || c == '"').to_ascii_lowercase()
+}
+
+/// System objects nobody can index: `sys.*`, `INFORMATION_SCHEMA.*`, anything
+/// living in `master` / `msdb` / `model`, and the bare compatibility views.
+/// `name` is a normalized dotted reference (`msdb.dbo.sysjobs`, `sys.tables`).
+pub(crate) fn is_system_source(name: &str) -> bool {
+    let segs: Vec<&str> = name.split('.').map(|s| s.trim_matches(|c| c == '[' || c == ']' || c == '"')).collect();
+    if segs.iter().any(|s| *s == "sys" || *s == "information_schema") {
+        return true;
+    }
+    if segs.len() >= 3 && matches!(segs[0], "master" | "msdb" | "model") {
+        return true;
+    }
+    if segs.len() == 2 && matches!(segs[0], "master" | "msdb" | "model") {
+        return true;
+    }
+    const COMPAT: &[&str] = &[
+        "sysobjects", "syscolumns", "sysindexes", "sysindexkeys", "sysusers", "syslogins",
+        "sysprocesses", "sysdatabases", "sysfiles", "sysaltfiles", "sysconstraints",
+        "sysreferences", "systypes", "syscomments", "sysdepends", "sysforeignkeys",
+        "sysmembers", "syspermissions", "sysprotects", "sysfilegroups", "syscacheobjects",
+        "syslockinfo", "syscurconfigs", "sysconfigures", "sysperfinfo", "sysservers",
+        "syscharsets", "syslanguages", "sysmessages", "sysremotelogins", "syscursors",
+        "sysjobs", "sysjobhistory", "sysjobactivity", "sysjobsteps", "sysjobschedules",
+        "sysschedules", "sysalerts", "sysoperators", "sysssispackages", "syscategories",
+        "sysmail_allitems", "sysmail_profile", "sysmail_account",
+        "backupset", "backupmediafamily", "backupfile", "restorehistory", "restorefile",
+        "dtproperties",
+    ];
+    let last = segs.last().copied().unwrap_or("");
+    if COMPAT.contains(&last) {
+        // `dbo.backupset` / `backupset` only mean msdb's table when not under a
+        // user schema; a user `app.backupset` stays indexable.
+        return segs.len() == 1 || (segs.len() == 2 && segs[0] == "dbo");
+    }
+    false
+}
+
+/// Batch number of every token (a `GO` alone on its line starts a new batch).
+pub(crate) fn batch_ids(tokens: &[Token<'_>]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut b = 0u32;
+    for i in 0..tokens.len() {
+        if super::is_batch_separator(tokens, i) { b += 1; }
+        out.push(b);
+    }
+    out
+}
+
+/// Names bound by `WITH name [(cols)] AS (` / `, name [(cols)] AS (`, keyed by
+/// batch (a CTE does not survive `GO`).
+pub(crate) fn cte_name_set(tokens: &[Token<'_>]) -> std::collections::HashSet<(u32, String)> {
+    let batches = batch_ids(tokens);
+    let mut names = std::collections::HashSet::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if !(is_word(t, "WITH") || t.text == ",") { continue; }
+        let n = skip_comments(tokens, i + 1);
+        let Some(name) = tokens.get(n) else { continue };
+        if name.kind != TokKind::Word || is_temp_or_var(name.text) { continue; }
+        let mut k = skip_comments(tokens, n + 1);
+        // optional column list
+        if tokens.get(k).map(|x| x.text) == Some("(") {
+            let mut depth = 0i32;
+            while k < tokens.len() {
+                if tokens[k].text == "(" { depth += 1; }
+                else if tokens[k].text == ")" { depth -= 1; if depth == 0 { k += 1; break; } }
+                k += 1;
+            }
+            k = skip_comments(tokens, k);
+        }
+        if !tokens.get(k).map(|x| is_word(x, "AS")).unwrap_or(false) { continue; }
+        let p = skip_comments(tokens, k + 1);
+        if tokens.get(p).map(|x| x.text) != Some("(") { continue; }
+        names.insert((batches[i], norm_ident(name.text)));
+    }
+    names
+}
+
+/// One source in a FROM / JOIN / UPDATE / DELETE position.
+pub(crate) struct SourceRef {
+    /// Token index of the first identifier (or `(` for a derived table).
+    pub tok: usize,
+    /// Normalized dotted name; empty for a derived table.
+    pub name: String,
+    pub alias: Option<String>,
+    /// Derived table (`(SELECT ...)`, `(VALUES ...)`) or a TVF call.
+    pub derived: bool,
+    /// Source sits on the null-extended side of an outer join.
+    pub outer: bool,
+}
+
+fn is_clause_kw(t: &Token<'_>) -> bool {
+    ["WHERE", "GROUP", "ORDER", "HAVING", "OPTION", "SET", "ON", "UNION", "EXCEPT", "INTERSECT",
+     "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER", "APPLY", "FOR", "PIVOT", "UNPIVOT",
+     "OUTPUT", "WITH", "TABLESAMPLE", "SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "INTO", "VALUES",
+     "WHEN", "USING", "MERGE", "RETURNS", "GO", "END", "BEGIN", "IF", "WHILE", "ELSE", "DECLARE", "EXEC",
+     "EXECUTE", "RETURN", "PRINT", "RAISERROR", "THROW", "CLOSE", "OPEN", "FETCH", "DEALLOCATE",
+     "COMMIT", "ROLLBACK", "TRUNCATE", "DROP", "CREATE", "ALTER", "GRANT", "REVOKE", "DENY"]
+        .iter().any(|k| is_word(t, k))
+}
+
+/// Read one source item starting at `k` (bounded by `end`). Returns the
+/// source and the index just past it (past the alias, if any).
+fn read_source(tokens: &[Token<'_>], k: usize, end: usize, outer: bool) -> Option<(SourceRef, usize)> {
+    let k = skip_comments(tokens, k);
+    if k >= end { return None; }
+    let t = &tokens[k];
+    if t.text == "(" {
+        // derived table / VALUES — skip to matching paren
+        let mut depth = 0i32;
+        let mut m = k;
+        while m < end {
+            if tokens[m].text == "(" { depth += 1; }
+            else if tokens[m].text == ")" { depth -= 1; if depth == 0 { break; } }
+            m += 1;
+        }
+        let mut p = skip_comments(tokens, m + 1);
+        let mut alias = None;
+        if p < end && is_word(&tokens[p], "AS") { p = skip_comments(tokens, p + 1); }
+        if p < end && tokens[p].kind == TokKind::Word && !is_clause_kw(&tokens[p]) {
+            alias = Some(norm_ident(tokens[p].text));
+            p += 1;
+        }
+        return Some((SourceRef { tok: k, name: String::new(), alias, derived: true, outer }, p));
+    }
+    if t.kind != TokKind::Word || is_clause_kw(t) { return None; }
+    // dotted name
+    let mut name = norm_ident(t.text);
+    let mut p = k + 1;
+    loop {
+        let d = skip_comments(tokens, p);
+        if d < end && tokens[d].text == "." {
+            let n = skip_comments(tokens, d + 1);
+            if n < end && tokens[n].kind == TokKind::Word {
+                name.push('.');
+                name.push_str(&norm_ident(tokens[n].text));
+                p = n + 1;
+                continue;
+            }
+        }
+        p = d;
+        break;
+    }
+    let mut derived = false;
+    // TVF call: name followed by `(`
+    if p < end && tokens[p].text == "(" {
+        derived = true;
+        let mut depth = 0i32;
+        let mut m = p;
+        while m < end {
+            if tokens[m].text == "(" { depth += 1; }
+            else if tokens[m].text == ")" { depth -= 1; if depth == 0 { break; } }
+            m += 1;
+        }
+        p = skip_comments(tokens, m + 1);
+    }
+    let mut alias = None;
+    if p < end && is_word(&tokens[p], "AS") { p = skip_comments(tokens, p + 1); }
+    if p < end && tokens[p].kind == TokKind::Word && !is_clause_kw(&tokens[p]) {
+        alias = Some(norm_ident(tokens[p].text));
+        p += 1;
+    }
+    // table hint `WITH (NOLOCK)` — skip
+    let h = skip_comments(tokens, p);
+    if h < end && is_word(&tokens[h], "WITH") && tokens.get(h + 1).map(|x| x.text) == Some("(") {
+        let mut depth = 0i32;
+        let mut m = h + 1;
+        while m < end {
+            if tokens[m].text == "(" { depth += 1; }
+            else if tokens[m].text == ")" { depth -= 1; if depth == 0 { break; } }
+            m += 1;
+        }
+        p = m + 1;
+    }
+    Some((SourceRef { tok: k, name, alias, derived, outer }, p))
+}
+
+/// Every depth-0 source of the statement in `[start, end)`: the UPDATE / DELETE
+/// target, every FROM item (comma list) and every JOIN / APPLY item.
+pub(crate) fn statement_sources(tokens: &[Token<'_>], start: usize, end: usize) -> Vec<SourceRef> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut i = start;
+    let mut outer_pending = false;
+    while i < end {
+        let t = &tokens[i];
+        if t.text == "(" { depth += 1; i += 1; continue; }
+        if t.text == ")" { depth -= 1; i += 1; continue; }
+        if depth != 0 || t.kind != TokKind::Word { i += 1; continue; }
+        if is_word(t, "LEFT") || is_word(t, "RIGHT") || is_word(t, "FULL") { outer_pending = true; }
+        else if is_word(t, "INNER") || is_word(t, "CROSS") { outer_pending = false; }
+        let is_from = is_word(t, "FROM");
+        let is_join = is_word(t, "JOIN") || is_word(t, "APPLY");
+        let is_target = (is_word(t, "UPDATE") || is_word(t, "DELETE")) && i == start;
+        if !(is_from || is_join || is_target) { i += 1; continue; }
+        let mut k = skip_comments(tokens, i + 1);
+        if is_target && k < end && is_word(&tokens[k], "FROM") { k = skip_comments(tokens, k + 1); }
+        if is_target && k < end && is_word(&tokens[k], "TOP") {
+            // skip TOP (n) / TOP n
+            k = skip_comments(tokens, k + 1);
+            if k < end && tokens[k].text == "(" {
+                let mut d = 0i32;
+                while k < end { if tokens[k].text == "(" { d += 1; } else if tokens[k].text == ")" { d -= 1; if d == 0 { k += 1; break; } } k += 1; }
+            } else { k += 1; }
+            k = skip_comments(tokens, k);
+        }
+        let outer = is_join && outer_pending;
+        outer_pending = false;
+        let mut any = false;
+        loop {
+            let Some((src, next)) = read_source(tokens, k, end, outer) else { break };
+            any = true;
+            out.push(src);
+            let c = skip_comments(tokens, next);
+            // comma list only after FROM
+            if is_from && c < end && tokens[c].text == "," { k = c + 1; continue; }
+            k = next;
+            break;
+        }
+        i = if any { k.max(i + 1) } else { i + 1 };
+    }
+    out
+}
+
+/// Can nobody create an index on this source? (temp / table variable /
+/// derived / TVF / CTE / system object)
+pub(crate) fn source_non_indexable(
+    src: &SourceRef,
+    ctes: &std::collections::HashSet<(u32, String)>,
+    batch: u32,
+) -> bool {
+    if src.derived { return true; }
+    if is_temp_or_var(&src.name) { return true; }
+    if is_system_source(&src.name) { return true; }
+    if !src.name.contains('.') && ctes.contains(&(batch, src.name.clone())) { return true; }
+    false
+}
+
+/// True when the statement has at least one source and *every* source is
+/// non-indexable. A bare alias reference (`UPDATE t ... FROM @x t`) is resolved
+/// against the aliases of the other sources and never counted by itself.
+pub(crate) fn all_sources_non_indexable(
+    tokens: &[Token<'_>],
+    start: usize,
+    end: usize,
+    ctes: &std::collections::HashSet<(u32, String)>,
+    batch: u32,
+) -> bool {
+    let srcs = statement_sources(tokens, start, end);
+    let mut any = false;
+    for s in &srcs {
+        if !s.derived && !s.name.contains('.') {
+            let is_alias_ref = srcs.iter().any(|o| o.alias.as_deref() == Some(s.name.as_str()) && o.tok != s.tok);
+            if is_alias_ref { continue; }
+        }
+        any = true;
+        if !source_non_indexable(s, ctes, batch) { return false; }
+    }
+    any
+}
+
+/// Walk back from `idx` to the keyword that opens the enclosing statement
+/// (SELECT / UPDATE / DELETE / INSERT / MERGE) at the same paren depth.
+pub(crate) fn statement_start(tokens: &[Token<'_>], idx: usize) -> usize {
+    let mut depth = 0i32;
+    let mut k = idx;
+    while k > 0 {
+        k -= 1;
+        let t = &tokens[k];
+        if t.text == ")" { depth += 1; }
+        else if t.text == "(" {
+            // A `(` at depth 0 with no SELECT inside it is a grouping paren
+            // (`WHERE (a = 1 AND b > x)`), not a subquery: keep walking.
+            if depth > 0 { depth -= 1; }
+        } else if depth == 0 && (is_word(t, "SELECT") || is_word(t, "UPDATE") || is_word(t, "DELETE")
+            || is_word(t, "INSERT") || is_word(t, "MERGE")) {
+            // `INSERT INTO x SELECT ...` — the SELECT is the statement we want.
+            return k;
+        }
+    }
+    0
+}
+
+/// Is this Word token a statement-opening keyword (used to cut statements in
+/// scripts that never use `;`)?
+fn is_statement_kw(t: &Token<'_>) -> bool {
+    ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "DECLARE", "SET", "IF", "WHILE", "BEGIN", "END",
+     "ELSE", "OPEN", "FETCH", "CLOSE", "DEALLOCATE", "EXEC", "EXECUTE", "RAISERROR", "THROW", "RETURN",
+     "CREATE", "ALTER", "DROP", "TRUNCATE", "PRINT", "GO", "COMMIT", "ROLLBACK", "GRANT", "REVOKE",
+     "DENY", "USE", "WAITFOR", "BREAK", "CONTINUE", "GOTO", "TRY", "CATCH"]
+        .iter().any(|k| is_word(t, k))
+}
+
+/// End (exclusive) of the statement that starts at `start`: a `;` at depth 0,
+/// a depth-0 statement keyword (outside CASE…END), an unbalanced `)`, or EOF.
+pub(crate) fn statement_end(tokens: &[Token<'_>], start: usize) -> usize {
+    let mut depth = 0i32;
+    let mut case_depth = 0i32;
+    let mut j = start + 1;
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.text == "(" { depth += 1; }
+        else if t.text == ")" { depth -= 1; if depth < 0 { return j; } }
+        else if depth == 0 && t.text == ";" { return j; }
+        else if depth == 0 && t.kind == TokKind::Word && !t.text.starts_with('[') && !t.text.starts_with('"') {
+            let prev_dot = j > 0 && tokens[j - 1].text == ".";
+            if !prev_dot {
+                if is_word(t, "CASE") { case_depth += 1; }
+                else if is_word(t, "END") && case_depth > 0 { case_depth -= 1; }
+                else if is_word(t, "ELSE") && case_depth > 0 { /* CASE … ELSE */ }
+                else if is_word(t, "SELECT") && j == start { /* own keyword */ }
+                else if is_statement_kw(t) && case_depth == 0 {
+                    // `FOR UPDATE` / `UPDATE STATISTICS` / `SET` inside UPDATE are
+                    // parts of the same statement when they directly follow their
+                    // owner; everything else is a new statement.
+                    let prev = super::prev_significant(tokens, j);
+                    let owned = prev.map(|p| is_word(&tokens[p], "FOR") || (is_word(t, "SET") && is_word(&tokens[start], "UPDATE"))).unwrap_or(false)
+                        || (is_word(t, "SET") && is_word(&tokens[start], "UPDATE"));
+                    if !owned && j > start { return j; }
+                }
+            }
+        }
+        j += 1;
+    }
+    tokens.len()
+}
+
+/// Fixed / maximum in-row key bytes of a declared column type, for clustered
+/// key width. `n` is the declared length (chars for strings); `None` for a
+/// type we cannot size.
+pub(crate) fn type_key_bytes(type_lower: &str, n: Option<u32>, is_max: bool) -> Option<u32> {
+    if is_max { return None; }
+    Some(match type_lower {
+        "bit" | "tinyint" => 1,
+        "smallint" => 2,
+        "int" | "integer" | "smalldatetime" | "smallmoney" | "real" => 4,
+        "bigint" | "datetime" | "money" | "float" | "datetime2" | "rowversion" | "timestamp" => 8,
+        "date" => 3,
+        "time" => 5,
+        "datetimeoffset" => 10,
+        "uniqueidentifier" => 16,
+        "decimal" | "numeric" => 9,
+        "sysname" => 256,
+        "char" | "varchar" | "binary" | "varbinary" => n.unwrap_or(1),
+        "nchar" | "nvarchar" => n.unwrap_or(1) * 2,
+        _ => return None,
+    })
 }
 
 pub fn guid_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
@@ -227,16 +608,25 @@ pub fn guid_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+/// A clustered key wider than this many bytes is "wide": four INTs (16 bytes)
+/// or two BINARY(8)s plus a BIGINT (24) are ordinary composite keys; a
+/// VARCHAR(40) tacked onto three INTs (52) is where every nonclustered index
+/// starts paying for it.
+const WIDE_KEY_BYTES: u32 = 32;
+
 pub fn wide_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
 
-    for (open, close) in create_table_bodies(tokens) {
+    for (table, open, close) in create_table_bodies_named(tokens) {
+        // A #temp table or table variable is session-scoped and rarely carries
+        // nonclustered indexes, so there is nothing for a wide key to inflate.
+        if is_temp_or_var(&table) { continue; }
         let items = split_column_list(tokens, open, close);
 
-        // Build column -> type info for single-column key checks.
-        let mut col_info: Vec<(String, String, Option<u32>, usize)> = Vec::new();
-        // (col_name, type_name_lower, optional_n, name_token_idx)
+        // Build column -> type info for key-width checks.
+        let mut col_info: Vec<(String, String, Option<u32>, usize, bool)> = Vec::new();
+        // (col_name, type_name_lower, optional_n, name_token_idx, is_max)
         for &(s, e) in &items {
             if item_is_constraint(tokens, s, e) { continue; }
             let i = skip_comments(tokens, s);
@@ -247,15 +637,27 @@ pub fn wide_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
             let type_name = bare_name(&tokens[j]).to_ascii_lowercase();
             // optional (N)
             let mut n_val: Option<u32> = None;
+            let mut is_max = false;
             let k = skip_comments(tokens, j + 1);
             if k < e && tokens[k].text == "(" {
                 let nn = skip_comments(tokens, k + 1);
                 if nn < e && tokens[nn].kind == TokKind::Number {
                     n_val = tokens[nn].text.parse::<u32>().ok();
+                } else if nn < e && is_word(&tokens[nn], "MAX") {
+                    is_max = true;
                 }
             }
-            col_info.push((col_name, type_name, n_val, i));
+            col_info.push((col_name, type_name, n_val, i, is_max));
         }
+        // Measured key width in bytes from the declared types. Unknown types
+        // (aliases, CLR) count as 8 so they neither hide nor inflate a key.
+        let key_bytes = |cols: &[String]| -> u32 {
+            cols.iter().map(|c| {
+                col_info.iter().find(|(n, ..)| name_eq_ci(n, c))
+                    .and_then(|(_, ty, n, _, mx)| type_key_bytes(ty, *n, *mx))
+                    .unwrap_or(8)
+            }).sum()
+        };
 
         // Process constraints — wide composite PK CLUSTERED or wide-type single-column PK CLUSTERED.
         for &(s, e) in &items {
@@ -344,19 +746,20 @@ pub fn wide_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
                                     while cc < q && tokens[cc].kind != TokKind::Word { cc += 1; }
                                     if cc < q { cols.push(bare_name(&tokens[cc]).to_string()); }
                                 }
-                                if cols.len() >= 3 {
+                                let bytes = key_bytes(&cols);
+                                if cols.len() >= 2 && bytes > WIDE_KEY_BYTES {
                                     out.push(finding(
                                         "index.wide_clustered_key",
                                         Severity::Warning,
-                                        format!("Composite clustered key has {} columns — every nonclustered index will append all of them.", cols.len()),
+                                        format!("Composite clustered key has {} columns (~{} bytes) — every nonclustered index will append all of them.", cols.len(), bytes),
                                         Some(make_loc(&tokens[kc])),
                                         Some("Wide clustered keys auto-append to every nonclustered index, inflating storage. Use a narrow surrogate `INT`/`BIGINT IDENTITY` clustered key; enforce business uniqueness with separate UNIQUE constraints.".into()),
                                     ));
                                 } else if cols.len() == 1 {
                                     // Single-column wide-string check via col_info.
-                                    if let Some((_, type_name, n_val, name_idx)) = col_info
+                                    if let Some((_, type_name, n_val, name_idx, _)) = col_info
                                         .iter()
-                                        .find(|(n, _, _, _)| name_eq_ci(n, &cols[0]))
+                                        .find(|(n, ..)| name_eq_ci(n, &cols[0]))
                                     {
                                         let is_string_type = matches!(type_name.as_str(),
                                             "nvarchar" | "varchar" | "char" | "nchar");
@@ -388,6 +791,8 @@ pub fn wide_clustered_key(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn columnstore_candidate_aggregating_scan(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let ctes = cte_name_set(tokens);
+    let batches = batch_ids(tokens);
     let mut i = 0;
     while i < tokens.len() {
         if !is_word(&tokens[i], "SELECT") { i += 1; continue; }
@@ -498,7 +903,11 @@ pub fn columnstore_candidate_aggregating_scan(ctx: &RuleCtx) -> Vec<Finding> {
         // Accept 1, 2 (schema.name), or 3 (db.schema.name) as "single table".
         let single_table = !sees_join && word_count >= 1 && word_count <= 3;
 
-        if single_table {
+        // A columnstore can only be created on a persistent base table: not on
+        // a #temp / @table, a CTE, a DMV / catalog view, or a TVF result.
+        let indexable = !all_sources_non_indexable(tokens, stmt_start, stmt_end, &ctes, batches[stmt_start]);
+
+        if single_table && indexable {
             out.push(finding(
                 "index.missing_columnstore_opportunity",
                 Severity::Info,
@@ -515,6 +924,8 @@ pub fn columnstore_candidate_aggregating_scan(ctx: &RuleCtx) -> Vec<Finding> {
 
 pub fn filtered_index_opportunity(ctx: &RuleCtx) -> Vec<Finding> {
     let tokens = ctx.tokens;
+    let ctes = cte_name_set(tokens);
+    let batches = batch_ids(tokens);
     // Fire only once per file.
     let mut i = 0;
     while i < tokens.len() {
@@ -555,10 +966,22 @@ pub fn filtered_index_opportunity(ctx: &RuleCtx) -> Vec<Finding> {
             continue;
         }
         let ident_idx = p;
+        // The operand must be a column reference. `WHERE @flag = 0` is a
+        // branch switch on a variable — there is no column to index.
+        if is_temp_or_var(tokens[p].text) { i = where_end + 1; continue; }
         // Optionally consume `<ident>.<ident>` qualifications.
         let mut q = p + 1;
+        let mut qualifier: Option<String> = None;
         while q + 1 < where_end && tokens[q].text == "." && tokens[q + 1].kind == TokKind::Word {
+            if qualifier.is_none() { qualifier = Some(norm_ident(tokens[p].text)); }
             q += 2;
+        }
+        let col_idx = q - 1;
+        // The predicate must sit on a statement whose sources can take an
+        // index — not a #temp / @table, CTE, DMV, catalog view or TVF.
+        let stmt_start = statement_start(tokens, i);
+        if all_sources_non_indexable(tokens, stmt_start, where_end, &ctes, batches[i]) {
+            i = where_end + 1; continue;
         }
         // skip comments
         while q < where_end && tokens[q].kind == TokKind::Comment { q += 1; }
@@ -577,10 +1000,19 @@ pub fn filtered_index_opportunity(ctx: &RuleCtx) -> Vec<Finding> {
             } else { false }
         } else if is_word(&tokens[q], "IS") {
             let r = skip_comments(tokens, q + 1);
-            r < where_end && is_word(&tokens[r], "NULL")
+            let is_null = r < where_end && is_word(&tokens[r], "NULL");
+            // `LEFT JOIN x ... WHERE x.col IS NULL` is the anti-join idiom: the
+            // NULL comes from the outer join, not from a nullable column.
+            let anti_join = is_null && qualifier.as_ref().map(|qn| {
+                statement_sources(tokens, stmt_start, where_end).iter().any(|s| s.outer
+                    && (s.alias.as_deref() == Some(qn.as_str())
+                        || s.name.rsplit('.').next() == Some(qn.as_str())))
+            }).unwrap_or(false);
+            is_null && !anti_join
         } else {
             false
         };
+        let _ = col_idx;
 
         if matched {
             return vec![finding(
@@ -626,10 +1058,23 @@ pub fn clustered_index_guid_no_fillfactor(ctx: &RuleCtx) -> Vec<Finding> {
         }
         let col_name = bare_name(&tokens[q]).to_string();
         let lower = col_name.to_ascii_lowercase();
-        let guid_hint = lower.contains("guid")
-            || lower.contains("uniqueidentifier")
-            || lower.ends_with("_id")
-            || lower.ends_with("uid");
+        // Which table? `ON <table> (` — the name right before the column list.
+        let on_tok = (m..p).find(|&x| is_word(&tokens[x], "ON"));
+        let table = on_tok.map(|o| table_name_after(tokens, o)).unwrap_or_default();
+        // A #temp table is filled once by the proc that owns it; page splits
+        // on random inserts are not its problem.
+        if is_temp_or_var(&table) { i = p + 1; continue; }
+        // The declared type is authoritative when the table is declared in
+        // this file: uniqueidentifier, or a NEWID() / NEWSEQUENTIALID()
+        // default. `database_id INT` and `session_id SMALLINT` are not GUIDs,
+        // however their names end.
+        let guid_hint = match declared_column_is_guid(tokens, &table, &lower) {
+            Some(declared) => declared,
+            None => lower.contains("guid")
+                || lower.contains("uniqueidentifier")
+                || lower.ends_with("uid")
+                || lower.contains("uuid"),
+        };
         if !guid_hint { i = p + 1; continue; }
 
         // Find end of statement.
@@ -664,6 +1109,28 @@ pub fn clustered_index_guid_no_fillfactor(ctx: &RuleCtx) -> Vec<Finding> {
     out
 }
 
+
+/// Is column `col` of table `table` (both normalized) declared in this file as a
+/// GUID — `uniqueidentifier`, or defaulted to NEWID() / NEWSEQUENTIALID()?
+/// `None` when the table / column is not declared here.
+fn declared_column_is_guid(tokens: &[Token<'_>], table: &str, col: &str) -> Option<bool> {
+    if table.is_empty() { return None; }
+    for (name, open, close) in create_table_bodies_named(tokens) {
+        if name != table { continue; }
+        for (s, e) in split_column_list(tokens, open, close) {
+            if item_is_constraint(tokens, s, e) { continue; }
+            let i = skip_comments(tokens, s);
+            if i >= e || tokens[i].kind != TokKind::Word { continue; }
+            if norm_ident(tokens[i].text) != col { continue; }
+            let j = skip_comments(tokens, i + 1);
+            let is_guid = j < e && is_word(&tokens[j], "uniqueidentifier");
+            let guid_default = (j..e).any(|k| is_word(&tokens[k], "NEWID") || is_word(&tokens[k], "NEWSEQUENTIALID"));
+            return Some(is_guid || guid_default);
+        }
+        return None;
+    }
+    None
+}
 
 /// The table name following a `TABLE` keyword at `idx`, lowercased and stripped
 /// of delimiters and schema (`[Person].[Address]` -> `address`).
@@ -752,7 +1219,10 @@ pub fn nullable_columns_should_be_explicit(ctx: &RuleCtx) -> Vec<Finding> {
         "uniqueidentifier", "xml", "sql_variant", "rowversion", "timestamp", "hierarchyid",
     ];
 
-    for (open, close) in create_table_bodies(tokens) {
+    for (table, open, close) in create_table_bodies_named(tokens) {
+        // A #temp table lives and dies inside one session of one proc; the
+        // "differs between callers" hazard does not apply.
+        if is_temp_or_var(&table) { continue; }
         let items = split_column_list(tokens, open, close);
         for &(s, e) in &items {
             if out.len() >= 3 { return out; }
@@ -763,6 +1233,11 @@ pub fn nullable_columns_should_be_explicit(ctx: &RuleCtx) -> Vec<Finding> {
             if j >= e || tokens[j].kind != TokKind::Word { continue; }
             let type_name = bare_name(&tokens[j]).to_ascii_lowercase();
             if !known_types.iter().any(|k| k.eq_ignore_ascii_case(&type_name)) { continue; }
+            // IDENTITY, PRIMARY KEY and ROWGUIDCOL columns are NOT NULL by
+            // definition — nullability never falls back to the session.
+            if (j..e).any(|k| is_word(&tokens[k], "IDENTITY") || is_word(&tokens[k], "PRIMARY") || is_word(&tokens[k], "ROWGUIDCOL")) {
+                continue;
+            }
 
             // Scan rest of column item for NULL or NOT NULL at top level.
             let mut k = j + 1;
@@ -814,7 +1289,21 @@ pub fn nullable_columns_should_be_explicit(ctx: &RuleCtx) -> Vec<Finding> {
 pub fn heap_table(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
-    for (open, close) in create_table_bodies(tokens) {
+    for (table, open, close) in create_table_bodies_named(tokens) {
+        // Temp tables are the documented exception (short-lived staging).
+        if is_temp_or_var(&table) { continue; }
+        // A table whose every column is a LOB / XML / spatial type cannot have
+        // a clustered key at all, so "add one" is advice nobody can take.
+        if !split_column_list(tokens, open, close).into_iter().any(|(s, e)| {
+            if item_is_constraint(tokens, s, e) { return false; }
+            let i = skip_comments(tokens, s);
+            let j = skip_comments(tokens, i + 1);
+            if j >= e || tokens[j].kind != TokKind::Word { return false; }
+            let ty = bare_name(&tokens[j]).to_ascii_lowercase();
+            let is_max = tokens.get(j + 1).map(|t| t.text == "(").unwrap_or(false)
+                && tokens.get(j + 2).map(|t| is_word(t, "MAX")).unwrap_or(false);
+            !(is_max || matches!(ty.as_str(), "xml" | "text" | "ntext" | "image" | "geography" | "geometry"))
+        }) { continue; }
         // Scan the body for any signal of a clustered structure.
         let mut has_clustered_structure = false;
         let mut k = open;
@@ -1036,12 +1525,54 @@ fn is_conversion_target(tokens: &[Token<'_>], type_idx: usize) -> bool {
     false
 }
 
+/// Token ranges where a type name is a *column definition*: CREATE TABLE
+/// bodies, `DECLARE @t TABLE ( … )` bodies, and `ALTER TABLE … ADD/ALTER COLUMN`
+/// statements. `OPENJSON … WITH (x nvarchar(max) AS JSON)` (where MAX is
+/// mandatory), `RETURNS nvarchar(max)` and CLR `RETURNS TABLE (…)` signatures
+/// are not column design and carry no referent for the advice.
+fn column_definition_ranges(tokens: &[Token<'_>]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = create_table_bodies(tokens);
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if is_word(t, "DECLARE") {
+            let v = skip_comments(tokens, i + 1);
+            let tb = skip_comments(tokens, v + 1);
+            let tb = if tb < tokens.len() && is_word(&tokens[tb], "AS") { skip_comments(tokens, tb + 1) } else { tb };
+            if v < tokens.len() && tokens[v].text.starts_with('@') && tb < tokens.len() && is_word(&tokens[tb], "TABLE") {
+                let mut k = skip_comments(tokens, tb + 1);
+                if k < tokens.len() && tokens[k].text == "(" {
+                    let open = k;
+                    let mut depth = 0i32;
+                    while k < tokens.len() {
+                        if tokens[k].text == "(" { depth += 1; }
+                        else if tokens[k].text == ")" { depth -= 1; if depth == 0 { break; } }
+                        k += 1;
+                    }
+                    out.push((open, k));
+                    i = k + 1;
+                    continue;
+                }
+            }
+        } else if is_word(t, "ALTER") && tokens.get(i + 1).map(|n| is_word(n, "TABLE")).unwrap_or(false) {
+            let end = statement_end(tokens, i);
+            out.push((i, end));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 pub fn varchar_max_overuse(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     let tokens = ctx.tokens;
+    let ranges = column_definition_ranges(tokens);
     let mut count = 0;
     for (i, t) in tokens.iter().enumerate() {
         if t.kind != TokKind::Word { continue; }
+        if !ranges.iter().any(|&(s, e)| i > s && i < e) { continue; }
         let ty = t.text.to_ascii_uppercase();
         if ty != "VARCHAR" && ty != "NVARCHAR" { continue; }
         // pattern: <type> ( MAX )

@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "tempdb.spill_risk_large_sort"
+  ],
+  "also_fires": [
+    "hygiene.cursor"
+  ],
+  "server_version": 2022,
+  "category": "tempdb"
+}

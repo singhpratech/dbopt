@@ -29,7 +29,7 @@ or the server's real usage.
 
 **Proof.**
 - The static analyzer runs **104 rules** in milliseconds with a self-graded **F1 = 1.000** on our
-  312-scenario corpus (covering every rule, plus 13 more for the 12 plan-XML/DMV checks) — so the flags it's tested on are precise, not noise.
+  447-scenario corpus (covering every rule, plus 13 more for the 12 plan-XML/DMV checks) — so the flags it's tested on are precise, not noise.
 - It is fast enough that scale is not the interesting part: linting is a token pass, so a
   multi-megabyte directory finishes in well under a second on a laptop. What matters is that
   findings arrive **grouped into a handful of ranked cards**, not as a flat dump. Measure it on
@@ -124,7 +124,7 @@ Server 2014–2025, AWS RDS for SQL Server, and Azure SQL MI/DB.
 *"Will it help my team, and can I trust the output?"*
 
 - **Trust:** live-tested against SQL Server **2025**; 2014–2022 are supported static-analysis targets; static-rule self-graded **F1 = 1.000**
-  across 312 tagged scenarios (every rule covered); **never reads your data**; never auto-executes changes.
+  across 447 tagged scenarios (every rule covered), a **5.4 % measured false-positive rate** on 6.6 MB of expert T-SQL we did not write, and a reproducible **blind trial** (`tools/blind-trial/`, 18 / 18 planted defects found); **never reads your data**; never auto-executes changes.
 - **Coverage:** version-aware 2014→2025 (a 2022 rewrite is never suggested against a 2019 target). Live Watch/Query-Store surfaces need 2016+.
 - **Adoption is low-friction:** a developer can get value with **zero database access** (static
   analysis) on day one, then opt into deeper, connection-backed analysis as access is granted.

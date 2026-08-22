@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.heap_table"
+  ],
+  "also_fires": [
+    "datatype.datetime_legacy"
+  ],
+  "server_version": 2022,
+  "category": "hygiene"
+}

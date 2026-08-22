@@ -1,0 +1,7 @@
+{
+  "also_fires": [],
+  "category": "hygiene",
+  "must_fire": ["hygiene.global_temp_table"],
+  "must_not_fire": [],
+  "server_version": 2022
+}

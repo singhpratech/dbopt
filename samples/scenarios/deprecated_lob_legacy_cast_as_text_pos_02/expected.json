@@ -1,0 +1,7 @@
+{
+  "also_fires": [],
+  "category": "deprecated",
+  "must_fire": ["deprecated.lob_legacy_types"],
+  "must_not_fire": [],
+  "server_version": 2022
+}

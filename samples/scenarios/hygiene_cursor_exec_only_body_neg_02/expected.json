@@ -1,0 +1,11 @@
+{
+  "must_fire": [],
+  "must_not_fire": [
+    "hygiene.cursor"
+  ],
+  "also_fires": [
+    "hygiene.exec_string_no_sp_executesql"
+  ],
+  "server_version": 2022,
+  "category": "hygiene"
+}

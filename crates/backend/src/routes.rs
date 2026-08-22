@@ -247,6 +247,7 @@ async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
             // Monitor read-back: how persistently the missing-index DMV has
             // suggested each table across daily snapshots (empty if unmonitored).
             sentinel_api::attach_missing_index_history(&mut bundle, &req);
+            sentinel_api::attach_index_usage_history(&mut bundle, &req);
             let recommendations = analyzer_core::dmv::advise(&bundle);
             let advice = analyzer_core::dmv::analyze(&bundle);
             // Honest transparency: how many tables the live Query-Store workload
@@ -274,6 +275,11 @@ async fn advise(ApiJson(req): ApiJson<ConnectReq>) -> impl IntoResponse {
                     // missing-index snapshots (`[]` when unmonitored).
                     "missing_index_history": bundle.missing_index_history,
                     "missing_index_history_days": sentinel_api::MISSING_INDEX_HISTORY_DAYS,
+                    // How many indexes/heaps the physical pass measured
+                    // (sys.dm_db_index_physical_stats). 0 means fragmentation,
+                    // fill factor and forwarded records were NOT measured on
+                    // this scan (timed out or unreadable) — not that they are fine.
+                    "physical_stats_rows": bundle.physical.len(),
                 })),
             )
                 .into_response()
@@ -552,11 +558,17 @@ pub struct QStoreTopReq {
     pub conn: ConnectReq,
     /// How many queries to return (clamped 1..=200 server-side; default 20).
     pub limit: Option<u32>,
+    /// `total_cpu` (default) | `total_reads` | `total_duration` | `avg_duration` | `executions`.
+    #[serde(default)]
+    pub sort: Option<sqlserver::TopQuerySort>,
 }
 
 async fn qstore_top(ApiJson(req): ApiJson<QStoreTopReq>) -> impl IntoResponse {
-    match sqlserver::query_store_top_queries(&req.conn, req.limit.unwrap_or(20)).await {
-        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "queries": rows }))).into_response(),
+    let sort = req.sort.unwrap_or_default();
+    match sqlserver::query_store_top_queries(&req.conn, req.limit.unwrap_or(20), sort).await {
+        // `sort_key` names the ranking so a consumer never assumes avg duration;
+        // single-execution DDL / bulk statements are dropped server-side.
+        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "queries": rows, "sort_key": sort.label(), "excludes": "single-execution DDL/bulk statements" }))).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }

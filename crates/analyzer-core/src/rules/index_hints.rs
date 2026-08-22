@@ -18,6 +18,7 @@
 // When unsure we drop the finding rather than emit noise.
 
 use super::{finding, is_batch_separator, is_keyword_at, is_word, make_loc, next_significant, RuleCtx};
+use super::index_design::{is_system_source, norm_ident};
 use crate::findings::{Finding, Severity};
 use crate::tokens::{Token, TokKind};
 
@@ -62,6 +63,11 @@ struct SelectStmt {
     range_cols: Vec<ColRef>,
     /// ORDER BY columns (bare), in source order. Empty when no ORDER BY.
     order_cols: Vec<ColRef>,
+    /// Statement has a GROUP BY: the ORDER BY then sorts the aggregate output,
+    /// which no index on the base table can pre-order.
+    has_group_by: bool,
+    /// `TOP 1` / `TOP (1)`: a trivial top-N, not a sort worth an index.
+    top_one: bool,
 }
 
 /// Walk the whole token stream and return every single-base-table SELECT we can
@@ -88,8 +94,18 @@ fn cte_names(tokens: &[Token<'_>]) -> std::collections::HashSet<(u32, String)> {
         if name.kind != TokKind::Word {
             continue;
         }
-        let is_cte = tokens.get(i + 2).map(|n| is_word(n, "AS")).unwrap_or(false)
-            && tokens.get(i + 3).map(|n| n.text == "(").unwrap_or(false);
+        // `WITH name AS (` and the column-list form `WITH name (c1, c2) AS (`.
+        let mut k = i + 2;
+        if tokens.get(k).map(|n| n.text == "(").unwrap_or(false) {
+            let mut depth = 0i32;
+            while k < tokens.len() {
+                if tokens[k].text == "(" { depth += 1; }
+                else if tokens[k].text == ")" { depth -= 1; if depth == 0 { k += 1; break; } }
+                k += 1;
+            }
+        }
+        let is_cte = tokens.get(k).map(|n| is_word(n, "AS")).unwrap_or(false)
+            && tokens.get(k + 1).map(|n| n.text == "(").unwrap_or(false);
         if is_cte {
             names.insert((batch, name.text.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase()));
         }
@@ -183,7 +199,10 @@ fn parse_single_table_selects(tokens: &[Token<'_>]) -> Vec<SelectStmt> {
             let system_object = schema.starts_with("sys.")
                 || schema.starts_with("[sys].")
                 || schema.starts_with("information_schema.")
-                || schema.starts_with("[information_schema].");
+                || schema.starts_with("[information_schema].")
+                // `msdb.dbo.sysjobs`, `master.dbo.syslogins`, `tempdb.sys.database_files`,
+                // `msdb.INFORMATION_SCHEMA.COLUMNS` — system objects nobody can index.
+                || is_system_source(&norm_ident(&schema).split('.').map(norm_ident).collect::<Vec<_>>().join("."));
             if !ctes.contains(&(batch, short)) && !system_object {
                 out.push(stmt);
             }
@@ -268,6 +287,21 @@ fn parse_one(tokens: &[Token<'_>], select_tok: usize, stmt_end: usize) -> Option
         Vec::new()
     };
 
+    // TOP 1 / TOP (1) right after SELECT [DISTINCT].
+    let top_one = {
+        let mut k = skip_comments(tokens, select_tok + 1);
+        if k < stmt_end && is_word(&tokens[k], "DISTINCT") { k = skip_comments(tokens, k + 1); }
+        if k < stmt_end && is_word(&tokens[k], "TOP") {
+            let n = skip_comments(tokens, k + 1);
+            if n < stmt_end && tokens[n].text == "(" {
+                let v = skip_comments(tokens, n + 1);
+                v < stmt_end && tokens[v].text == "1" && tokens.get(v + 1).map(|t| t.text == ")").unwrap_or(false)
+            } else {
+                n < stmt_end && tokens[n].text == "1"
+            }
+        } else { false }
+    };
+
     Some(SelectStmt {
         select_tok,
         table_ref,
@@ -276,6 +310,8 @@ fn parse_one(tokens: &[Token<'_>], select_tok: usize, stmt_end: usize) -> Option
         eq_cols,
         range_cols,
         order_cols,
+        has_group_by: clauses.group.is_some(),
+        top_one,
     })
 }
 
@@ -887,6 +923,96 @@ fn declared_indexes(tokens: &[Token<'_>]) -> Vec<DeclaredIndex> {
             include_cols,
         });
     }
+    out.extend(declared_key_constraints(tokens));
+    out
+}
+
+/// PRIMARY KEY / UNIQUE constraints are indexes too. `CREATE TABLE t (... PRIMARY
+/// KEY CLUSTERED (a, b))`, the inline `a int PRIMARY KEY`, and `ALTER TABLE t
+/// [WITH CHECK] ADD CONSTRAINT pk PRIMARY KEY (a, b)` all give a seek on their
+/// leading column. Missing them meant recommending an index on a table's own
+/// primary key declared a few thousand lines earlier in the same file.
+fn declared_key_constraints(tokens: &[Token<'_>]) -> Vec<DeclaredIndex> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        let is_pk = is_word(t, "PRIMARY") && tokens.get(i + 1).map(|n| is_word(n, "KEY")).unwrap_or(false);
+        let is_unique = is_word(t, "UNIQUE")
+            && !tokens.get(i + 1).map(|n| is_word(n, "INDEX") || is_word(n, "CLUSTERED") && tokens.get(i + 2).map(|m| is_word(m, "INDEX")).unwrap_or(false)).unwrap_or(false);
+        if !(is_pk || is_unique) { continue; }
+        // After PRIMARY KEY / UNIQUE: optional CLUSTERED | NONCLUSTERED, then
+        // either `(` (column list) or nothing (inline column constraint).
+        let mut k = skip_comments(tokens, if is_pk { i + 2 } else { i + 1 });
+        if tokens.get(k).map(|n| is_word(n, "CLUSTERED") || is_word(n, "NONCLUSTERED")).unwrap_or(false) {
+            k = skip_comments(tokens, k + 1);
+        }
+        let inline = tokens.get(k).map(|n| n.text != "(").unwrap_or(true);
+
+        // Owning table: walk back to the nearest CREATE TABLE / ALTER TABLE,
+        // tracking parens so we stop at the body's `(` for CREATE TABLE.
+        let mut depth = 0i32;
+        let mut b = i;
+        let mut body_open: Option<usize> = None;
+        let mut table_tok: Option<usize> = None;
+        while b > 0 {
+            b -= 1;
+            let x = &tokens[b];
+            if x.text == ")" { depth += 1; }
+            else if x.text == "(" {
+                if depth == 0 { body_open = Some(b); }
+                else { depth -= 1; }
+            } else if depth == 0 && is_word(x, "TABLE") && b > 0
+                && (is_word(&tokens[b - 1], "CREATE") || is_word(&tokens[b - 1], "ALTER")) {
+                table_tok = Some(b);
+                break;
+            } else if depth == 0 && (is_batch_separator(tokens, b) || x.text == ";") {
+                break;
+            }
+        }
+        let Some(tt) = table_tok else { continue };
+        // table name: Word (. Word)* — stop at the first word not joined by a dot
+        // (`ALTER TABLE t WITH CHECK ADD` must not swallow WITH CHECK ADD).
+        let mut table = String::new();
+        let mut q = skip_comments(tokens, tt + 1);
+        if tokens.get(q).map(|t| t.kind != TokKind::Word).unwrap_or(true) { continue; }
+        table.push_str(tokens[q].text);
+        loop {
+            let d = skip_comments(tokens, q + 1);
+            if tokens.get(d).map(|t| t.text == ".").unwrap_or(false) {
+                let n = skip_comments(tokens, d + 1);
+                if tokens.get(n).map(|t| t.kind == TokKind::Word).unwrap_or(false) {
+                    table.push('.');
+                    table.push_str(tokens[n].text);
+                    q = n;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        let key_cols: Vec<String> = if inline {
+            // Inline constraint: the column is the first word of this item.
+            let Some(open) = body_open else { continue };
+            let mut item_start = open + 1;
+            let mut d = 0i32;
+            for m in (open + 1)..i {
+                if tokens[m].text == "(" { d += 1; }
+                else if tokens[m].text == ")" { d -= 1; }
+                else if d == 0 && tokens[m].text == "," { item_start = m + 1; }
+            }
+            let c = skip_comments(tokens, item_start);
+            if tokens.get(c).map(|n| n.kind != TokKind::Word).unwrap_or(true) { continue; }
+            vec![bare(&tokens[c]).to_string()]
+        } else {
+            let Some((cols, _)) = column_list(tokens, k) else { continue };
+            cols
+        };
+        out.push(DeclaredIndex {
+            name: if is_pk { "PK".into() } else { "UQ".into() },
+            table: table_short_name(&table),
+            key_cols,
+            include_cols: Vec::new(),
+        });
+    }
     out
 }
 
@@ -1098,6 +1224,9 @@ pub fn order_by_forces_sort(ctx: &RuleCtx) -> Vec<Finding> {
     let mut out = Vec::new();
     for stmt in parse_single_table_selects(ctx.tokens) {
         if stmt.order_cols.is_empty() { continue; }
+        // After a GROUP BY the sort is over aggregate output — no base-table
+        // index returns that pre-ordered. TOP 1 is a trivial top-N.
+        if stmt.has_group_by || stmt.top_one { continue; }
 
         // If the ORDER BY leading column is itself an equality-filtered column,
         // a single-value filter makes the sort trivial — skip (low value, risk

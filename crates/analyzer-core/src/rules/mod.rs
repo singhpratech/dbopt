@@ -281,3 +281,161 @@ pub(crate) fn finding(rule: &str, sev: Severity, msg: impl Into<String>, loc: Op
         object: None,
     }
 }
+
+// ===========================================================================
+// Shared predicate-context helpers.
+//
+// Most sargability advice is only meaningful inside a *search condition*: a
+// WHERE / JOIN ON / HAVING. The same token shapes appear in select lists,
+// `SET @x = …`, `CASE WHEN` expressions that build strings, `IF @a = 1 OR …`
+// control flow, PRINT, parameter defaults and named EXEC arguments — and there
+// is no index to lose in any of them. A rule that does not scope itself to a
+// search condition reports a lost seek on code that never touches an index.
+// ===========================================================================
+
+/// `@var` / `@@SYSVAR` — a variable or parameter, never a column.
+pub(crate) fn is_variable(t: &Token) -> bool {
+    t.kind == TokKind::Word && t.text.starts_with('@')
+}
+
+/// Does the object reference that starts at token `i` name a system source —
+/// `sys.x`, `INFORMATION_SCHEMA.x`, `<db>.sys.x`, `<db>.INFORMATION_SCHEMA.x`,
+/// or a `sys.dm_*` / `sys.fn_*` function? These are nvarchar-typed catalog
+/// views with no user index to design for.
+pub(crate) fn is_system_source(tokens: &[Token], i: usize) -> bool {
+    let sys_word = |k: usize| {
+        tokens
+            .get(k)
+            .map(|t| is_word(t, "sys") || is_word(t, "information_schema"))
+            .unwrap_or(false)
+    };
+    let dot = |k: usize| tokens.get(k).map(|t| t.text == ".").unwrap_or(false);
+    let Some(t) = tokens.get(i) else { return false };
+    if t.kind != TokKind::Word {
+        return false;
+    }
+    (sys_word(i) && dot(i + 1)) || (dot(i + 1) && sys_word(i + 2) && dot(i + 3))
+}
+
+/// For every token, the id of the search condition it sits in — `0` when it is
+/// not inside a WHERE / JOIN ON / HAVING at all. Each WHERE / ON / HAVING opens
+/// a fresh id; a subquery's SELECT list is `0` again and its own WHERE gets a
+/// new id; when the subquery's parentheses close, the enclosing condition's id
+/// resumes. The result is one `O(n)` pass — compute it once per rule.
+///
+/// What closes a condition (at the depth it opened): a new clause or statement
+/// keyword (SELECT, FROM, GROUP, ORDER, SET, INSERT, UPDATE, DELETE, MERGE,
+/// VALUES, OUTPUT, INTO, OPTION, UNION, EXCEPT, INTERSECT, FOR), control flow
+/// (IF, WHILE, BEGIN, RETURN, PRINT, RAISERROR, THROW, GOTO, ELSE and END when
+/// they are not part of a CASE, WHEN when it is not part of a CASE — i.e. a
+/// MERGE's WHEN MATCHED), declarations and DDL (DECLARE, CREATE, ALTER, DROP,
+/// GRANT, …), EXEC, a new JOIN / APPLY source, `;`, or a batch-separating GO.
+///
+/// `ON` opens a condition only while the current statement is DML: in
+/// `CREATE INDEX … ON dbo.T (col)`, `SET NOCOUNT ON` or `ON [PRIMARY]` it is a
+/// target or an option, not a predicate.
+pub(crate) fn search_condition_ids(tokens: &[Token]) -> Vec<u32> {
+    #[derive(Clone, Copy)]
+    struct Frame {
+        cond: u32,
+        case_depth: u32,
+        dml: bool,
+        /// Inside an `UPDATE … SET … FROM … JOIN … ON`: the SET is a clause of
+        /// the UPDATE, not a `SET @x = …` statement, and the JOIN's ON that
+        /// follows it is still a predicate.
+        in_update: bool,
+    }
+    const CLOSERS: &[&str] = &[
+        "SELECT", "FROM", "GROUP", "ORDER", "SET", "INSERT", "UPDATE", "DELETE", "MERGE",
+        "VALUES", "OUTPUT", "INTO", "OPTION", "UNION", "EXCEPT", "INTERSECT", "FOR",
+        "IF", "WHILE", "BEGIN", "RETURN", "PRINT", "RAISERROR", "THROW", "GOTO", "BREAK",
+        "CONTINUE", "WAITFOR", "DECLARE", "CREATE", "ALTER", "DROP", "GRANT", "REVOKE",
+        "DENY", "EXEC", "EXECUTE", "USE", "OPEN", "FETCH", "CLOSE", "DEALLOCATE",
+        "TRUNCATE", "COMMIT", "ROLLBACK", "SAVE", "BACKUP", "RESTORE", "DBCC", "KILL",
+        "JOIN", "APPLY", "PIVOT", "UNPIVOT",
+    ];
+    const DML: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"];
+    const NOT_DML: &[&str] = &[
+        "CREATE", "ALTER", "DROP", "SET", "GRANT", "REVOKE", "DENY", "DECLARE", "EXEC",
+        "EXECUTE", "BACKUP", "RESTORE", "DBCC", "USE",
+    ];
+
+    let mut ids = vec![0u32; tokens.len()];
+    let mut next_id = 0u32;
+    let mut stack: Vec<Frame> = vec![Frame { cond: 0, case_depth: 0, dml: true, in_update: false }];
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind == TokKind::Comment {
+            continue;
+        }
+        if t.text == "(" {
+            let top = *stack.last().unwrap();
+            ids[i] = top.cond;
+            stack.push(Frame { cond: top.cond, case_depth: 0, dml: top.dml, in_update: top.in_update });
+            continue;
+        }
+        if t.text == ")" {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+            ids[i] = stack.last().unwrap().cond;
+            continue;
+        }
+        let top = stack.last_mut().unwrap();
+        if t.text == ";" || is_batch_separator(tokens, i) {
+            top.cond = 0;
+            top.case_depth = 0;
+            top.dml = true;
+            top.in_update = false;
+            ids[i] = 0;
+            continue;
+        }
+        if t.kind == TokKind::Word {
+            if is_keyword_at(tokens, i, "CASE") {
+                top.case_depth += 1;
+            } else if is_keyword_at(tokens, i, "END") && top.case_depth > 0 {
+                top.case_depth -= 1;
+            } else if (is_keyword_at(tokens, i, "END")
+                || is_keyword_at(tokens, i, "ELSE")
+                || is_keyword_at(tokens, i, "WHEN"))
+                && top.case_depth == 0
+            {
+                // Block END / IF-ELSE / MERGE WHEN — none of them belongs to a CASE.
+                top.cond = 0;
+            } else if is_keyword_at(tokens, i, "WHERE") || is_keyword_at(tokens, i, "HAVING") {
+                next_id += 1;
+                top.cond = next_id;
+                top.case_depth = 0;
+            } else if is_keyword_at(tokens, i, "ON") {
+                if top.dml {
+                    next_id += 1;
+                    top.cond = next_id;
+                    top.case_depth = 0;
+                }
+                // else: DDL target / option — leave the state alone.
+            } else if CLOSERS.iter().any(|kw| is_keyword_at(tokens, i, kw)) {
+                top.cond = 0;
+                top.case_depth = 0;
+                if DML.iter().any(|kw| is_keyword_at(tokens, i, kw)) {
+                    top.dml = true;
+                    top.in_update = is_keyword_at(tokens, i, "UPDATE");
+                } else if is_keyword_at(tokens, i, "SET") && top.in_update {
+                    // UPDATE's SET clause — still DML, ON still opens.
+                } else if NOT_DML.iter().any(|kw| is_keyword_at(tokens, i, kw)) {
+                    top.dml = false;
+                    top.in_update = false;
+                }
+            }
+        }
+        ids[i] = stack.last().unwrap().cond;
+    }
+    ids
+}
+
+/// Is token `i` inside a WHERE / JOIN ON / HAVING search condition? Convenience
+/// wrapper over [`search_condition_ids`]; it re-walks the prefix on every call,
+/// so a rule that asks for many tokens should compute the ids once instead.
+#[allow(dead_code)]
+pub(crate) fn search_condition_context(tokens: &[Token], i: usize) -> bool {
+    let upto = (i + 1).min(tokens.len());
+    search_condition_ids(&tokens[..upto]).get(i).map(|id| *id != 0).unwrap_or(false)
+}
