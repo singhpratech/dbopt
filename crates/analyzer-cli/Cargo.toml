@@ -14,7 +14,7 @@ name = "dbopt"
 path = "src/main.rs"
 
 [dependencies]
-analyzer-core = { package = "dbopt-core", path = "../analyzer-core", version = "0.4.1" }
+analyzer-core = { package = "dbopt-core", path = "../analyzer-core", version = "0.4.2" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 walkdir = "2"

@@ -423,6 +423,12 @@ ORDER BY o.Total DESC;</textarea>
            measured rows and reserved space, read from <code>sys.dm_db_partition_stats</code> and shown
            beside the finding. Size orders findings within a severity; it never promotes a tuning
            opportunity above something that is actually breaking.</p></div>
+      <div class="row"><h3>Says what it measured — and what it didn't</h3>
+        <p>Usage-based advice is only as old as the DMV counters behind it, and SQL Server resets those on
+           every restart. Each index recommendation now shows the reads and writes actually recorded, says
+           <em>no usage recorded since restart</em> when there are none, and drops to “estimated” rather than
+           pretending a zero was measured. The health headline is the worst of all three lanes, so a
+           database that has never been backed up cannot grade as excellent because its queries are fast.</p></div>
       <div class="row"><h3>Cited reasoning</h3>
         <p>Each finding explains what the optimizer does and how the rewrite changes the plan, so you can
            argue it in review rather than take it on faith.</p></div>
@@ -506,7 +512,7 @@ ORDER BY o.Total DESC;</textarea>
       silent when they shouldn't.</p>
     <div class="stats">
       <div class="stat"><b>103</b><span>Analyzer rules</span></div>
-      <div class="stat"><b>312</b><span>Eval scenarios</span></div>
+      <div class="stat"><b>318</b><span>Eval scenarios</span></div>
       <div class="stat"><b>1.000</b><span>Precision · recall · F1</span></div>
       <div class="stat"><b>$0</b><span>Per-seat cost</span></div>
     </div>
